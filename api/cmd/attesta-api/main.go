@@ -18,6 +18,12 @@ import (
 
 func main() {
 	cfg := config.Load()
+	if err := cfg.Validate(); err != nil {
+		log.Fatal(err)
+	}
+	if cfg.APIToken == "" {
+		log.Printf("WARNING: ATTESTA_INSECURE_NO_AUTH is set; /api/ routes accept unauthenticated requests")
+	}
 
 	ctx := context.Background()
 	store, closer, err := catalog.Open(ctx, cfg.DatabaseURL)

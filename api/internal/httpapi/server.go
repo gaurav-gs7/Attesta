@@ -1073,8 +1073,11 @@ func (s *Server) auth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		token := r.Header.Get("X-Attesta-Token")
-		if subtle.ConstantTimeCompare([]byte(token), []byte(s.apiToken)) != 1 {
+		// Hash both sides so the comparison runs in constant time regardless of
+		// the presented token's length.
+		got := sha256.Sum256([]byte(r.Header.Get("X-Attesta-Token")))
+		want := sha256.Sum256([]byte(s.apiToken))
+		if subtle.ConstantTimeCompare(got[:], want[:]) != 1 {
 			writeError(w, http.StatusUnauthorized, "missing or invalid Attesta API token")
 			return
 		}

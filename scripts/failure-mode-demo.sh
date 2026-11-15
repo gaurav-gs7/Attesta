@@ -147,6 +147,7 @@ postgres_unavailable_fails_predictably() {
   env \
     GOCACHE="$GOCACHE" \
     GOMODCACHE="$GOMODCACHE" \
+    ATTESTA_API_TOKEN="$ATTESTA_API_TOKEN" \
     ATTESTA_ADDR="127.0.0.1:$((ATTESTA_PORT + 1))" \
     DATABASE_URL="postgres://attesta:attesta@127.0.0.1:1/attesta?sslmode=disable" \
     go run ./api/cmd/attesta-api >"$pg_log" 2>&1 &

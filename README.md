@@ -58,6 +58,10 @@ Generated service assets appear under:
 generated/services/payments-api
 ```
 
+## Authentication
+
+The API refuses to start unless `ATTESTA_API_TOKEN` is set. Clients send the token in the `X-Attesta-Token` header; `/livez`, `/readyz` and `/metrics` stay open for probes and scrapers. For throwaway local runs only, `ATTESTA_INSECURE_NO_AUTH=true` starts the API without authentication and logs a warning.
+
 ## CLI Demo
 
 ```bash
