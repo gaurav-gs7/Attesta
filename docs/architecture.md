@@ -59,7 +59,7 @@ Observability plane:
 
 ## Controller Reconciliation
 
-The `attesta-controller` process is the Kubernetes reconciliation layer. It watches `RolloutGuard` resources, resolves the referenced Deployment, evaluates live rollout state, updates `status.conditions`, emits Kubernetes Events, and restores the previous owned ReplicaSet template when a guarded rollout is blocked and rollback is enabled.
+The `attesta-controller` process is the Kubernetes reconciliation layer. It watches `RolloutGuard` resources, resolves the referenced Deployment, evaluates live rollout state, updates `status.conditions`, emits Kubernetes Events, and, when rollback is enabled, restores the last healthy pod template of a rollout Kubernetes has declared stuck (`ProgressDeadlineExceeded`).
 
 This keeps responsibilities separated:
 

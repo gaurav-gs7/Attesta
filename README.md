@@ -11,7 +11,7 @@ It keeps the useful Harbor-style golden path for service onboarding, but the pro
 - Scores services for production readiness.
 - Evaluates SLO/error-budget status and deployment eligibility from real Prometheus instant queries when `ATTESTA_PROMETHEUS_URL` is configured.
 - Gates canary rollouts with latency and error-rate health checks.
-- Reconciles `RolloutGuard` resources with a Kubernetes controller that updates status, emits Events, and restores the previous ReplicaSet template when guarded rollouts are blocked.
+- Reconciles `RolloutGuard` resources with a Kubernetes controller that updates status, emits Events, and, when rollback is opted in, restores the last healthy pod template of a rollout that exceeded its progress deadline.
 - Records automated rollback decisions through workflow-backed rollout steps.
 - Converts simulated Alertmanager signals into durable incidents with enriched SLO state, timeline, and postmortem draft.
 - Exposes workflow runs, steps, retry state, and audit-style events for onboarding, readiness, SLO checks, rollouts, rollback, and incidents.
@@ -125,7 +125,7 @@ kubectl apply -k deploy/crds
 kubectl apply -k deploy/controller
 ```
 
-The controller watches `RolloutGuard`, evaluates the referenced Deployment, patches `status.conditions`, creates Kubernetes Events, and triggers rollback by restoring the previous owned ReplicaSet template when the rollout is blocked and rollback is enabled. See `docs/controller-operator.md`.
+The controller watches `RolloutGuard`, evaluates the referenced Deployment, patches `status.conditions`, creates Kubernetes Events, and, when `spec.rollback.enabled` is true, restores the last pod template it saw fully rolled out once Kubernetes reports `ProgressDeadlineExceeded`. Paused Deployments are never touched, and the controller never rolls back twice onto the same healthy template. See `docs/controller-operator.md` for the rules and current limits.
 
 ## Generated Service Files
 
