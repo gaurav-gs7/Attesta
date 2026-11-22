@@ -289,6 +289,7 @@ func (e *Engine) execute(ctx context.Context, spec Spec, run models.WorkflowRun)
 			done := time.Now().UTC()
 			run.State = StateFailed
 			run.Error = err.Error()
+			run.ErrorCode = CodeOf(err)
 			run.CompletedAt = &done
 			run.Events = append(run.Events, models.WorkflowEvent{Timestamp: done, Type: "workflow-failed", Message: err.Error()})
 			e.persist(ctx, &run, "workflow failure")
@@ -405,6 +406,7 @@ func persistFailed(run models.WorkflowRun, phase string, err error) models.Workf
 	now := time.Now().UTC()
 	run.State = StateFailed
 	run.Error = fmt.Sprintf("persist %s: %v", phase, err)
+	run.ErrorCode = CodePersistence
 	run.CompletedAt = &now
 	run.Events = append(run.Events, models.WorkflowEvent{
 		Timestamp: now,

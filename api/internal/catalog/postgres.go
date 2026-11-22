@@ -386,7 +386,7 @@ func trimPage[T any](items []T, req page.Request, key func(T) (time.Time, string
 // everything.
 
 const workflowRunColumns = `id, name, kind, state, service, idempotency_key, attempt, max_attempts,
-			started_at, completed_at, error, heartbeat_at`
+			started_at, completed_at, error, heartbeat_at, error_code`
 
 // workflowChildrenCTEs upserts the steps and events of the run returned by
 // the "run" CTE. Parameters $12-$25 carry them as parallel arrays.
@@ -417,13 +417,14 @@ const workflowChildrenCTEs = `
 var saveWorkflowRunSQL = `
 	WITH run AS (
 		INSERT INTO workflow_runs (` + workflowRunColumns + `)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now())
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now(),$26)
 		ON CONFLICT (id) DO UPDATE SET
 			state = EXCLUDED.state,
 			attempt = EXCLUDED.attempt,
 			max_attempts = EXCLUDED.max_attempts,
 			completed_at = EXCLUDED.completed_at,
 			error = EXCLUDED.error,
+			error_code = EXCLUDED.error_code,
 			heartbeat_at = now()
 		-- A failed run stays failed: an owner whose run was abandoned must not
 		-- revive it after another run took the idempotency key.
@@ -434,7 +435,7 @@ var saveWorkflowRunSQL = `
 var claimWorkflowRunSQL = `
 	WITH run AS (
 		INSERT INTO workflow_runs (` + workflowRunColumns + `)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now())
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now(),$26)
 		ON CONFLICT (idempotency_key) WHERE idempotency_key <> '' AND state <> 'failed' DO NOTHING
 		RETURNING id
 	),` + workflowChildrenCTEs
@@ -465,6 +466,7 @@ func workflowRunArgs(run models.WorkflowRun) []any {
 		run.MaxAttempts, run.StartedAt, nullableTime(run.CompletedAt), run.Error,
 		stepIDs, positions, names, states, attempts, maxAttempts, started, completed, errs,
 		eventIDs, seqs, types, messages, stamps,
+		run.ErrorCode,
 	}
 }
 
@@ -551,7 +553,7 @@ func (s *PostgresStore) abandonStaleRuns(ctx context.Context, key *string, stale
 	err := s.db.QueryRowContext(ctx, `
 		WITH abandoned AS (
 			UPDATE workflow_runs
-			SET state = 'failed', error = $3, completed_at = now()
+			SET state = 'failed', error = $3, error_code = 'persistence', completed_at = now()
 			WHERE ($1::text IS NULL OR idempotency_key = $1) AND state = 'running'
 			  AND heartbeat_at < now() - make_interval(secs => $2)
 			RETURNING id
@@ -614,7 +616,7 @@ func (s *PostgresStore) ListWorkflowRuns(ctx context.Context, req page.Request) 
 	after, afterID, since := keysetArgs(req)
 	runs, err := s.loadWorkflowRuns(ctx, `
 		SELECT id, name, kind, state, service, idempotency_key, attempt, max_attempts,
-		       started_at, completed_at, error
+		       started_at, completed_at, error, error_code
 		FROM workflow_runs
 		WHERE ($1::timestamptz IS NULL OR (started_at, id) < ($1, $2))
 		  AND ($3::timestamptz IS NULL OR started_at >= $3)
@@ -631,7 +633,7 @@ func (s *PostgresStore) ListWorkflowRuns(ctx context.Context, req page.Request) 
 func (s *PostgresStore) loadWorkflowRun(ctx context.Context, id string) (models.WorkflowRun, error) {
 	runs, err := s.loadWorkflowRuns(ctx, `
 		SELECT id, name, kind, state, service, idempotency_key, attempt, max_attempts,
-		       started_at, completed_at, error
+		       started_at, completed_at, error, error_code
 		FROM workflow_runs
 		WHERE id = $1
 	`, id)
@@ -657,7 +659,7 @@ func (s *PostgresStore) loadWorkflowRuns(ctx context.Context, query string, args
 		var run models.WorkflowRun
 		var completed sql.NullTime
 		if err := rows.Scan(&run.ID, &run.Name, &run.Kind, &run.State, &run.Service, &run.IdempotencyKey,
-			&run.Attempt, &run.MaxAttempts, &run.StartedAt, &completed, &run.Error); err != nil {
+			&run.Attempt, &run.MaxAttempts, &run.StartedAt, &completed, &run.Error, &run.ErrorCode); err != nil {
 			_ = rows.Close()
 			return nil, err
 		}
@@ -1017,6 +1019,7 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
 -- Refreshed on every save and periodically while a run executes. A running
 -- run with a stale heartbeat no longer holds its idempotency key.
 ALTER TABLE workflow_runs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE workflow_runs ADD COLUMN IF NOT EXISTS error_code TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS workflow_steps (
     id UUID PRIMARY KEY,

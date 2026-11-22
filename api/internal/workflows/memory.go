@@ -189,6 +189,7 @@ func abandon(run models.WorkflowRun, now time.Time, staleAfter time.Duration) mo
 	t := now.UTC()
 	run.State = StateFailed
 	run.Error = AbandonedMessage(staleAfter)
+	run.ErrorCode = CodePersistence
 	run.CompletedAt = &t
 	run.Events = append(run.Events, models.WorkflowEvent{Timestamp: t, Type: "workflow-abandoned", Message: run.Error})
 	return run

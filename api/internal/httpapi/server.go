@@ -202,7 +202,7 @@ func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
 						return getErr
 					}
 					if !sameServiceSpec(existing, service) {
-						return fmt.Errorf("service already exists with different metadata")
+						return workflows.WithCode(fmt.Errorf("%w: service %q already exists with different metadata", catalog.ErrConflict, service.Name), workflows.CodeConflict)
 					}
 					created = existing
 					idempotent = true
@@ -253,11 +253,7 @@ func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if run.State != workflows.StateSucceeded {
-		if strings.Contains(run.Error, "different metadata") {
-			writeJSON(w, http.StatusConflict, map[string]any{"error": run.Error, "workflow": run})
-			return
-		}
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": run.Error, "workflow": run})
+		writeRunFailure(w, run)
 		return
 	}
 	if outcome == workflows.Replayed {
@@ -396,8 +392,6 @@ func (s *Server) deployments(w http.ResponseWriter, r *http.Request) {
 	}, next))
 }
 
-var errGateClosed = errors.New("deployment gate is closed")
-
 func (s *Server) startRollout(w http.ResponseWriter, r *http.Request) {
 	service, ok := s.loadService(w, r)
 	if !ok {
@@ -413,7 +407,6 @@ func (s *Server) startRollout(w http.ResponseWriter, r *http.Request) {
 	}
 	var gate models.SLOStatus
 	var rollout models.Rollout
-	var stepErr error
 	run := s.workflows.Run(r.Context(), workflows.Spec{
 		Name:    "rollout-start",
 		Kind:    "attesta.rollout.start",
@@ -424,8 +417,7 @@ func (s *Server) startRollout(w http.ResponseWriter, r *http.Request) {
 				Run: func(ctx context.Context) error {
 					gate = s.evaluateSLO(ctx, service)
 					if gate.DeploymentGate != models.GateAllowed {
-						stepErr = fmt.Errorf("%w: gate is %s: %s", errGateClosed, gate.DeploymentGate, gate.Reason)
-						return stepErr
+						return workflows.WithCode(fmt.Errorf("deployment gate is %s: %s", gate.DeploymentGate, gate.Reason), workflows.CodeGateClosed)
 					}
 					return nil
 				},
@@ -445,22 +437,34 @@ func (s *Server) startRollout(w http.ResponseWriter, r *http.Request) {
 						Environment: service.Environment, Status: rollouts.DeploymentStatus(rollouts.StateStarted),
 						Strategy: service.DeploymentStrategy, StartedAt: now,
 					})
-					stepErr = err
+					if errors.Is(err, catalog.ErrConflict) {
+						return workflows.WithCode(fmt.Errorf("%w; pause, complete or roll it back first", err), workflows.CodeConflict)
+					}
 					return err
 				},
 			},
 		},
 	})
-	switch {
-	case run.State == workflows.StateSucceeded:
-		writeJSON(w, http.StatusAccepted, map[string]any{"service": service.Name, "rollout": rollout, "gate": gate, "workflow": run})
-	case errors.Is(stepErr, errGateClosed):
-		writeJSON(w, http.StatusConflict, map[string]any{"error": stepErr.Error(), "service": service.Name, "gate": gate, "workflow": run})
-	case errors.Is(stepErr, catalog.ErrConflict):
-		writeJSON(w, http.StatusConflict, map[string]any{"error": stepErr.Error() + "; pause, complete or roll it back first", "service": service.Name, "workflow": run})
-	default:
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": run.Error, "workflow": run})
+	if run.State != workflows.StateSucceeded {
+		if run.ErrorCode == workflows.CodeGateClosed {
+			writeJSON(w, http.StatusConflict, map[string]any{"error": run.Error, "errorCode": run.ErrorCode, "service": service.Name, "gate": gate, "workflow": run})
+			return
+		}
+		writeRunFailure(w, run)
+		return
 	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"service": service.Name, "rollout": rollout, "gate": gate, "workflow": run})
+}
+
+// writeRunFailure answers for a failed workflow run by its error code:
+// conflicts and closed gates are 409, anything else 500.
+func writeRunFailure(w http.ResponseWriter, run models.WorkflowRun) {
+	status := http.StatusInternalServerError
+	switch run.ErrorCode {
+	case workflows.CodeConflict, workflows.CodeGateClosed:
+		status = http.StatusConflict
+	}
+	writeJSON(w, status, map[string]any{"error": run.Error, "errorCode": run.ErrorCode, "workflow": run})
 }
 
 // decodeStrict reads a bounded JSON body that must contain only known
@@ -653,7 +657,7 @@ func (s *Server) healthGate(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	if run.State != workflows.StateSucceeded {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": run.Error, "workflow": run})
+		writeRunFailure(w, run)
 		return
 	}
 	if rolledBack != nil {

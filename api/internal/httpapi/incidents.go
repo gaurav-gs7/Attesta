@@ -61,7 +61,7 @@ func (s *Server) createIncident(w http.ResponseWriter, r *http.Request) {
 	}
 	record, run := s.openIncident(r.Context(), service, in)
 	if run.State != workflows.StateSucceeded {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": run.Error, "workflow": run})
+		writeRunFailure(w, run)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"incident": record, "workflow": run})
@@ -176,7 +176,7 @@ func (s *Server) resolveIncident(w http.ResponseWriter, r *http.Request) {
 	}
 	record, run := s.resolve(r.Context(), record, time.Now().UTC(), note)
 	if run.State != workflows.StateSucceeded {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": run.Error, "workflow": run})
+		writeRunFailure(w, run)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"incident": record, "workflow": run})

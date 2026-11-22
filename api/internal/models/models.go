@@ -224,6 +224,9 @@ type WorkflowRun struct {
 	StartedAt      time.Time       `json:"startedAt"`
 	CompletedAt    *time.Time      `json:"completedAt,omitempty"`
 	Error          string          `json:"error,omitempty"`
+	// ErrorCode classifies a failed run (see workflows.Code*); callers
+	// branch on it, never on Error's wording.
+	ErrorCode string `json:"errorCode,omitempty"`
 }
 
 type WorkflowStep struct {
