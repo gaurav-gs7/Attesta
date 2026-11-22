@@ -66,6 +66,8 @@ Idempotency keys follow one rule: at most one run per key is not failed.
 - A run that failed to persist is never treated as recorded. The engine keeps no in-memory copy, so it cannot replay one.
 - With PostgreSQL the rule is enforced by the database: a unique partial index on the key over runs that are not failed. A claim is a single `INSERT ... ON CONFLICT DO NOTHING` against it, so concurrent identical requests, on one replica or several, produce one run. The others wait for it and replay its result. Migrating a database written by an earlier version keeps one active run per key (a succeeded one first, then the newest) and marks the rest failed as superseded. Migrations take an advisory lock, so replicas that start together do not race.
 
+A run executes on its own context, not the request's. A client that disconnects or times out does not cancel a run between a side effect and the write that records it; the run finishes and is recorded, and the response is simply not delivered. Each run is bounded by a timeout (two minutes) instead. A step that panics fails its run with the panic as the error and is logged with its stack; the process keeps serving. Every minute a reaper marks failed any running run whose heartbeat is stale, keyed or not, so a crash leaves nothing "running".
+
 The runner does not resume a crashed run from its last step; the next request re-runs it from the start. Retries within a run are immediate, without backoff. Persistence failures fail the request rather than being reported as success.
 
 ## CRDs

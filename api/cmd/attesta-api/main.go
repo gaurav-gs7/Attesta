@@ -39,6 +39,10 @@ func main() {
 		httpapi.WithPrometheusURL(cfg.PrometheusURL),
 	)
 
+	reaperCtx, stopReaper := context.WithCancel(ctx)
+	defer stopReaper()
+	handler.StartWorkflowReaper(reaperCtx)
+
 	server := &http.Server{
 		Addr:              cfg.Addr,
 		Handler:           handler.Routes(),

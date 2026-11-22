@@ -51,6 +51,20 @@ func (s *MemoryStore) ClaimWorkflowRun(_ context.Context, run models.WorkflowRun
 	return run, true, nil
 }
 
+func (s *MemoryStore) AbandonStaleWorkflowRuns(_ context.Context, staleAfter time.Duration) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	n := 0
+	for id, run := range s.runs {
+		if run.State == StateRunning && now.Sub(s.heartbeat[id]) > staleAfter {
+			s.runs[id] = abandon(run, now, staleAfter)
+			n++
+		}
+	}
+	return n, nil
+}
+
 func (s *MemoryStore) HeartbeatWorkflowRun(_ context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

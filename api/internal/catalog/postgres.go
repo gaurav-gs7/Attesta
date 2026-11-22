@@ -365,39 +365,65 @@ func (s *PostgresStore) ClaimWorkflowRun(ctx context.Context, run models.Workflo
 	return holder, false, nil
 }
 
+// AbandonStaleWorkflowRuns marks failed every running run whose heartbeat is
+// older than staleAfter.
+func (s *PostgresStore) AbandonStaleWorkflowRuns(ctx context.Context, staleAfter time.Duration) (n int, err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	n, err = abandonStaleRuns(ctx, tx, nil, staleAfter)
+	if err != nil {
+		return 0, err
+	}
+	return n, tx.Commit()
+}
+
 func abandonStaleRunsTx(ctx context.Context, tx *sql.Tx, key string, staleAfter time.Duration) error {
+	_, err := abandonStaleRuns(ctx, tx, &key, staleAfter)
+	return err
+}
+
+// abandonStaleRuns marks stale running runs failed: those for key, or all of
+// them when key is nil.
+func abandonStaleRuns(ctx context.Context, tx *sql.Tx, key *string, staleAfter time.Duration) (int, error) {
 	message := workflows.AbandonedMessage(staleAfter)
 	rows, err := tx.QueryContext(ctx, `
 		UPDATE workflow_runs
 		SET state = 'failed', error = $3, completed_at = now()
-		WHERE idempotency_key = $1 AND state = 'running'
+		WHERE ($1::text IS NULL OR idempotency_key = $1) AND state = 'running'
 		  AND heartbeat_at < now() - make_interval(secs => $2)
 		RETURNING id
 	`, key, staleAfter.Seconds(), message)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	var ids []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			_ = rows.Close()
-			return err
+			return 0, err
 		}
 		ids = append(ids, id)
 	}
 	if err := rows.Close(); err != nil {
-		return err
+		return 0, err
 	}
 	for _, id := range ids {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO workflow_events (id, workflow_id, event_type, message, timestamp)
 			VALUES ($1, $2, 'workflow-abandoned', $3, now())
 		`, NewID(), id, message); err != nil {
-			return err
+			return 0, err
 		}
 	}
-	return nil
+	return len(ids), nil
 }
 
 // HeartbeatWorkflowRun refreshes a running run's heartbeat. It returns

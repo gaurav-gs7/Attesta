@@ -205,3 +205,30 @@ func TestPostgresConcurrentMigrations(t *testing.T) {
 		}
 	}
 }
+
+// Audit W-3: the reaper clears any running run with a stale heartbeat,
+// keyed or not.
+func TestPostgresAbandonsStaleRuns(t *testing.T) {
+	store, _ := postgresForTest(t)
+	ctx := context.Background()
+	stale, fresh := runFor(""), runFor("")
+	for _, run := range []models.WorkflowRun{stale, fresh} {
+		if err := store.SaveWorkflowRun(ctx, run); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.db.Exec(`UPDATE workflow_runs SET heartbeat_at = now() - interval '1 hour' WHERE id = $1`, stale.ID); err != nil {
+		t.Fatal(err)
+	}
+	n, err := store.AbandonStaleWorkflowRuns(ctx, time.Minute)
+	if err != nil || n != 1 {
+		t.Fatalf("abandoned %d (%v), want 1", n, err)
+	}
+	got, err := store.GetWorkflowRun(ctx, stale.ID)
+	if err != nil || got.State != workflows.StateFailed || got.Events[len(got.Events)-1].Type != "workflow-abandoned" {
+		t.Fatalf("stale run = %+v (%v)", got, err)
+	}
+	if got, _ := store.GetWorkflowRun(ctx, fresh.ID); got.State != workflows.StateRunning {
+		t.Fatalf("fresh run abandoned: %s", got.State)
+	}
+}

@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
+	"runtime/debug"
 	"time"
 
 	"github.com/gaurav-gs7/attesta/api/internal/models"
@@ -57,6 +59,9 @@ type Store interface {
 	ClaimWorkflowRun(ctx context.Context, run models.WorkflowRun, staleAfter time.Duration) (holder models.WorkflowRun, claimed bool, err error)
 	HeartbeatWorkflowRun(ctx context.Context, id string) error
 	SaveWorkflowRun(context.Context, models.WorkflowRun) error
+	// AbandonStaleWorkflowRuns marks failed every running run, keyed or not,
+	// whose heartbeat is older than staleAfter, and returns how many.
+	AbandonStaleWorkflowRuns(ctx context.Context, staleAfter time.Duration) (int, error)
 	GetWorkflowRun(context.Context, string) (models.WorkflowRun, error)
 	GetWorkflowRunByIdempotencyKey(context.Context, string) (models.WorkflowRun, error)
 	ListWorkflowRuns(context.Context) ([]models.WorkflowRun, error)
@@ -82,6 +87,8 @@ type Engine struct {
 	staleAfter   time.Duration
 	inFlightWait time.Duration
 	pollInterval time.Duration
+	runTimeout   time.Duration
+	logger       *slog.Logger
 }
 
 type Option func(*Engine)
@@ -95,6 +102,14 @@ func WithStaleAfter(d time.Duration) Option { return func(e *Engine) { e.staleAf
 // run to finish before it returns InProgress.
 func WithInFlightWait(d time.Duration) Option { return func(e *Engine) { e.inFlightWait = d } }
 
+// WithRunTimeout bounds how long one run may execute. Runs do not stop when
+// the request that started them goes away, so this is what stops a run whose
+// step hangs.
+func WithRunTimeout(d time.Duration) Option { return func(e *Engine) { e.runTimeout = d } }
+
+// WithLogger sets the logger for recovered panics and reaped runs.
+func WithLogger(l *slog.Logger) Option { return func(e *Engine) { e.logger = l } }
+
 // NewEngine returns an engine backed by store, or by an in-process store when
 // store is nil.
 func NewEngine(store Store, opts ...Option) *Engine {
@@ -106,6 +121,8 @@ func NewEngine(store Store, opts ...Option) *Engine {
 		staleAfter:   time.Minute,
 		inFlightWait: 5 * time.Second,
 		pollInterval: 100 * time.Millisecond,
+		runTimeout:   2 * time.Minute,
+		logger:       slog.Default(),
 	}
 	for _, opt := range opts {
 		opt(e)
@@ -199,7 +216,14 @@ func newRun(spec Spec) models.WorkflowRun {
 }
 
 // execute runs the steps of a run that has been stored as running.
+//
+// It runs on its own context, not the request's: once a run has started, a
+// client that disconnects or times out must not cancel it between a side
+// effect and the write that records it, which used to leave the run
+// "running" forever. The run is bounded by runTimeout instead.
 func (e *Engine) execute(ctx context.Context, spec Spec, run models.WorkflowRun) models.WorkflowRun {
+	ctx, cancelTimeout := context.WithTimeout(context.WithoutCancel(ctx), e.runTimeout)
+	defer cancelTimeout()
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	stopHeartbeat := e.heartbeat(run.ID, cancel)
@@ -218,9 +242,7 @@ func (e *Engine) execute(ctx context.Context, spec Spec, run models.WorkflowRun)
 				return run
 			}
 
-			if step.Run != nil {
-				err = step.Run(ctx)
-			}
+			err = e.runStep(ctx, run.ID, step)
 			if cause := context.Cause(ctx); errors.Is(cause, ErrAbandoned) {
 				return persistFailed(run, "heartbeat", cause)
 			}
@@ -257,6 +279,52 @@ func (e *Engine) execute(ctx context.Context, spec Spec, run models.WorkflowRun)
 	run.Events = append(run.Events, models.WorkflowEvent{Timestamp: done, Type: "workflow-succeeded", Message: fmt.Sprintf("%s workflow completed", spec.Name)})
 	e.persist(ctx, &run, "workflow success")
 	return run
+}
+
+// runStep runs one step attempt and turns a panic into a step error, so a
+// panicking step fails its run instead of crashing the process and leaving
+// the run "running".
+func (e *Engine) runStep(ctx context.Context, runID string, step Step) (err error) {
+	if step.Run == nil {
+		return nil
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			e.logger.Error("workflow step panicked", "run", runID, "step", step.Name, "panic", fmt.Sprint(p), "stack", string(debug.Stack()))
+			err = fmt.Errorf("panic in step %s: %v", step.Name, p)
+		}
+	}()
+	return step.Run(ctx)
+}
+
+// ReapStale marks failed every running run whose heartbeat is older than
+// staleAfter, so runs left behind by a crashed process do not stay
+// "running". A keyed run is also released by the next identical request;
+// this catches the rest.
+func (e *Engine) ReapStale(ctx context.Context) (int, error) {
+	n, err := e.store.AbandonStaleWorkflowRuns(ctx, e.staleAfter)
+	if n > 0 {
+		e.logger.Warn("reaped abandoned workflow runs", "count", n, "staleAfter", e.staleAfter)
+	}
+	return n, err
+}
+
+// StartReaper calls ReapStale every staleAfter until ctx is done.
+func (e *Engine) StartReaper(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(e.staleAfter)
+		defer ticker.Stop()
+		for {
+			if _, err := e.ReapStale(ctx); err != nil && ctx.Err() == nil {
+				e.logger.Warn("reap abandoned workflow runs", "error", err)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
 }
 
 // heartbeat keeps the run's lease fresh while it executes. If the store says

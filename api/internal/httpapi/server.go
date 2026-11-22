@@ -86,6 +86,12 @@ func NewServer(store catalog.Store, generator *templates.Generator, opts ...Opti
 	return server
 }
 
+// StartWorkflowReaper periodically marks failed the workflow runs left
+// "running" by a crashed process, until ctx is done.
+func (s *Server) StartWorkflowReaper(ctx context.Context) {
+	s.workflows.StartReaper(ctx)
+}
+
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /livez", s.live)
@@ -369,8 +375,8 @@ func (s *Server) slos(w http.ResponseWriter, r *http.Request) {
 		Steps: []workflows.Step{{
 			Name:        "evaluate-sli-signals-and-error-budget",
 			MaxAttempts: 1,
-			Run: func(context.Context) error {
-				status = s.evaluateSLO(r.Context(), service)
+			Run: func(ctx context.Context) error {
+				status = s.evaluateSLO(ctx, service)
 				return nil
 			},
 		}},
@@ -442,8 +448,8 @@ func (s *Server) startRollout(w http.ResponseWriter, r *http.Request) {
 			{
 				Name:        "evaluate-slo-deployment-gate",
 				MaxAttempts: 1,
-				Run: func(context.Context) error {
-					gate = s.evaluateSLO(r.Context(), service)
+				Run: func(ctx context.Context) error {
+					gate = s.evaluateSLO(ctx, service)
 					if gate.DeploymentGate != models.GateAllowed {
 						return fmt.Errorf("deployment gate is %s: %s", gate.DeploymentGate, gate.Reason)
 					}
