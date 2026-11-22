@@ -17,6 +17,15 @@
 7. On `Blocked` (a progress deadline, or too many consecutive failed checks), if `spec.rollback.enabled` is true, restore the last healthy template. See Rollback Rules.
 8. Patch `status` only when it changed, and emit an Event only when the phase or reason changed.
 
+### Reads Come From The Cache
+
+The controller watches RolloutGuards, Deployments and ReplicaSets once, at startup, and serves every read from the informer caches after that. Event handlers and reconciles make no GET or LIST calls, so API load does not grow with the number of Deployments or with how often they change; the only steady-state requests are status patches when something changed and the Deployment update of a rollback.
+
+- A Deployment or ReplicaSet event finds its guards through an index on each guard's target Deployment. ReplicaSet updates enqueue only when the revision, template hash or owner changes, not on every replica count change.
+- A reconcile finds a Deployment's ReplicaSets through an index on the owning Deployment's UID.
+- A cache can trail the API server. Writes carry the cached `resourceVersion` as a precondition: the status patch and the rollback update fail with a conflict if the object changed after the read, and the guard is requeued on a fresher view. If a Deployment reports a revision that the ReplicaSet cache has not seen yet, the reconcile is requeued too, so the controller never picks a candidate or rollback target from an outdated ReplicaSet list. Both cases count as `reconcile_total{result="requeue"}`, not as errors.
+- Memory grows with the number of Deployments and ReplicaSets in the watched namespaces. Use `--namespace` to bound it.
+
 ## Rollback Rules
 
 Rollback rewrites a Deployment's pod template, so every rule errs towards doing nothing:
@@ -98,7 +107,7 @@ docker build -f controller/Dockerfile --build-arg VERSION=$(git describe --tags 
 
 Metrics:
 
-- `attesta_rolloutguard_reconcile_total{result}` and `attesta_rolloutguard_reconcile_duration_seconds`
+- `attesta_rolloutguard_reconcile_total{result}`: `success`, `error`, or `requeue` after a stale read, and `attesta_rolloutguard_reconcile_duration_seconds`
 - `attesta_rolloutguard_rollback_total{outcome}`: `triggered`, `failed`, or the reason a rollback was skipped
 - `attesta_rolloutguard_phase_transitions_total{phase}`
 - `attesta_rolloutguard_analysis_total{result}`: `Passed`, `Failed` or `Inconclusive` metric checks

@@ -14,7 +14,7 @@ var (
 		Namespace: "attesta",
 		Subsystem: "rolloutguard",
 		Name:      "reconcile_total",
-		Help:      "RolloutGuard reconciles by result (success or error).",
+		Help:      "RolloutGuard reconciles by result (success, error, or requeue after a stale cache read or write conflict).",
 	}, []string{"result"})
 
 	reconcileDuration = prometheus.NewHistogram(prometheus.HistogramOpts{

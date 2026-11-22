@@ -106,7 +106,51 @@ func replicaSet(name string, revision int, hash, image string) *appsv1.ReplicaSe
 
 func (h *harness) reconcile() error {
 	h.t.Helper()
+	h.syncCaches()
 	return h.ctrl.Reconcile(h.ctx, testGuardKey)
+}
+
+// syncCaches stands in for the informers: it loads the fake API server's
+// current objects into the controller's caches, through the same indexers the
+// informers use. Reconcile reads only from these caches.
+func (h *harness) syncCaches() {
+	h.t.Helper()
+	guards, err := h.dyn.Resource(rolloutGuardGVR).Namespace(testNamespace).List(h.ctx, metav1.ListOptions{})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	var guardObjs []any
+	for i := range guards.Items {
+		guardObjs = append(guardObjs, &guards.Items[i])
+	}
+	deployments, err := h.kube.AppsV1().Deployments(testNamespace).List(h.ctx, metav1.ListOptions{})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	var deploymentObjs []any
+	for i := range deployments.Items {
+		deploymentObjs = append(deploymentObjs, &deployments.Items[i])
+	}
+	replicaSets, err := h.kube.AppsV1().ReplicaSets(testNamespace).List(h.ctx, metav1.ListOptions{})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	var rsObjs []any
+	for i := range replicaSets.Items {
+		rsObjs = append(rsObjs, &replicaSets.Items[i])
+	}
+	for _, step := range []struct {
+		indexer interface{ Replace([]any, string) error }
+		objs    []any
+	}{
+		{h.ctrl.informer.GetIndexer(), guardObjs},
+		{h.ctrl.deployments.GetIndexer(), deploymentObjs},
+		{h.ctrl.replicaSets.GetIndexer(), rsObjs},
+	} {
+		if err := step.indexer.Replace(step.objs, ""); err != nil {
+			h.t.Fatal(err)
+		}
+	}
 }
 
 func (h *harness) mustReconcile() {
@@ -400,13 +444,39 @@ func TestReconcileReturnsErrorWhenRollbackFails(t *testing.T) {
 	h.mustReconcile()
 	h.startBadRollout()
 	h.kube.PrependReactor("update", "deployments", func(k8stesting.Action) (bool, runtime.Object, error) {
-		return true, nil, apierrors.NewConflict(schema.GroupResource{Group: "apps", Resource: "deployments"}, "payments-api", nil)
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Group: "apps", Resource: "deployments"}, "payments-api", nil)
 	})
-	if err := h.reconcile(); err == nil {
+	err := h.reconcile()
+	if err == nil {
 		t.Fatal("expected an error so the workqueue retries the rollback")
+	}
+	if isStaleRead(err) {
+		t.Fatalf("a forbidden update is a real failure, not a stale read: %v", err)
 	}
 	if got := h.field("phase"); got != PhaseRollbackFailed {
 		t.Fatalf("phase = %s, want %s", got, PhaseRollbackFailed)
+	}
+}
+
+// Audit C-7: a rollback decided on a cached Deployment that has since changed
+// fails the update precondition. That is retried quietly, not reported as a
+// failed rollback.
+func TestReconcileRetriesRollbackOnConflict(t *testing.T) {
+	h := newHarness(t, map[string]any{"enabled": true}, nil)
+	h.mustReconcile()
+	h.startBadRollout()
+	h.kube.PrependReactor("update", "deployments", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewConflict(schema.GroupResource{Group: "apps", Resource: "deployments"}, "payments-api", nil)
+	})
+	err := h.reconcile()
+	if !isStaleRead(err) {
+		t.Fatalf("expected a stale-read error to requeue, got %v", err)
+	}
+	if got := h.field("phase"); got != PhaseBlocked {
+		t.Fatalf("phase = %s, want %s", got, PhaseBlocked)
+	}
+	if c := h.condition(ConditionRolledBack); c != nil {
+		t.Fatalf("a conflict must not record a rollback outcome: %v", c)
 	}
 }
 
