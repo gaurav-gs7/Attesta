@@ -23,7 +23,22 @@ const (
 const (
 	MinBudgetRemainingPct = 10.0
 	MaxBurnRate           = 2.0
+	// MinRequests is the fewest requests a window must hold for its error
+	// rate, latency or budget to be judged. Below it a single request decides
+	// the answer, so the signal counts as not measured and the gate is
+	// unknown.
+	MinRequests = 20
 )
+
+// Window lengths in seconds, for turning a request rate into a count.
+const (
+	SignalWindowSeconds   = 5 * 60
+	BurnRateWindowSeconds = 60 * 60
+)
+
+// EnoughRequests reports whether a window with this many requests can be
+// judged.
+func EnoughRequests(count float64) bool { return count >= MinRequests }
 
 // Signals are measured values. A nil field was not measurable (no data, no
 // traffic, or a NaN result) and makes the gate unknown.

@@ -40,7 +40,7 @@ An admission webhook that runs a SubjectAccessReview for the guard's creator was
 
 ### SLO gate
 
-`GET /slos` queries Prometheus for the service's error rate and p95 latency (5m), burn rate (1h), and availability and remaining error budget (30d). The gate is `allowed`, `blocked` or `unknown`. Unknown, which covers no Prometheus, failed queries, no traffic, no series and `NaN`, blocks `POST /rollouts`. Values that could not be measured are omitted, never reported as zero.
+`GET /slos` queries Prometheus for the service's error rate and p95 latency (5m), burn rate (1h), and availability and remaining error budget (30d). The gate is `allowed`, `blocked` or `unknown`. Unknown, which covers no Prometheus, failed queries, no series, `NaN`, and fewer than 20 requests in a window, blocks `POST /rollouts`. Values that could not be measured are omitted, never reported as zero.
 
 ### Incidents
 

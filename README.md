@@ -89,7 +89,7 @@ Attesta reads `http_requests_total` and `http_request_duration_seconds` for the 
 | Burn rate | 1h |
 | Availability and remaining error budget | 30d |
 
-The deployment gate is `allowed`, `blocked` or `unknown`. It is `unknown`, and `POST /rollouts` returns 409, whenever a signal cannot be measured: no Prometheus configured, a failed query, no traffic, no series for the service, or a `NaN` result. Measured values are omitted from the response rather than reported as zero. Prometheus must retain at least 30 days for the budget to be computed.
+The deployment gate is `allowed`, `blocked` or `unknown`. It is `unknown`, and `POST /rollouts` returns 409, whenever a signal cannot be measured: no Prometheus configured, a failed query, no series for the service, a `NaN` result, or fewer than 20 requests in a signal's window (5m for error rate and p95, 1h for burn rate, 30d for the budget), where one request would decide the answer. Measured values are omitted from the response rather than reported as zero. Prometheus must retain at least 30 days for the budget to be computed.
 
 ## Incidents
 

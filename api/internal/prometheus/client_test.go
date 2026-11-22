@@ -186,3 +186,27 @@ func prometheusResponse(body string) *http.Response {
 		Header:     make(http.Header),
 	}
 }
+
+// Audit S-2: a handful of requests decided the gate, so one lucky or
+// unlucky request in five minutes passed or failed a rollout. Below
+// slo.MinRequests a window is not measured.
+func TestSignalsBelowMinimumVolumeAreNotMeasured(t *testing.T) {
+	// 0.05 req/s is 15 requests in 5m, 180 in 1h; 10 requests in 30d.
+	signals, err := fakePrometheus(map[string]string{
+		"total5m": "0.05", "err5m": "0", "p95": "40",
+		"total1h": "0.05", "err1h": "0",
+		"total30d": "10", "err30d": "0",
+	}).Signals(context.Background(), service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if signals.ErrorRatePct != nil || signals.LatencyP95Ms != nil || signals.ErrorBudgetRemainingPct != nil {
+		t.Fatalf("low-volume windows were judged: %+v", signals)
+	}
+	if signals.RequestRatePerSec == nil || signals.BurnRate == nil {
+		t.Fatalf("the request rate and the 1h burn rate (180 requests) are measurable: %+v", signals)
+	}
+	if got := strings.Join(signals.Missing, "; "); !strings.Contains(got, "fewer than 20") {
+		t.Fatalf("missing reasons do not name the volume floor: %s", got)
+	}
+}

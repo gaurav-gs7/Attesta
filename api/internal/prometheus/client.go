@@ -56,9 +56,14 @@ func (c *Client) Signals(ctx context.Context, service models.Service) (slo.Signa
 	if ok {
 		out.RequestRatePerSec = ptr(total)
 	}
-	if !ok || total == 0 {
+	enough5m := ok && slo.EnoughRequests(total*slo.SignalWindowSeconds)
+	switch {
+	case !ok || total == 0:
 		out.Missing = append(out.Missing, fmt.Sprintf("error rate: no requests for service %q in the last %s", service.Name, slo.SignalWindow))
-	} else {
+	case !enough5m:
+		out.Missing = append(out.Missing, fmt.Sprintf("error rate: about %.0f requests in the last %s, fewer than the %d needed to judge it",
+			total*slo.SignalWindowSeconds, slo.SignalWindow, slo.MinRequests))
+	default:
 		errs, found, err := rate(errSel, slo.SignalWindow)
 		if err != nil {
 			return slo.Signals{}, fmt.Errorf("query error rate: %w", err)
@@ -69,15 +74,20 @@ func (c *Client) Signals(ctx context.Context, service models.Service) (slo.Signa
 		out.ErrorRatePct = ptr(math.Max(0, errs/total*100))
 	}
 
-	// p95 latency over the signal window.
-	p95, ok, err := c.query(ctx, fmt.Sprintf(`histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{%s}[%s]))) * 1000`, sel, slo.SignalWindow))
-	if err != nil {
-		return slo.Signals{}, fmt.Errorf("query p95 latency: %w", err)
-	}
-	if ok {
-		out.LatencyP95Ms = ptr(p95)
+	// p95 latency over the signal window, only with enough traffic for a
+	// percentile to mean something.
+	if !enough5m {
+		out.Missing = append(out.Missing, fmt.Sprintf("p95 latency: fewer than %d requests in the last %s", slo.MinRequests, slo.SignalWindow))
 	} else {
-		out.Missing = append(out.Missing, fmt.Sprintf("p95 latency: no latency histogram data in the last %s", slo.SignalWindow))
+		p95, ok, err := c.query(ctx, fmt.Sprintf(`histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{%s}[%s]))) * 1000`, sel, slo.SignalWindow))
+		if err != nil {
+			return slo.Signals{}, fmt.Errorf("query p95 latency: %w", err)
+		}
+		if ok {
+			out.LatencyP95Ms = ptr(p95)
+		} else {
+			out.Missing = append(out.Missing, fmt.Sprintf("p95 latency: no latency histogram data in the last %s", slo.SignalWindow))
+		}
 	}
 
 	allowedBadPct := 100 - service.SLOTarget
@@ -91,8 +101,8 @@ func (c *Client) Signals(ctx context.Context, service models.Service) (slo.Signa
 	if err != nil {
 		return slo.Signals{}, fmt.Errorf("query burn-rate request rate: %w", err)
 	}
-	if !ok || total1h == 0 {
-		out.Missing = append(out.Missing, fmt.Sprintf("burn rate: no requests in the last %s", slo.BurnRateWindow))
+	if !ok || !slo.EnoughRequests(total1h*slo.BurnRateWindowSeconds) {
+		out.Missing = append(out.Missing, fmt.Sprintf("burn rate: fewer than %d requests in the last %s", slo.MinRequests, slo.BurnRateWindow))
 	} else {
 		errs1h, found, err := rate(errSel, slo.BurnRateWindow)
 		if err != nil {
@@ -109,8 +119,8 @@ func (c *Client) Signals(ctx context.Context, service models.Service) (slo.Signa
 	if err != nil {
 		return slo.Signals{}, fmt.Errorf("query budget request count: %w", err)
 	}
-	if !ok || total30d == 0 {
-		out.Missing = append(out.Missing, fmt.Sprintf("error budget: no requests in the last %s", slo.BudgetWindow))
+	if !ok || !slo.EnoughRequests(total30d) {
+		out.Missing = append(out.Missing, fmt.Sprintf("error budget: fewer than %d requests in the last %s", slo.MinRequests, slo.BudgetWindow))
 	} else {
 		errs30d, found, err := increase(errSel, slo.BudgetWindow)
 		if err != nil {

@@ -129,6 +129,21 @@ func TestSLOWithNoSeriesIsUnknownAndBlocksRollouts(t *testing.T) {
 	}
 }
 
+// Audit S-2: a trickle of traffic is not enough to judge a rollout.
+func TestSLOWithTooLittleTrafficBlocksRollouts(t *testing.T) {
+	values := healthyPrometheus()
+	values["total5m"], values["err5m"] = "0.03", "0" // about 9 requests in 5m
+	server := testServer(t, WithAPIToken("secret"), WithPrometheusURL(prometheusStub(t, values)))
+	onboard(t, server)
+	_, out, body := getSLO(t, server)
+	if out.SLO.DeploymentGate != models.GateUnknown || out.SLO.ErrorRateCurrentPct != nil || !strings.Contains(out.SLO.Reason, "fewer than the 20 needed") {
+		t.Fatalf("expected an unknown gate that names the volume floor, got %s", body)
+	}
+	if rec := startRollout(server); rec.Code != http.StatusConflict {
+		t.Fatalf("rollout on 9 requests: got %d, want 409", rec.Code)
+	}
+}
+
 func TestSLOWithHealthyMeasurementsAllowsRollout(t *testing.T) {
 	server := testServer(t, WithAPIToken("secret"), WithPrometheusURL(prometheusStub(t, healthyPrometheus())))
 	onboard(t, server)
