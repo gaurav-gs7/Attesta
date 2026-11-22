@@ -238,6 +238,10 @@ func (e *Engine) execute(ctx context.Context, spec Spec, run models.WorkflowRun)
 			run.Steps[i].Attempt = attempt
 			run.Steps[i].StartedAt = &now
 			run.Events = append(run.Events, models.WorkflowEvent{Timestamp: now, Type: "step-started", Message: step.Name})
+			// One save per attempt start and one at the end. The result of
+			// the previous attempt or step rides along with the next save, so
+			// the stored run is always consistent and never more than one
+			// step behind.
 			if !e.persist(ctx, &run, "step start") {
 				return run
 			}
@@ -251,16 +255,10 @@ func (e *Engine) execute(ctx context.Context, spec Spec, run models.WorkflowRun)
 			if err == nil {
 				run.Steps[i].State = StateSucceeded
 				run.Events = append(run.Events, models.WorkflowEvent{Timestamp: done, Type: "step-succeeded", Message: step.Name})
-				if !e.persist(ctx, &run, "step success") {
-					return run
-				}
 				break
 			}
 			run.Steps[i].Error = err.Error()
 			run.Events = append(run.Events, models.WorkflowEvent{Timestamp: done, Type: "step-failed", Message: fmt.Sprintf("%s: %v", step.Name, err)})
-			if !e.persist(ctx, &run, "step failure") {
-				return run
-			}
 		}
 		if err != nil {
 			done := time.Now().UTC()

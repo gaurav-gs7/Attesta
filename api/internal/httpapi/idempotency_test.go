@@ -127,8 +127,8 @@ func TestOnboardingRecoversAfterATransientStoreFailure(t *testing.T) {
 			fail func(*failingStore)
 		}{
 			{"first write fails", func(s *failingStore) { s.failClaims.Store(1) }},
-			// Save 2 records the first step's success, after the service row
-			// was written.
+			// Save 2 starts the second step and records the first step's
+			// success, after the service row was written.
 			{"write after the service row fails", func(s *failingStore) { s.failSaveAt.Store(2) }},
 		} {
 			t.Run(name+"/"+tc.name, func(t *testing.T) {

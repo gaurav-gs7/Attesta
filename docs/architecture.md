@@ -68,6 +68,8 @@ Idempotency keys follow one rule: at most one run per key is not failed.
 
 A run executes on its own context, not the request's. A client that disconnects or times out does not cancel a run between a side effect and the write that records it; the run finishes and is recorded, and the response is simply not delivered. Each run is bounded by a timeout (two minutes) instead. A step that panics fails its run with the panic as the error and is logged with its stack; the process keeps serving. Every minute a reaper marks failed any running run whose heartbeat is stale, keyed or not, so a crash leaves nothing "running".
 
+Each save of a run is one SQL statement: the run row is upserted, steps are updated in place and only new events are inserted, through data-modifying CTEs over arrays, with step and event IDs derived from the run. A run is saved when it starts, when each step attempt starts (carrying the previous step's result) and when it ends. A one-step run costs 3 statements and onboarding 6, down from 34 and 101 when every save deleted and re-inserted all steps and events in a transaction.
+
 The runner does not resume a crashed run from its last step; the next request re-runs it from the start. Retries within a run are immediate, without backoff. Persistence failures fail the request rather than being reported as success.
 
 ## CRDs

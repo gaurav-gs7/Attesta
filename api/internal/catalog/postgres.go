@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -9,8 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/gaurav-gs7/attesta/api/internal/models"
 	"github.com/gaurav-gs7/attesta/api/internal/workflows"
@@ -21,10 +23,18 @@ type PostgresStore struct {
 }
 
 func NewPostgresStore(ctx context.Context, databaseURL string) (*PostgresStore, error) {
-	db, err := sql.Open("pgx", databaseURL)
+	return newPostgresStore(ctx, databaseURL, nil)
+}
+
+// newPostgresStore opens the store, optionally tracing every statement. Tests
+// use the tracer to count round trips.
+func newPostgresStore(ctx context.Context, databaseURL string, tracer pgx.QueryTracer) (*PostgresStore, error) {
+	cfg, err := pgx.ParseConfig(databaseURL)
 	if err != nil {
 		return nil, err
 	}
+	cfg.Tracer = tracer
+	db := stdlib.OpenDB(*cfg)
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -203,94 +213,122 @@ func (s *PostgresStore) ListDeployments(ctx context.Context, serviceID string) (
 	return deployments, rows.Err()
 }
 
-// SaveWorkflowRun writes the run, its steps and events, and refreshes its
-// heartbeat. It returns workflows.ErrAbandoned if the stored run was marked
-// failed after its heartbeat went stale, so a stalled owner cannot bring it
-// back.
-func (s *PostgresStore) SaveWorkflowRun(ctx context.Context, run models.WorkflowRun) (err error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-	if err = saveWorkflowRunTx(ctx, tx, run); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
+// Workflow runs are written with one statement per save. The run row is
+// upserted, and its steps and events are upserted from arrays in
+// data-modifying CTEs that depend on the run row, so the whole save is atomic
+// without an explicit transaction. Step and event IDs are derived from the
+// run ID and their position, so a re-save updates steps in place and inserts
+// only events that are not stored yet, instead of deleting and re-inserting
+// everything.
 
-func saveWorkflowRunTx(ctx context.Context, tx *sql.Tx, run models.WorkflowRun) error {
-	result, err := tx.ExecContext(ctx, `
-		INSERT INTO workflow_runs (
-			id, name, kind, state, service, idempotency_key, attempt, max_attempts,
-			started_at, completed_at, error, heartbeat_at
-		)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now())
+const workflowRunColumns = `id, name, kind, state, service, idempotency_key, attempt, max_attempts,
+			started_at, completed_at, error, heartbeat_at`
+
+// workflowChildrenCTEs upserts the steps and events of the run returned by
+// the "run" CTE. Parameters $12-$25 carry them as parallel arrays.
+const workflowChildrenCTEs = `
+	steps AS (
+		INSERT INTO workflow_steps (id, workflow_id, position, name, state, attempt, max_attempts, started_at, completed_at, error)
+		SELECT s.id, run.id, s.position, s.name, s.state, s.attempt, s.max_attempts, s.started_at, s.completed_at, s.error
+		FROM run, unnest($12::uuid[], $13::int[], $14::text[], $15::text[], $16::int[], $17::int[],
+		                 $18::timestamptz[], $19::timestamptz[], $20::text[])
+		     AS s(id, position, name, state, attempt, max_attempts, started_at, completed_at, error)
 		ON CONFLICT (id) DO UPDATE SET
-			name = EXCLUDED.name,
-			kind = EXCLUDED.kind,
 			state = EXCLUDED.state,
-			service = EXCLUDED.service,
-			idempotency_key = EXCLUDED.idempotency_key,
 			attempt = EXCLUDED.attempt,
 			max_attempts = EXCLUDED.max_attempts,
 			started_at = EXCLUDED.started_at,
+			completed_at = EXCLUDED.completed_at,
+			error = EXCLUDED.error
+	),
+	events AS (
+		INSERT INTO workflow_events (id, workflow_id, seq, event_type, message, timestamp)
+		SELECT e.id, run.id, e.seq, e.event_type, e.message, e.ts
+		FROM run, unnest($21::uuid[], $22::int[], $23::text[], $24::text[], $25::timestamptz[])
+		     AS e(id, seq, event_type, message, ts)
+		ON CONFLICT (id) DO NOTHING
+	)
+	SELECT count(*) FROM run`
+
+var saveWorkflowRunSQL = `
+	WITH run AS (
+		INSERT INTO workflow_runs (` + workflowRunColumns + `)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now())
+		ON CONFLICT (id) DO UPDATE SET
+			state = EXCLUDED.state,
+			attempt = EXCLUDED.attempt,
+			max_attempts = EXCLUDED.max_attempts,
 			completed_at = EXCLUDED.completed_at,
 			error = EXCLUDED.error,
 			heartbeat_at = now()
 		-- A failed run stays failed: an owner whose run was abandoned must not
 		-- revive it after another run took the idempotency key.
 		WHERE workflow_runs.state <> 'failed' OR EXCLUDED.state = 'failed'
-	`, run.ID, run.Name, run.Kind, run.State, run.Service, run.IdempotencyKey, run.Attempt,
-		run.MaxAttempts, run.StartedAt, nullableTime(run.CompletedAt), run.Error)
+		RETURNING id
+	),` + workflowChildrenCTEs
+
+var claimWorkflowRunSQL = `
+	WITH run AS (
+		INSERT INTO workflow_runs (` + workflowRunColumns + `)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now())
+		ON CONFLICT (idempotency_key) WHERE idempotency_key <> '' AND state <> 'failed' DO NOTHING
+		RETURNING id
+	),` + workflowChildrenCTEs
+
+// workflowRunArgs returns the parameters of saveWorkflowRunSQL and
+// claimWorkflowRunSQL.
+func workflowRunArgs(run models.WorkflowRun) []any {
+	n := len(run.Steps)
+	stepIDs, positions, names, states := make([]string, n), make([]int32, n), make([]string, n), make([]string, n)
+	attempts, maxAttempts, errs := make([]int32, n), make([]int32, n), make([]string, n)
+	started, completed := make([]*time.Time, n), make([]*time.Time, n)
+	for i, step := range run.Steps {
+		stepIDs[i] = childID(run.ID, "step", i)
+		positions[i] = int32(i)
+		names[i], states[i], errs[i] = step.Name, step.State, step.Error
+		attempts[i], maxAttempts[i] = int32(step.Attempt), int32(step.MaxAttempts)
+		started[i], completed[i] = step.StartedAt, step.CompletedAt
+	}
+	m := len(run.Events)
+	eventIDs, seqs, types, messages, stamps := make([]string, m), make([]int32, m), make([]string, m), make([]string, m), make([]time.Time, m)
+	for i, event := range run.Events {
+		eventIDs[i] = childID(run.ID, "event", i)
+		seqs[i] = int32(i)
+		types[i], messages[i], stamps[i] = event.Type, event.Message, event.Timestamp
+	}
+	return []any{
+		run.ID, run.Name, run.Kind, run.State, run.Service, run.IdempotencyKey, run.Attempt,
+		run.MaxAttempts, run.StartedAt, nullableTime(run.CompletedAt), run.Error,
+		stepIDs, positions, names, states, attempts, maxAttempts, started, completed, errs,
+		eventIDs, seqs, types, messages, stamps,
+	}
+}
+
+// childID derives a stable UUID for a run's step or event at index i.
+func childID(runID, kind string, i int) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s/%s/%d", runID, kind, i)))
+	b := sum[:16]
+	b[6] = (b[6] & 0x0f) | 0x50
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// SaveWorkflowRun writes the run, its steps and events, and refreshes its
+// heartbeat, in one statement. It returns workflows.ErrAbandoned if the
+// stored run was marked failed after its heartbeat went stale, or if another
+// run holds its idempotency key, so a stalled owner cannot bring it back.
+func (s *PostgresStore) SaveWorkflowRun(ctx context.Context, run models.WorkflowRun) error {
+	var saved int
+	err := s.db.QueryRowContext(ctx, saveWorkflowRunSQL, workflowRunArgs(run)...).Scan(&saved)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == activeKeyIndex {
-			// Another run holds the key: this run was abandoned and must not
-			// become a second active run for it.
 			return fmt.Errorf("idempotency key %q is held by another run: %w", run.IdempotencyKey, workflows.ErrAbandoned)
 		}
 		return err
 	}
-	if n, err := result.RowsAffected(); err != nil {
-		return err
-	} else if n == 0 {
+	if saved == 0 {
 		return workflows.ErrAbandoned
-	}
-	return writeWorkflowChildrenTx(ctx, tx, run)
-}
-
-// writeWorkflowChildrenTx replaces the run's steps and events.
-func writeWorkflowChildrenTx(ctx context.Context, tx *sql.Tx, run models.WorkflowRun) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM workflow_steps WHERE workflow_id = $1`, run.ID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM workflow_events WHERE workflow_id = $1`, run.ID); err != nil {
-		return err
-	}
-	for position, step := range run.Steps {
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO workflow_steps (
-				id, workflow_id, position, name, state, attempt, max_attempts,
-				started_at, completed_at, error
-			)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-		`, NewID(), run.ID, position, step.Name, step.State, step.Attempt, step.MaxAttempts,
-			nullableTime(step.StartedAt), nullableTime(step.CompletedAt), step.Error); err != nil {
-			return err
-		}
-	}
-	for _, event := range run.Events {
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO workflow_events (id, workflow_id, event_type, message, timestamp)
-			VALUES ($1,$2,$3,$4,$5)
-		`, NewID(), run.ID, event.Type, event.Message, event.Timestamp); err != nil {
-			return err
-		}
 	}
 	return nil
 }
@@ -303,59 +341,29 @@ func writeWorkflowChildrenTx(ctx context.Context, tx *sql.Tx, run models.Workflo
 // The insert and the check are one statement, arbitrated by the unique
 // partial index on active keys. A concurrent claim for the same key waits on
 // the index entry until the first one commits, then inserts nothing.
-func (s *PostgresStore) ClaimWorkflowRun(ctx context.Context, run models.WorkflowRun, staleAfter time.Duration) (_ models.WorkflowRun, _ bool, err error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
+func (s *PostgresStore) ClaimWorkflowRun(ctx context.Context, run models.WorkflowRun, staleAfter time.Duration) (models.WorkflowRun, bool, error) {
+	if _, err := s.abandonStaleRuns(ctx, &run.IdempotencyKey, staleAfter); err != nil {
 		return models.WorkflowRun{}, false, err
 	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-	if err = abandonStaleRunsTx(ctx, tx, run.IdempotencyKey, staleAfter); err != nil {
+	var inserted int
+	if err := s.db.QueryRowContext(ctx, claimWorkflowRunSQL, workflowRunArgs(run)...).Scan(&inserted); err != nil {
 		return models.WorkflowRun{}, false, err
 	}
-	var insertedID string
-	err = tx.QueryRowContext(ctx, `
-		INSERT INTO workflow_runs (
-			id, name, kind, state, service, idempotency_key, attempt, max_attempts,
-			started_at, completed_at, error, heartbeat_at
-		)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now())
-		ON CONFLICT (idempotency_key) WHERE idempotency_key <> '' AND state <> 'failed' DO NOTHING
-		RETURNING id
-	`, run.ID, run.Name, run.Kind, run.State, run.Service, run.IdempotencyKey, run.Attempt,
-		run.MaxAttempts, run.StartedAt, nullableTime(run.CompletedAt), run.Error).Scan(&insertedID)
-	switch {
-	case err == nil:
-		if err = writeWorkflowChildrenTx(ctx, tx, run); err != nil {
-			return models.WorkflowRun{}, false, err
-		}
-		if err = tx.Commit(); err != nil {
-			return models.WorkflowRun{}, false, err
-		}
+	if inserted == 1 {
 		return run, true, nil
-	case !errors.Is(err, sql.ErrNoRows):
-		return models.WorkflowRun{}, false, err
 	}
-	// The key is held. Read the holder in a new statement, which sees the
-	// committed winner.
+	// The key is held. This new statement sees the committed winner.
 	var holderID string
-	err = tx.QueryRowContext(ctx, `
+	err := s.db.QueryRowContext(ctx, `
 		SELECT id FROM workflow_runs
 		WHERE idempotency_key = $1 AND state <> 'failed'
 	`, run.IdempotencyKey).Scan(&holderID)
 	if errors.Is(err, sql.ErrNoRows) {
 		// The holder failed after the insert gave way. Report it as failed so
 		// the engine claims again.
-		err = tx.Commit()
-		return models.WorkflowRun{IdempotencyKey: run.IdempotencyKey, State: workflows.StateFailed}, false, err
+		return models.WorkflowRun{IdempotencyKey: run.IdempotencyKey, State: workflows.StateFailed}, false, nil
 	}
 	if err != nil {
-		return models.WorkflowRun{}, false, err
-	}
-	if err = tx.Commit(); err != nil {
 		return models.WorkflowRun{}, false, err
 	}
 	holder, err := s.loadWorkflowRun(ctx, holderID)
@@ -367,63 +375,32 @@ func (s *PostgresStore) ClaimWorkflowRun(ctx context.Context, run models.Workflo
 
 // AbandonStaleWorkflowRuns marks failed every running run whose heartbeat is
 // older than staleAfter.
-func (s *PostgresStore) AbandonStaleWorkflowRuns(ctx context.Context, staleAfter time.Duration) (n int, err error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, err
-	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-	n, err = abandonStaleRuns(ctx, tx, nil, staleAfter)
-	if err != nil {
-		return 0, err
-	}
-	return n, tx.Commit()
+func (s *PostgresStore) AbandonStaleWorkflowRuns(ctx context.Context, staleAfter time.Duration) (int, error) {
+	return s.abandonStaleRuns(ctx, nil, staleAfter)
 }
 
-func abandonStaleRunsTx(ctx context.Context, tx *sql.Tx, key string, staleAfter time.Duration) error {
-	_, err := abandonStaleRuns(ctx, tx, &key, staleAfter)
-	return err
-}
-
-// abandonStaleRuns marks stale running runs failed: those for key, or all of
-// them when key is nil.
-func abandonStaleRuns(ctx context.Context, tx *sql.Tx, key *string, staleAfter time.Duration) (int, error) {
-	message := workflows.AbandonedMessage(staleAfter)
-	rows, err := tx.QueryContext(ctx, `
-		UPDATE workflow_runs
-		SET state = 'failed', error = $3, completed_at = now()
-		WHERE ($1::text IS NULL OR idempotency_key = $1) AND state = 'running'
-		  AND heartbeat_at < now() - make_interval(secs => $2)
-		RETURNING id
-	`, key, staleAfter.Seconds(), message)
-	if err != nil {
-		return 0, err
-	}
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			_ = rows.Close()
-			return 0, err
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Close(); err != nil {
-		return 0, err
-	}
-	for _, id := range ids {
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO workflow_events (id, workflow_id, event_type, message, timestamp)
-			VALUES ($1, $2, 'workflow-abandoned', $3, now())
-		`, NewID(), id, message); err != nil {
-			return 0, err
-		}
-	}
-	return len(ids), nil
+// abandonStaleRuns marks stale running runs failed, those for key or all of
+// them when key is nil, and appends a workflow-abandoned event to each, in
+// one statement.
+func (s *PostgresStore) abandonStaleRuns(ctx context.Context, key *string, staleAfter time.Duration) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `
+		WITH abandoned AS (
+			UPDATE workflow_runs
+			SET state = 'failed', error = $3, completed_at = now()
+			WHERE ($1::text IS NULL OR idempotency_key = $1) AND state = 'running'
+			  AND heartbeat_at < now() - make_interval(secs => $2)
+			RETURNING id
+		), events AS (
+			INSERT INTO workflow_events (id, workflow_id, seq, event_type, message, timestamp)
+			SELECT gen_random_uuid(), a.id,
+			       (SELECT coalesce(max(seq), -1) + 1 FROM workflow_events e WHERE e.workflow_id = a.id),
+			       'workflow-abandoned', $3, now()
+			FROM abandoned a
+		)
+		SELECT count(*) FROM abandoned
+	`, key, staleAfter.Seconds(), workflows.AbandonedMessage(staleAfter)).Scan(&n)
+	return n, err
 }
 
 // HeartbeatWorkflowRun refreshes a running run's heartbeat. It returns
@@ -560,7 +537,7 @@ func (s *PostgresStore) loadWorkflowEvents(ctx context.Context, workflowID strin
 		SELECT timestamp, event_type, message
 		FROM workflow_events
 		WHERE workflow_id = $1
-		ORDER BY timestamp ASC
+		ORDER BY seq ASC NULLS FIRST, timestamp ASC
 	`, workflowID)
 	if err != nil {
 		return nil, err
@@ -812,6 +789,13 @@ CREATE TABLE IF NOT EXISTS workflow_events (
     message TEXT NOT NULL,
     timestamp TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE INDEX IF NOT EXISTS idx_workflow_steps_workflow ON workflow_steps(workflow_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_events_workflow ON workflow_events(workflow_id);
+
+-- Position of the event in its run. Rows written before it existed keep NULL
+-- and sort by timestamp.
+ALTER TABLE workflow_events ADD COLUMN IF NOT EXISTS seq INTEGER;
 
 CREATE INDEX IF NOT EXISTS idx_deployments_service_started
     ON deployments(service_id, started_at DESC);
