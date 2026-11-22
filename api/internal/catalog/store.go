@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gaurav-gs7/attesta/api/internal/models"
+	"github.com/gaurav-gs7/attesta/api/internal/workflows"
 )
 
 var ErrNotFound = errors.New("not found")
@@ -22,10 +23,7 @@ type Store interface {
 	RecordDeployment(context.Context, models.Deployment) (models.Deployment, error)
 	LatestDeployment(context.Context, string) (models.Deployment, error)
 	ListDeployments(context.Context, string) ([]models.Deployment, error)
-	SaveWorkflowRun(context.Context, models.WorkflowRun) error
-	GetWorkflowRun(context.Context, string) (models.WorkflowRun, error)
-	GetWorkflowRunByIdempotencyKey(context.Context, string) (models.WorkflowRun, error)
-	ListWorkflowRuns(context.Context) ([]models.WorkflowRun, error)
+	workflows.Store
 	SaveIncidentRecord(context.Context, models.IncidentRecord) error
 	GetIncidentRecord(context.Context, string) (models.IncidentRecord, error)
 	ListIncidentRecords(context.Context) ([]models.IncidentRecord, error)

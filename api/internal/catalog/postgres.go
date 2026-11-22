@@ -12,6 +12,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/gaurav-gs7/attesta/api/internal/models"
+	"github.com/gaurav-gs7/attesta/api/internal/workflows"
 )
 
 type PostgresStore struct {
@@ -201,7 +202,11 @@ func (s *PostgresStore) ListDeployments(ctx context.Context, serviceID string) (
 	return deployments, rows.Err()
 }
 
-func (s *PostgresStore) SaveWorkflowRun(ctx context.Context, run models.WorkflowRun) error {
+// SaveWorkflowRun writes the run, its steps and events, and refreshes its
+// heartbeat. It returns workflows.ErrAbandoned if the stored run was marked
+// failed after its heartbeat went stale, so a stalled owner cannot bring it
+// back.
+func (s *PostgresStore) SaveWorkflowRun(ctx context.Context, run models.WorkflowRun) (err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -211,13 +216,19 @@ func (s *PostgresStore) SaveWorkflowRun(ctx context.Context, run models.Workflow
 			_ = tx.Rollback()
 		}
 	}()
+	if err = saveWorkflowRunTx(ctx, tx, run); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
 
-	_, err = tx.ExecContext(ctx, `
+func saveWorkflowRunTx(ctx context.Context, tx *sql.Tx, run models.WorkflowRun) error {
+	result, err := tx.ExecContext(ctx, `
 		INSERT INTO workflow_runs (
 			id, name, kind, state, service, idempotency_key, attempt, max_attempts,
-			started_at, completed_at, error
+			started_at, completed_at, error, heartbeat_at
 		)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now())
 		ON CONFLICT (id) DO UPDATE SET
 			name = EXCLUDED.name,
 			kind = EXCLUDED.kind,
@@ -228,42 +239,148 @@ func (s *PostgresStore) SaveWorkflowRun(ctx context.Context, run models.Workflow
 			max_attempts = EXCLUDED.max_attempts,
 			started_at = EXCLUDED.started_at,
 			completed_at = EXCLUDED.completed_at,
-			error = EXCLUDED.error
+			error = EXCLUDED.error,
+			heartbeat_at = now()
+		-- A failed run stays failed: an owner whose run was abandoned must not
+		-- revive it after another run took the idempotency key.
+		WHERE workflow_runs.state <> 'failed' OR EXCLUDED.state = 'failed'
 	`, run.ID, run.Name, run.Kind, run.State, run.Service, run.IdempotencyKey, run.Attempt,
 		run.MaxAttempts, run.StartedAt, nullableTime(run.CompletedAt), run.Error)
 	if err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `DELETE FROM workflow_steps WHERE workflow_id = $1`, run.ID); err != nil {
+	if n, err := result.RowsAffected(); err != nil {
+		return err
+	} else if n == 0 {
+		return workflows.ErrAbandoned
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM workflow_steps WHERE workflow_id = $1`, run.ID); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `DELETE FROM workflow_events WHERE workflow_id = $1`, run.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM workflow_events WHERE workflow_id = $1`, run.ID); err != nil {
 		return err
 	}
 	for position, step := range run.Steps {
-		_, err = tx.ExecContext(ctx, `
+		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO workflow_steps (
 				id, workflow_id, position, name, state, attempt, max_attempts,
 				started_at, completed_at, error
 			)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 		`, NewID(), run.ID, position, step.Name, step.State, step.Attempt, step.MaxAttempts,
-			nullableTime(step.StartedAt), nullableTime(step.CompletedAt), step.Error)
-		if err != nil {
+			nullableTime(step.StartedAt), nullableTime(step.CompletedAt), step.Error); err != nil {
 			return err
 		}
 	}
 	for _, event := range run.Events {
-		_, err = tx.ExecContext(ctx, `
+		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO workflow_events (id, workflow_id, event_type, message, timestamp)
 			VALUES ($1,$2,$3,$4,$5)
-		`, NewID(), run.ID, event.Type, event.Message, event.Timestamp)
-		if err != nil {
+		`, NewID(), run.ID, event.Type, event.Message, event.Timestamp); err != nil {
 			return err
 		}
 	}
-	err = tx.Commit()
-	return err
+	return nil
+}
+
+// ClaimWorkflowRun implements the engine's idempotency contract: it releases
+// the key from a running run whose heartbeat is older than staleAfter, then
+// stores run unless another run for the key is running or succeeded, which it
+// returns instead.
+func (s *PostgresStore) ClaimWorkflowRun(ctx context.Context, run models.WorkflowRun, staleAfter time.Duration) (_ models.WorkflowRun, _ bool, err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return models.WorkflowRun{}, false, err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	// Serialise claims for one key across API replicas.
+	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext('attesta.workflow-key:' || $1))`, run.IdempotencyKey); err != nil {
+		return models.WorkflowRun{}, false, err
+	}
+	if err = abandonStaleRunsTx(ctx, tx, run.IdempotencyKey, staleAfter); err != nil {
+		return models.WorkflowRun{}, false, err
+	}
+	var holderID string
+	err = tx.QueryRowContext(ctx, `
+		SELECT id FROM workflow_runs
+		WHERE idempotency_key = $1 AND state <> 'failed'
+		ORDER BY (state = 'succeeded') DESC, started_at DESC
+		LIMIT 1
+	`, run.IdempotencyKey).Scan(&holderID)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		if err = saveWorkflowRunTx(ctx, tx, run); err != nil {
+			return models.WorkflowRun{}, false, err
+		}
+		if err = tx.Commit(); err != nil {
+			return models.WorkflowRun{}, false, err
+		}
+		return run, true, nil
+	case err != nil:
+		return models.WorkflowRun{}, false, err
+	}
+	if err = tx.Commit(); err != nil {
+		return models.WorkflowRun{}, false, err
+	}
+	holder, err := s.loadWorkflowRun(ctx, holderID)
+	if err != nil {
+		return models.WorkflowRun{}, false, err
+	}
+	return holder, false, nil
+}
+
+func abandonStaleRunsTx(ctx context.Context, tx *sql.Tx, key string, staleAfter time.Duration) error {
+	message := workflows.AbandonedMessage(staleAfter)
+	rows, err := tx.QueryContext(ctx, `
+		UPDATE workflow_runs
+		SET state = 'failed', error = $3, completed_at = now()
+		WHERE idempotency_key = $1 AND state = 'running'
+		  AND heartbeat_at < now() - make_interval(secs => $2)
+		RETURNING id
+	`, key, staleAfter.Seconds(), message)
+	if err != nil {
+		return err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO workflow_events (id, workflow_id, event_type, message, timestamp)
+			VALUES ($1, $2, 'workflow-abandoned', $3, now())
+		`, NewID(), id, message); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// HeartbeatWorkflowRun refreshes a running run's heartbeat. It returns
+// workflows.ErrAbandoned if the run is no longer running.
+func (s *PostgresStore) HeartbeatWorkflowRun(ctx context.Context, id string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE workflow_runs SET heartbeat_at = now() WHERE id = $1 AND state = 'running'`, id)
+	if err != nil {
+		return err
+	}
+	if n, err := result.RowsAffected(); err != nil {
+		return err
+	} else if n == 0 {
+		return workflows.ErrAbandoned
+	}
+	return nil
 }
 
 func (s *PostgresStore) GetWorkflowRun(ctx context.Context, id string) (models.WorkflowRun, error) {
@@ -280,7 +397,7 @@ func (s *PostgresStore) GetWorkflowRunByIdempotencyKey(ctx context.Context, key 
 		SELECT id
 		FROM workflow_runs
 		WHERE idempotency_key = $1
-		ORDER BY started_at DESC
+		ORDER BY (state <> 'failed') DESC, started_at DESC
 		LIMIT 1
 	`, key).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -603,6 +720,10 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
     completed_at TIMESTAMPTZ,
     error TEXT NOT NULL DEFAULT ''
 );
+
+-- Refreshed on every save and periodically while a run executes. A running
+-- run with a stale heartbeat no longer holds its idempotency key.
+ALTER TABLE workflow_runs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT now();
 
 CREATE TABLE IF NOT EXISTS workflow_steps (
     id UUID PRIMARY KEY,

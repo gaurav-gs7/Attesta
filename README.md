@@ -16,7 +16,7 @@ Every value Attesta reports is either measured, recorded, or explicitly marked a
 | Rollback endpoints | Record a rollback request. | They do not change the cluster. Your deployment tooling, or the controller, must act. |
 | Incidents | Alertmanager webhook (v4) with fingerprint dedupe and resolve; timeline from recorded events only. | Root cause is never inferred; the postmortem draft leaves it as TODO. |
 | Readiness score | Checks which metadata fields were registered. | It does not inspect the cluster or the repository. |
-| Workflow runner | Ordered in-process steps with per-step state and events, persisted to PostgreSQL. | Not crash-resumable; retries are immediate. A failed onboarding run is currently replayed for the same spec (known issue). |
+| Workflow runner | Ordered in-process steps with per-step state and events, persisted to PostgreSQL. | A crashed run is re-run from the start, not resumed; retries are immediate. Only succeeded runs are replayed; failed and abandoned ones are re-run. |
 | CRDs | `RolloutGuard` is reconciled. | `AttestaService` and `SLOPolicy` are declarative records only; nothing reconciles them. |
 
 ## Components

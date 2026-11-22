@@ -38,6 +38,7 @@ type Server struct {
 	startedAt     time.Time
 	metrics       *serverMetrics
 	workflows     *workflows.Engine
+	workflowOpts  []workflows.Option
 }
 
 type Option func(*Server)
@@ -62,6 +63,14 @@ func WithPrometheusURL(url string) Option {
 	}
 }
 
+// WithWorkflowOptions configures the workflow engine, for example how long an
+// identical request waits for an in-flight onboarding run.
+func WithWorkflowOptions(opts ...workflows.Option) Option {
+	return func(s *Server) {
+		s.workflowOpts = append(s.workflowOpts, opts...)
+	}
+}
+
 func NewServer(store catalog.Store, generator *templates.Generator, opts ...Option) *Server {
 	server := &Server{
 		store:        store,
@@ -69,11 +78,11 @@ func NewServer(store catalog.Store, generator *templates.Generator, opts ...Opti
 		maxBodyBytes: 1 << 20,
 		startedAt:    time.Now().UTC(),
 		metrics:      newServerMetrics(),
-		workflows:    workflows.NewEngine(store),
 	}
 	for _, opt := range opts {
 		opt(server)
 	}
+	server.workflows = workflows.NewEngine(store, server.workflowOpts...)
 	return server
 }
 
@@ -144,7 +153,7 @@ func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
 	var created models.Service
 	var generated templates.Result
 	idempotent := false
-	run := s.workflows.Run(r.Context(), workflows.Spec{
+	run, outcome := s.workflows.RunIdempotent(r.Context(), workflows.Spec{
 		Name:           "service-onboarding",
 		Kind:           "attesta.service.onboarding",
 		Service:        service.Name,
@@ -179,7 +188,13 @@ func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
 				MaxAttempts: 1,
 				Run: func(ctx context.Context) error {
 					if idempotent {
-						return nil
+						// The service already existed, for example because an
+						// earlier run failed after creating it. Record the
+						// initial deployment only if that run did not.
+						existing, err := s.store.ListDeployments(ctx, created.ID)
+						if err != nil || len(existing) > 0 {
+							return err
+						}
 					}
 					_, err := s.store.RecordDeployment(ctx, models.Deployment{
 						ServiceID:   created.ID,
@@ -203,6 +218,14 @@ func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 	})
+	if outcome == workflows.InProgress {
+		w.Header().Set("Retry-After", "1")
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":    "an identical onboarding request is still in progress; retry shortly",
+			"workflow": run,
+		})
+		return
+	}
 	if run.State != workflows.StateSucceeded {
 		if strings.Contains(run.Error, "different metadata") {
 			writeJSON(w, http.StatusConflict, map[string]any{"error": run.Error, "workflow": run})
@@ -211,7 +234,7 @@ func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": run.Error, "workflow": run})
 		return
 	}
-	if created.ID == "" {
+	if outcome == workflows.Replayed {
 		created, err = s.store.GetServiceByName(r.Context(), service.Name)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -641,8 +664,13 @@ func (s *Server) getIncident(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, record)
 }
 
-func (s *Server) listWorkflows(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"workflows": s.workflows.List()})
+func (s *Server) listWorkflows(w http.ResponseWriter, r *http.Request) {
+	runs, err := s.workflows.List(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"workflows": runs})
 }
 
 func (s *Server) getWorkflow(w http.ResponseWriter, r *http.Request) {

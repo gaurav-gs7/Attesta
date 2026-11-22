@@ -58,7 +58,14 @@ The score counts which metadata fields were registered for a service. It does no
 
 API operations run as ordered steps in-process. Each run records per-step state, attempts and events, and is persisted to PostgreSQL when `DATABASE_URL` is set. Service onboarding uses a deterministic idempotency key derived from the normalised spec.
 
-The runner is not crash-resumable: if the process exits mid-run, the last persisted state stays `running` and the run is not resumed. Retries are immediate, without backoff. A failed onboarding run is currently replayed for the same spec instead of being retried; this is a known issue. Persistence failures fail the request rather than being reported as success.
+Idempotency keys follow one rule: at most one run per key is not failed.
+
+- **Succeeded** runs are replayed: an identical request gets the earlier run and nothing executes.
+- **Failed** runs are history and do not hold the key, so the next identical request runs the workflow again. That includes a run that failed only because the store was briefly unavailable. Steps are written to be re-run: onboarding accepts a service row that an earlier attempt created with the same spec, and records the initial deployment only if that attempt did not.
+- **Running** runs hold the key while they heartbeat. An identical request waits up to five seconds for the run to finish and then gets its result, or a `409` with `Retry-After` if it is still running. A running run whose heartbeat is more than a minute old, because its process crashed, is marked failed (`abandoned`) and the key is released. Its owner, if it is merely stalled, finds its run abandoned on the next save or heartbeat and stops. It cannot write the run back.
+- A run that failed to persist is never treated as recorded. The engine keeps no in-memory copy, so it cannot replay one.
+
+The runner does not resume a crashed run from its last step; the next request re-runs it from the start. Retries within a run are immediate, without backoff. Persistence failures fail the request rather than being reported as success.
 
 ## CRDs
 

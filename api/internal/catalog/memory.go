@@ -7,22 +7,24 @@ import (
 	"sync"
 
 	"github.com/gaurav-gs7/attesta/api/internal/models"
+	"github.com/gaurav-gs7/attesta/api/internal/workflows"
 )
 
 type MemoryStore struct {
 	mu          sync.RWMutex
 	services    map[string]models.Service
 	deployments map[string][]models.Deployment
-	workflows   map[string]models.WorkflowRun
 	incidents   map[string]models.IncidentRecord
+	// Workflow runs, with the engine's idempotency contract.
+	*workflows.MemoryStore
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		services:    make(map[string]models.Service),
 		deployments: make(map[string][]models.Deployment),
-		workflows:   make(map[string]models.WorkflowRun),
 		incidents:   make(map[string]models.IncidentRecord),
+		MemoryStore: workflows.NewMemoryStore(),
 	}
 }
 
@@ -102,47 +104,6 @@ func (s *MemoryStore) ListDeployments(_ context.Context, serviceID string) ([]mo
 		return deployments[i].StartedAt.After(deployments[j].StartedAt)
 	})
 	return deployments, nil
-}
-
-func (s *MemoryStore) SaveWorkflowRun(_ context.Context, run models.WorkflowRun) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.workflows[run.ID] = run
-	return nil
-}
-
-func (s *MemoryStore) GetWorkflowRun(_ context.Context, id string) (models.WorkflowRun, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	run, ok := s.workflows[id]
-	if !ok {
-		return models.WorkflowRun{}, ErrNotFound
-	}
-	return run, nil
-}
-
-func (s *MemoryStore) GetWorkflowRunByIdempotencyKey(_ context.Context, key string) (models.WorkflowRun, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, run := range s.workflows {
-		if run.IdempotencyKey == key {
-			return run, nil
-		}
-	}
-	return models.WorkflowRun{}, ErrNotFound
-}
-
-func (s *MemoryStore) ListWorkflowRuns(_ context.Context) ([]models.WorkflowRun, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	runs := make([]models.WorkflowRun, 0, len(s.workflows))
-	for _, run := range s.workflows {
-		runs = append(runs, run)
-	}
-	sort.Slice(runs, func(i, j int) bool {
-		return runs[i].StartedAt.After(runs[j].StartedAt)
-	})
-	return runs, nil
 }
 
 func (s *MemoryStore) SaveIncidentRecord(_ context.Context, record models.IncidentRecord) error {
