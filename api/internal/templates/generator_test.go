@@ -198,14 +198,29 @@ func assertCountsRequests(t *testing.T, cmd *exec.Cmd) {
 	for i := 0; i < 3; i++ {
 		get(t, base+"/")
 	}
-	after := get(t, base+"/metrics")
-	for _, want := range []string{
+	// A request is counted after its response is written (that is when its
+	// duration is known), so a scrape right after the response can precede
+	// the count by a moment. Poll briefly instead of racing it.
+	want := []string{
 		`http_requests_total{service="payments-api",status="200"} 3`,
 		`http_request_duration_seconds_count{service="payments-api"} 3`,
 		`http_request_duration_seconds_bucket{service="payments-api",le="+Inf"} 3`,
-	} {
-		if !strings.Contains(after, want) {
-			t.Fatalf("metrics missing %q after 3 requests:\n%s", want, after)
+	}
+	var after string
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		after = get(t, base+"/metrics")
+		missing := ""
+		for _, w := range want {
+			if !strings.Contains(after, w) {
+				missing = w
+				break
+			}
+		}
+		if missing == "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("metrics missing %q after 3 requests:\n%s", missing, after)
 		}
 	}
 	if strings.Contains(after, "db_") {
