@@ -15,7 +15,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -23,7 +22,6 @@ import (
 	dynamicinformer "k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
-	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
@@ -133,9 +131,7 @@ func NewRolloutGuardControllerWithClients(kube kubernetes.Interface, dyn dynamic
 
 	recorder := opts.Recorder
 	if recorder == nil {
-		broadcaster := record.NewBroadcaster()
-		broadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: kube.CoreV1().Events("")})
-		recorder = broadcaster.NewRecorder(runtime.NewScheme(), corev1.EventSource{Component: "attesta-controller"})
+		recorder = newEventRecorder(kube)
 	}
 
 	c := &RolloutGuardController{

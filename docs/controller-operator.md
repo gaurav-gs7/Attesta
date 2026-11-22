@@ -15,7 +15,7 @@
 5. If the guard sets `spec.checks` and the controller has `--prometheus-url`, analyse the revision rolling out. See Metric Analysis.
 6. On `Healthy` (and, with analysis, after enough passing checks), record the current ReplicaSet's revision and `pod-template-hash` as the last healthy template.
 7. On `Blocked` (a progress deadline, or too many consecutive failed checks), if `spec.rollback.enabled` is true, restore the last healthy template. See Rollback Rules.
-8. Patch `status` only when it changed, and emit an Event only when the phase or reason changed.
+8. Patch `status` only when it changed, and emit an Event only when the phase or reason changed. client-go rate-limits events per object (a burst of 25, then one every five minutes); the controller keys that limit by reason as well, so a run of `ProgressDeadlineExceeded` or `RollbackFailed` warnings cannot use up the budget and cause a `RollbackTriggered` event to be dropped.
 
 ### Reads Come From The Cache
 
