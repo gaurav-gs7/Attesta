@@ -52,8 +52,8 @@ func TestPanickingStepFailsItsRun(t *testing.T) {
 	spec := Spec{Name: "onboard", Kind: "test", IdempotencyKey: "k", Steps: []Step{{
 		Name: "boom",
 		Run: func(context.Context) error {
-			var m map[string]int
-			m["x"] = 1 // nil map write
+			var steps []Step
+			_ = steps[len(steps)] // index out of range
 			return nil
 		},
 	}}}
