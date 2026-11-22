@@ -276,8 +276,9 @@ wait_until "controller rolls app2 back to $GOOD_IMAGE on failed metric checks" 1
 if kubectl -n "$NS" get deployment app2 -o 'jsonpath={.status.conditions[*].reason}' | grep -q ProgressDeadlineExceeded; then
   fail "app2 hit ProgressDeadlineExceeded; the rollback must come from metric analysis"
 fi
-message="$(guard message)"
-[[ "$message" == *"error rate 20.00% > 1.00%"* ]] || fail "guard message does not carry the measured cause: $message"
+message="$(kubectl -n "$NS" get rolloutguard app2-rollout -o 'jsonpath={.status.conditions[?(@.type=="RolledBack")].message}')"
+[[ "$message" == *"AnalysisFailed"* && "$message" == *"error rate 20.00% > 1.00%"* ]] ||
+  fail "RolledBack condition does not carry the measured cause: $message"
 kubectl -n "$NS" rollout status deployment/app2 --timeout=120s
 
 failed="$(leader_metric 'attesta_rolloutguard_analysis_total{result="Failed"}')"

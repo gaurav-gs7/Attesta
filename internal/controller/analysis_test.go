@@ -219,6 +219,18 @@ func TestAnalysisRollsBackAfterConsecutiveFailures(t *testing.T) {
 	if got := h.field("phase"); got != PhaseRolledBack {
 		t.Fatalf("phase = %s, want %s", got, PhaseRolledBack)
 	}
+
+	// The next pass moves the phase on; the RolledBack condition keeps the cause.
+	h.setDeployment(func(d *appsv1.Deployment) {
+		d.Generation = 3
+		d.Status = appsv1.DeploymentStatus{ObservedGeneration: 2}
+	})
+	h.mustReconcile()
+	c := h.condition(ConditionRolledBack)
+	msg, _ := c["message"].(string)
+	if c["status"] != "True" || !strings.Contains(msg, "AnalysisFailed") || !strings.Contains(msg, "error rate 10.00% > 1.00%") {
+		t.Fatalf("RolledBack condition lost the cause: %v", c)
+	}
 }
 
 func TestAnalysisFailuresMustBeConsecutive(t *testing.T) {
