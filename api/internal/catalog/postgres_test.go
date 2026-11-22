@@ -156,13 +156,13 @@ func TestPostgresMigrationDeduplicatesActiveRuns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("migrate a database with duplicate active runs: %v", err)
 	}
-	defer migrated.Close()
+	defer func() { _ = migrated.Close() }()
 
 	rows, err := migrated.db.Query(`SELECT id, state FROM workflow_runs WHERE idempotency_key = 'dup' AND state <> 'failed'`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var kept []string
 	for rows.Next() {
 		var id, state string
