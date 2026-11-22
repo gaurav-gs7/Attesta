@@ -12,7 +12,10 @@
 #      nothing;
 #   6. after the leader pod is deleted the standby takes the Lease, and the
 #      new leader does not repeat the rollback it inherits;
-#   7. with metric analysis, a rollout Kubernetes considers healthy is rolled
+#   7. when the bad template is re-applied after the rollback, as GitOps
+#      self-heal would, the guard reports RollbackReverted and the controller
+#      does not roll back again;
+#   8. with metric analysis, a rollout Kubernetes considers healthy is rolled
 #      back after consecutive failed checks of the new revision's metrics.
 #
 # Prerequisites: kubectl pointing at a disposable cluster, and the image
@@ -197,6 +200,17 @@ wait_until "the new leader to sync and report ready" 60 \
 sleep 10
 [[ "$(annotation rollback-at)" == "$rolled_back_at" ]] || fail "the new leader repeated the inherited rollback"
 log "ok: the new leader left the already rolled-back Deployment alone"
+
+log "gitops revert: re-applying $BAD_IMAGE, as a self-healing GitOps tool would"
+kubectl -n "$NS" set image deployment/app app="$BAD_IMAGE"
+wait_until "the guard to report the reverted rollback" 120 \
+  bash -c "[[ \"\$(kubectl -n $NS get rolloutguard app-rollout -o 'jsonpath={.status.reason}')\" == RollbackReverted ]]"
+sleep 10
+image_is "$BAD_IMAGE" || fail "controller rolled back the re-applied template: image is $(image)"
+[[ "$(annotation rollback-at)" == "$rolled_back_at" ]] || fail "controller rolled back a second time after the revert"
+reverted="$(kubectl -n "$NS" get events --field-selector involvedObject.name=app-rollout,reason=RollbackReverted -o name | wc -l)"
+((reverted >= 1)) || fail "no RollbackReverted event on the guard"
+log "ok: re-applied template reported as RollbackReverted and left alone"
 
 log "metric analysis: deploying the in-cluster Prometheus stub"
 kubectl -n "$NS" create configmap prom-stub --from-file=stub.py=test/e2e/prometheus_stub.py --dry-run=client -o yaml | kubectl apply -f -

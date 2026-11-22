@@ -18,6 +18,18 @@ The controller watches `RolloutGuard` resources and the Deployments they referen
 
 It runs two replicas behind a leader-election Lease and exposes `/healthz`, `/readyz` and Prometheus metrics. The rules and limits are in [controller-operator.md](controller-operator.md).
 
+### Who owns the pod template
+
+A Deployment's pod template can have one owner. With GitOps that owner is Git: Argo CD or Flux makes the cluster match it, and with self-heal it undoes any change made in the cluster, including a rollback. An in-cluster rollback controller and a self-healing GitOps tool on the same Deployment will fight, flipping the template every time either reconciles.
+
+Attesta does not write to Git, so it treats a rollback as an emergency override of Git, not a new source of truth:
+
+- **Rollback on means self-heal off for that Deployment.** The generated Argo CD Application sets `selfHeal: false` when `rollbackOnFailure` is true, and keeps `selfHeal: true` otherwise. Automated sync stays on, so new commits still deploy. After a rollback the application shows OutOfSync. That is the correct signal: Git still holds the bad version, and someone has to revert the commit. The next sync of that application re-applies whatever Git holds.
+- **The controller never fights back.** If the template it rolled away from returns, from self-heal, a sync of an unrelated change in the same application, or a manual apply, the guard goes to `Blocked` with reason `RollbackReverted` and the controller does nothing more for that template. It names the Argo CD application or Flux object when the Deployment carries their tracking annotation or labels.
+- **If Git must stay authoritative at all times**, leave `spec.rollback.enabled` off. The guard still reports `Blocked` and `AnalysisFailed`, and the rollback belongs in the GitOps tool, for example by reverting the commit or using Argo Rollouts.
+
+Writing the revert to Git (opening a revert commit from the controller) would remove the conflict entirely. It is not implemented.
+
 ## API
 
 ### SLO gate

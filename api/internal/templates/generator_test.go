@@ -251,3 +251,35 @@ func get(t *testing.T, url string) string {
 	}
 	return string(b)
 }
+
+// Audit C-12: with controller rollback on, Argo CD self-heal would re-apply
+// the bad template from Git and undo the rollback.
+func TestArgoSelfHealIsOffWhenTheControllerOwnsRollback(t *testing.T) {
+	for _, tc := range []struct {
+		rollback     bool
+		wantSelfHeal bool
+	}{{true, false}, {false, true}} {
+		service := testService("go")
+		service.RollbackOnFailure = tc.rollback
+		raw := read(t, generate(t, service), "infra/argocd/application.yaml")
+		var app struct {
+			Spec struct {
+				SyncPolicy struct {
+					Automated struct {
+						Prune    bool `json:"prune"`
+						SelfHeal bool `json:"selfHeal"`
+					} `json:"automated"`
+				} `json:"syncPolicy"`
+			} `json:"spec"`
+		}
+		if err := yaml.Unmarshal([]byte(raw), &app); err != nil {
+			t.Fatalf("application.yaml does not parse: %v\n%s", err, raw)
+		}
+		if got := app.Spec.SyncPolicy.Automated.SelfHeal; got != tc.wantSelfHeal {
+			t.Fatalf("rollbackOnFailure=%v: selfHeal=%v, want %v\n%s", tc.rollback, got, tc.wantSelfHeal, raw)
+		}
+		if !app.Spec.SyncPolicy.Automated.Prune {
+			t.Fatalf("rollbackOnFailure=%v: automated sync lost prune", tc.rollback)
+		}
+	}
+}

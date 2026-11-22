@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -50,6 +51,11 @@ const (
 	reasonHealthyRevFailing   = "HealthyRevisionFailing"
 	reasonRollbackTriggered   = "RollbackTriggered"
 	reasonRollbackFailed      = "RollbackFailed"
+	reasonRollbackReverted    = "RollbackReverted"
+
+	argoTrackingAnnotation = "argocd.argoproj.io/tracking-id"
+	fluxKustomizeLabel     = "kustomize.toolkit.fluxcd.io/name"
+	fluxHelmLabel          = "helm.toolkit.fluxcd.io/name"
 
 	// guardsByDeploymentIndex maps "namespace/deployment" to the guards
 	// targeting that Deployment.
@@ -596,6 +602,9 @@ func (c *RolloutGuardController) recordHealthyRevision(ctx context.Context, depl
 	if status.RollbackTemplateHash != "" && status.HealthyTemplateHash != status.RollbackTemplateHash {
 		status.SetCondition(ConditionRolledBack, metav1.ConditionFalse, "NewRevisionHealthy",
 			fmt.Sprintf("revision %s rolled out healthy after the last rollback", status.HealthyRevision))
+		// A new revision is healthy, so the rolled-back template is no longer
+		// the one to protect against.
+		status.RollbackFromTemplateHash = ""
 	}
 	return nil
 }
@@ -622,6 +631,21 @@ func (c *RolloutGuardController) rollback(ctx context.Context, guard *unstructur
 		status.Message = fmt.Sprintf("deployment %s is already on the last healthy template (revision %s) and is still blocked; not rolling back again",
 			deployment.Name, current.Annotations[revisionAnnotation])
 		rollbackTotal.WithLabelValues("skipped_already_healthy").Inc()
+		return nil
+	}
+
+	if current != nil && status.RollbackFromTemplateHash != "" && current.Labels[podTemplateHashLabel] == status.RollbackFromTemplateHash {
+		// The template this guard rolled away from is back. Rolling back
+		// again would start a loop with whatever re-applied it, typically a
+		// GitOps tool with self-heal reconciling the bad version from Git.
+		// Only one side can own the pod template; report and stand down.
+		status.Reason = reasonRollbackReverted
+		status.Message = fmt.Sprintf("deployment %s is back on template %s (revision %s), which this guard rolled back at %s; it was re-applied%s. "+
+			"Not rolling back again: fix the source of truth, or deploy a new revision",
+			deployment.Name, status.RollbackFromTemplateHash, current.Annotations[revisionAnnotation],
+			orUnknown(deployment.Annotations[rollbackAtAnnotation]), gitOpsHint(deployment))
+		status.SetCondition(ConditionRolledBack, metav1.ConditionFalse, reasonRollbackReverted, status.Message)
+		rollbackTotal.WithLabelValues("skipped_reverted").Inc()
 		return nil
 	}
 
@@ -683,6 +707,9 @@ func (c *RolloutGuardController) rollback(ctx context.Context, guard *unstructur
 	status.Message = fmt.Sprintf("restored deployment %s from revision %s to healthy revision %s after %s: %s", deployment.Name, fromRevision, toRevision, cause, causeMessage)
 	status.RollbackRevision = toRevision
 	status.RollbackTemplateHash = status.HealthyTemplateHash
+	if current != nil {
+		status.RollbackFromTemplateHash = current.Labels[podTemplateHashLabel]
+	}
 	status.SetCondition(ConditionRolledBack, metav1.ConditionTrue, reasonRollbackTriggered, status.Message)
 	rollbackTotal.WithLabelValues("triggered").Inc()
 	return nil
@@ -755,6 +782,29 @@ func (c *RolloutGuardController) patchStatus(ctx context.Context, guard *unstruc
 		"status",
 	)
 	return err
+}
+
+// gitOpsHint names the GitOps tool that manages the Deployment, if its
+// markers are present, for messages about reverted rollbacks.
+func gitOpsHint(deployment *appsv1.Deployment) string {
+	if id := deployment.Annotations[argoTrackingAnnotation]; id != "" {
+		app, _, _ := strings.Cut(id, ":")
+		return fmt.Sprintf(" by Argo CD application %q, likely with selfHeal on; turn selfHeal off for it or revert the commit in Git", app)
+	}
+	if name := deployment.Labels[fluxKustomizeLabel]; name != "" {
+		return fmt.Sprintf(" by Flux Kustomization %q; revert the commit in Git or suspend it", name)
+	}
+	if name := deployment.Labels[fluxHelmLabel]; name != "" {
+		return fmt.Sprintf(" by Flux HelmRelease %q; revert the change in Git or suspend it", name)
+	}
+	return ""
+}
+
+func orUnknown(s string) string {
+	if s == "" {
+		return "an unknown time"
+	}
+	return s
 }
 
 func isOwnedByDeployment(refs []metav1.OwnerReference, uid types.UID) bool {

@@ -34,6 +34,7 @@ Rollback rewrites a Deployment's pod template, so every rule errs towards doing 
 - **Healthy target only.** The controller restores the template it last saw fully rolled out. If it has never seen this Deployment healthy, it reports `NoHealthyRevision` and does nothing.
 - **Never twice.** If the Deployment is already on the last healthy template and still blocked, it reports `HealthyRevisionFailing` and does nothing. This prevents rolling "back" onto a bad revision after the controller's own rollback produced a newer revision number.
 - **Reuses the healthy ReplicaSet.** The template is restored without its `pod-template-hash` label and without extra annotations, so the Deployment controller adopts the existing healthy ReplicaSet, as `kubectl rollout undo` does. Audit annotations (`attesta.io/rollback-from-revision`, `rollback-to-revision`, `rollback-at`, `rollback-by-guard`) are written on the Deployment itself.
+- **Never against whoever re-applied it.** The guard remembers the template it rolled away from. If that template comes back, from a GitOps tool with self-heal or a manual `kubectl apply`, the controller reports `RollbackReverted` with a Warning Event, names the Argo CD application or Flux object if the Deployment carries their markers, and does not roll back again. Rolling back would start a loop that flips the Deployment every progress deadline. The protection clears once a different revision rolls out healthy. See [Who owns the pod template](architecture.md#who-owns-the-pod-template).
 - **Retried on failure.** API errors during rollback set `RollbackFailed` and return an error, so the workqueue retries with backoff. If the healthy ReplicaSet has been garbage-collected, the controller reports `HealthyRevisionGone` and stops.
 
 ## Metric Analysis
@@ -67,7 +68,7 @@ spec:
 
 Not implemented: traffic shifting. `spec.steps` is accepted but not used, so the whole Deployment rolls out and analysis judges the new revision's pods as they take traffic.
 
-If an Argo CD Application with `selfHeal: true` manages the same Deployment, Argo CD will revert the controller's rollback to the version in Git. Disable self-heal for guarded applications, or leave rollback disabled and act on the guard's status instead.
+If an Argo CD Application with `selfHeal: true` manages the same Deployment, Argo CD reverts the controller's rollback to the version in Git; the controller then reports `RollbackReverted` and stands down. The Argo CD Application that `attesta service init` generates turns self-heal off when rollback is enabled. See [Who owns the pod template](architecture.md#who-owns-the-pod-template).
 
 ## Run Locally
 
@@ -127,7 +128,7 @@ Conditions:
 - `Blocked`
 - `RolledBack`, once a rollback has been attempted. It stays `True` until a different revision rolls out healthy.
 
-`lastTransitionTime` changes only when a condition's status changes. Other fields: `healthyRevision`, `healthyTemplateHash`, `healthyGeneration`, `rollbackRevision`, `rollbackTemplateHash`, replica counts, and the observed generations of the guard and the Deployment.
+`lastTransitionTime` changes only when a condition's status changes. Other fields: `healthyRevision`, `healthyTemplateHash`, `healthyGeneration`, `rollbackRevision`, `rollbackTemplateHash`, `rollbackFromTemplateHash`, replica counts, and the observed generations of the guard and the Deployment.
 
 ```bash
 kubectl get rolloutguards -A

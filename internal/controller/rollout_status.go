@@ -96,9 +96,13 @@ type RolloutGuardStatus struct {
 	HealthyGeneration   int64
 
 	// RollbackRevision and RollbackTemplateHash record the last rollback the
-	// controller performed.
-	RollbackRevision     string
-	RollbackTemplateHash string
+	// controller performed. RollbackFromTemplateHash is the template it rolled
+	// away from: if that template comes back (a GitOps tool with self-heal, or
+	// a manual apply), the controller reports it instead of rolling back again.
+	// It is cleared once a different revision rolls out healthy.
+	RollbackRevision         string
+	RollbackTemplateHash     string
+	RollbackFromTemplateHash string
 
 	// Analysis tracks metric checks of the revision currently rolling out.
 	// It is nil when analysis is off or the Deployment is on the healthy
@@ -210,6 +214,7 @@ func statusFromGuard(guard *unstructured.Unstructured) RolloutGuardStatus {
 	s.HealthyTemplateHash = str("healthyTemplateHash")
 	s.RollbackRevision = str("rollbackRevision")
 	s.RollbackTemplateHash = str("rollbackTemplateHash")
+	s.RollbackFromTemplateHash = str("rollbackFromTemplateHash")
 	s.HealthyGeneration, _, _ = unstructured.NestedInt64(guard.Object, "status", "healthyGeneration")
 	s.Analysis = analysisFromGuard(guard)
 
@@ -366,12 +371,13 @@ func (s RolloutGuardStatus) AsMap() map[string]any {
 		"conditions":           s.Conditions,
 	}
 	optional := map[string]string{
-		"serviceRef":           s.ServiceRef,
-		"strategy":             s.Strategy,
-		"healthyRevision":      s.HealthyRevision,
-		"healthyTemplateHash":  s.HealthyTemplateHash,
-		"rollbackRevision":     s.RollbackRevision,
-		"rollbackTemplateHash": s.RollbackTemplateHash,
+		"serviceRef":               s.ServiceRef,
+		"strategy":                 s.Strategy,
+		"healthyRevision":          s.HealthyRevision,
+		"healthyTemplateHash":      s.HealthyTemplateHash,
+		"rollbackRevision":         s.RollbackRevision,
+		"rollbackTemplateHash":     s.RollbackTemplateHash,
+		"rollbackFromTemplateHash": s.RollbackFromTemplateHash,
 	}
 	for key, value := range optional {
 		if value != "" {
