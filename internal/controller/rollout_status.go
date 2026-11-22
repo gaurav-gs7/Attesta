@@ -18,6 +18,7 @@ import (
 const (
 	PhaseProgressing    = "Progressing"
 	PhaseHealthy        = "Healthy"
+	PhaseVerifying      = "Verifying"
 	PhasePaused         = "Paused"
 	PhaseBlocked        = "Blocked"
 	PhaseRolledBack     = "RolledBack"
@@ -30,6 +31,7 @@ const (
 	ConditionHealthy         = "Healthy"
 	ConditionBlocked         = "Blocked"
 	ConditionRolledBack      = "RolledBack"
+	ConditionAnalysis        = "Analysis"
 )
 
 type RolloutGuardSpec struct {
@@ -37,6 +39,15 @@ type RolloutGuardSpec struct {
 	DeploymentRef   string
 	Strategy        string
 	RollbackEnabled bool
+}
+
+// ServiceLabel is the value of the "service" label that the service's
+// metrics carry: spec.serviceRef, or the Deployment's name.
+func (s RolloutGuardSpec) ServiceLabel(deploymentName string) string {
+	if s.ServiceRef != "" {
+		return s.ServiceRef
+	}
+	return deploymentName
 }
 
 func (s RolloutGuardSpec) DeploymentName(guardName string) string {
@@ -89,7 +100,85 @@ type RolloutGuardStatus struct {
 	RollbackRevision     string
 	RollbackTemplateHash string
 
+	// Analysis tracks metric checks of the revision currently rolling out.
+	// It is nil when analysis is off or the Deployment is on the healthy
+	// template.
+	Analysis *AnalysisStatus
+
 	Conditions []metav1.Condition
+}
+
+// AnalysisStatus is the state of metric analysis for one candidate revision.
+type AnalysisStatus struct {
+	CandidateRevision     string
+	CandidateTemplateHash string
+	CandidateGeneration   int64
+	ConsecutiveFailures   int
+	ConsecutivePasses     int
+	LastCheckTime         string
+	LastResult            string
+	LastMessage           string
+	Requests              *float64
+	ErrorRatePct          *float64
+	LatencyP95Ms          *float64
+}
+
+func (a *AnalysisStatus) asMap() map[string]any {
+	m := map[string]any{
+		"candidateRevision":     a.CandidateRevision,
+		"candidateTemplateHash": a.CandidateTemplateHash,
+		"candidateGeneration":   a.CandidateGeneration,
+		"consecutiveFailures":   a.ConsecutiveFailures,
+		"consecutivePasses":     a.ConsecutivePasses,
+	}
+	for key, value := range map[string]string{"lastCheckTime": a.LastCheckTime, "lastResult": a.LastResult, "lastMessage": a.LastMessage} {
+		if value != "" {
+			m[key] = value
+		}
+	}
+	for key, value := range map[string]*float64{"requests": a.Requests, "errorRatePct": a.ErrorRatePct, "latencyP95Ms": a.LatencyP95Ms} {
+		if value != nil {
+			m[key] = *value
+		}
+	}
+	return m
+}
+
+func analysisFromGuard(guard *unstructured.Unstructured) *AnalysisStatus {
+	m, found, _ := unstructured.NestedMap(guard.Object, "status", "analysis")
+	if !found {
+		return nil
+	}
+	str := func(key string) string { v, _ := m[key].(string); return v }
+	num := func(key string) *float64 {
+		switch v := m[key].(type) {
+		case float64:
+			return &v
+		case int64:
+			f := float64(v)
+			return &f
+		}
+		return nil
+	}
+	integer := func(key string) int64 {
+		if v := num(key); v != nil {
+			return int64(*v)
+		}
+		return 0
+	}
+	return &AnalysisStatus{
+		CandidateRevision:     str("candidateRevision"),
+		CandidateTemplateHash: str("candidateTemplateHash"),
+		CandidateGeneration:   integer("candidateGeneration"),
+		ConsecutiveFailures:   int(integer("consecutiveFailures")),
+		ConsecutivePasses:     int(integer("consecutivePasses")),
+		LastCheckTime:         str("lastCheckTime"),
+		LastResult:            str("lastResult"),
+		LastMessage:           str("lastMessage"),
+		Requests:              num("requests"),
+		ErrorRatePct:          num("errorRatePct"),
+		LatencyP95Ms:          num("latencyP95Ms"),
+	}
 }
 
 func rolloutGuardSpecFrom(guard *unstructured.Unstructured) RolloutGuardSpec {
@@ -122,6 +211,7 @@ func statusFromGuard(guard *unstructured.Unstructured) RolloutGuardStatus {
 	s.RollbackRevision = str("rollbackRevision")
 	s.RollbackTemplateHash = str("rollbackTemplateHash")
 	s.HealthyGeneration, _, _ = unstructured.NestedInt64(guard.Object, "status", "healthyGeneration")
+	s.Analysis = analysisFromGuard(guard)
 
 	raw, _, _ := unstructured.NestedSlice(guard.Object, "status", "conditions")
 	for _, item := range raw {
@@ -290,6 +380,9 @@ func (s RolloutGuardStatus) AsMap() map[string]any {
 	}
 	if s.HealthyGeneration != 0 {
 		status["healthyGeneration"] = s.HealthyGeneration
+	}
+	if s.Analysis != nil {
+		status["analysis"] = s.Analysis.asMap()
 	}
 	return status
 }

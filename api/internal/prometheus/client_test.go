@@ -18,7 +18,7 @@ var service = models.Service{Name: "payments-api", SLOTarget: 99.9}
 // query. A missing key returns an empty result; "NaN" returns a NaN sample.
 func fakePrometheus(values map[string]string) *Client {
 	client := NewClient("http://prometheus.test")
-	client.http = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+	client.withHTTPClient(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		query := r.URL.Query().Get("query")
 		key := classify(query)
 		value, ok := values[key]
@@ -26,7 +26,7 @@ func fakePrometheus(values map[string]string) *Client {
 			return prometheusResponse(`{"status":"success","data":{"result":[]}}`), nil
 		}
 		return prometheusResponse(fmt.Sprintf(`{"status":"success","data":{"result":[{"value":[1710000000,"%s"]}]}}`, value)), nil
-	})}
+	})})
 	return client
 }
 
@@ -164,9 +164,9 @@ func TestSignalsFailsWhenPrometheusUnavailable(t *testing.T) {
 
 func TestSignalsFailsOnQueryError(t *testing.T) {
 	client := NewClient("http://prometheus.test")
-	client.http = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+	client.withHTTPClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return prometheusResponse(`{"status":"error","error":"parse error"}`), nil
-	})}
+	})})
 	if _, err := client.Signals(context.Background(), service); err == nil || !strings.Contains(err.Error(), "parse error") {
 		t.Fatalf("expected the query error, got %v", err)
 	}

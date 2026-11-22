@@ -44,6 +44,8 @@ spec:
             - --leader-elect=true
             - --metrics-addr=:8080
             - --health-addr=:8081
+            # Enable metric analysis for guards that set spec.checks:
+            # - --prometheus-url=http://prometheus-operated.monitoring.svc:9090
           env:
             - name: POD_NAMESPACE
               valueFrom:

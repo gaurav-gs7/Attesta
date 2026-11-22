@@ -24,6 +24,7 @@ import (
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 
 	"github.com/gaurav-gs7/attesta/internal/controller"
+	"github.com/gaurav-gs7/attesta/internal/promql"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -43,6 +44,7 @@ type options struct {
 	renewDeadline    time.Duration
 	retryPeriod      time.Duration
 	showVersion      bool
+	prometheusURL    string
 }
 
 func main() {
@@ -59,6 +61,7 @@ func main() {
 	flag.DurationVar(&o.leaseDuration, "lease-duration", 15*time.Second, "leader election lease duration")
 	flag.DurationVar(&o.renewDeadline, "renew-deadline", 10*time.Second, "leader election renew deadline")
 	flag.DurationVar(&o.retryPeriod, "retry-period", 2*time.Second, "leader election retry period")
+	flag.StringVar(&o.prometheusURL, "prometheus-url", "", "Prometheus base URL for metric analysis of guards that set spec.checks; empty disables analysis")
 	flag.BoolVar(&o.showVersion, "version", false, "print the version and exit")
 	flag.Parse()
 
@@ -85,11 +88,15 @@ func run(o options, logger *slog.Logger) error {
 	registry.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	controller.RegisterMetrics(registry)
 
-	ctrl, err := controller.NewRolloutGuardController(cfg, controller.Options{
+	opts := controller.Options{
 		Namespace: o.namespace,
 		Resync:    o.resync,
 		Logger:    logger,
-	})
+	}
+	if o.prometheusURL != "" {
+		opts.Prometheus = promql.NewClient(o.prometheusURL)
+	}
+	ctrl, err := controller.NewRolloutGuardController(cfg, opts)
 	if err != nil {
 		return fmt.Errorf("create rollout guard controller: %w", err)
 	}
@@ -134,7 +141,7 @@ func run(o options, logger *slog.Logger) error {
 		}
 	}()
 
-	logger.Info("starting attesta-controller", "version", version, "namespace", o.namespace, "leaderElect", o.leaderElect)
+	logger.Info("starting attesta-controller", "version", version, "namespace", o.namespace, "leaderElect", o.leaderElect, "metricAnalysis", o.prometheusURL != "")
 	if !o.leaderElect {
 		leading.Store(true)
 		return ctrl.Run(runCtx, o.workers)

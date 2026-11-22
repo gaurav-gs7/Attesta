@@ -2,34 +2,31 @@ package prometheus
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"net/http"
-	"net/url"
-	"strconv"
 	"strings"
-	"time"
 
 	"github.com/gaurav-gs7/attesta/api/internal/models"
 	"github.com/gaurav-gs7/attesta/api/internal/slo"
+	"github.com/gaurav-gs7/attesta/internal/promql"
 )
-
-// maxResponseBytes caps a single query response.
-const maxResponseBytes = 1 << 20
 
 type Client struct {
 	baseURL string
-	http    *http.Client
+	q       *promql.Client
 }
 
 func NewClient(baseURL string) *Client {
-	return &Client{
-		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		http:    &http.Client{Timeout: 5 * time.Second},
-	}
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	return &Client{baseURL: baseURL, q: promql.NewClient(baseURL)}
+}
+
+// withHTTPClient replaces the HTTP client, for tests.
+func (c *Client) withHTTPClient(h *http.Client) *Client {
+	c.q.WithHTTPClient(h)
+	return c
 }
 
 // Signals measures a service's SLIs. A transport or query error returns an
@@ -130,59 +127,10 @@ func (c *Client) Signals(ctx context.Context, service models.Service) (slo.Signa
 	return out, nil
 }
 
-// query runs an instant query and returns its first sample. found is false
+// query runs an instant query through the shared client. found is false
 // when the result is empty or the sample is NaN or infinite.
 func (c *Client) query(ctx context.Context, query string) (value float64, found bool, err error) {
-	values := url.Values{}
-	values.Set("query", query)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/v1/query?"+values.Encode(), nil)
-	if err != nil {
-		return 0, false, err
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return 0, false, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return 0, false, fmt.Errorf("prometheus returned %s", resp.Status)
-	}
-	var payload struct {
-		Status string `json:"status"`
-		Error  string `json:"error"`
-		Data   struct {
-			Result []struct {
-				Value []any `json:"value"`
-			} `json:"result"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&payload); err != nil {
-		return 0, false, err
-	}
-	if payload.Status != "success" {
-		if payload.Error == "" {
-			payload.Error = "query failed"
-		}
-		return 0, false, errors.New(payload.Error)
-	}
-	if len(payload.Data.Result) == 0 {
-		return 0, false, nil
-	}
-	if len(payload.Data.Result[0].Value) < 2 {
-		return 0, false, fmt.Errorf("query returned no scalar result")
-	}
-	raw, ok := payload.Data.Result[0].Value[1].(string)
-	if !ok {
-		return 0, false, fmt.Errorf("query scalar result was not a string")
-	}
-	value, err = strconv.ParseFloat(raw, 64)
-	if err != nil {
-		return 0, false, fmt.Errorf("parse scalar result %q: %w", raw, err)
-	}
-	if math.IsNaN(value) || math.IsInf(value, 0) {
-		return 0, false, nil
-	}
-	return value, true, nil
+	return c.q.Query(ctx, query)
 }
 
 func ptr(v float64) *float64 { return &v }

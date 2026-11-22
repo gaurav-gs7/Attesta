@@ -12,6 +12,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -27,6 +28,8 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
+
+	"github.com/gaurav-gs7/attesta/internal/promql"
 )
 
 var rolloutGuardGVR = schema.GroupVersionResource{
@@ -42,6 +45,7 @@ const (
 	rollbackToAnnotation      = "attesta.io/rollback-to-revision"
 	rollbackAtAnnotation      = "attesta.io/rollback-at"
 	rollbackGuardAnnotation   = "attesta.io/rollback-by-guard"
+	rollbackReasonAnnotation  = "attesta.io/rollback-reason"
 	reasonNoHealthyRevision   = "NoHealthyRevision"
 	reasonHealthyRevisionGone = "HealthyRevisionGone"
 	reasonHealthyRevFailing   = "HealthyRevisionFailing"
@@ -55,6 +59,11 @@ type Options struct {
 	Logger    *slog.Logger
 	// Recorder overrides the Kubernetes event recorder. Tests use it.
 	Recorder record.EventRecorder
+	// Prometheus enables metric analysis for guards that set spec.checks.
+	// Nil disables it; guards then rely on ProgressDeadlineExceeded only.
+	Prometheus promql.Querier
+	// Now overrides the clock. Tests use it.
+	Now func() time.Time
 }
 
 type RolloutGuardController struct {
@@ -66,6 +75,8 @@ type RolloutGuardController struct {
 	recorder    record.EventRecorder
 	namespace   string
 	logger      *slog.Logger
+	prometheus  promql.Querier
+	now         func() time.Time
 }
 
 func NewRolloutGuardController(cfg *rest.Config, opts Options) (*RolloutGuardController, error) {
@@ -111,9 +122,14 @@ func NewRolloutGuardControllerWithClients(kube kubernetes.Interface, dyn dynamic
 			workqueue.DefaultTypedControllerRateLimiter[string](),
 			workqueue.TypedRateLimitingQueueConfig[string]{Name: "rolloutguard"},
 		),
-		recorder:  recorder,
-		namespace: opts.Namespace,
-		logger:    logger,
+		recorder:   recorder,
+		namespace:  opts.Namespace,
+		logger:     logger,
+		prometheus: opts.Prometheus,
+		now:        opts.Now,
+	}
+	if c.now == nil {
+		c.now = time.Now
 	}
 	_, _ = informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: c.enqueueObject,
@@ -258,16 +274,141 @@ func (c *RolloutGuardController) Reconcile(ctx context.Context, key string) erro
 	evaluation := EvaluateDeploymentRollout(deployment)
 	status := nextStatus(prev, guard, spec, deployment, evaluation)
 
+	promote, blocked := evaluation.Healthy, evaluation.Blocked
+	requeueAfter, err := c.applyAnalysis(ctx, guard, spec, deployment, evaluation, &status, &promote, &blocked)
+	if err != nil {
+		return err
+	}
+
 	var actionErr error
 	switch {
-	case evaluation.Healthy:
+	case promote:
 		if err := c.recordHealthyRevision(ctx, deployment, &status); err != nil {
 			return err
 		}
-	case evaluation.Blocked && spec.RollbackEnabled:
+	case blocked && spec.RollbackEnabled:
 		actionErr = c.rollback(ctx, guard, deployment, &status)
 	}
-	return c.finish(ctx, guard, prev, status, actionErr)
+	if err := c.finish(ctx, guard, prev, status, actionErr); err != nil {
+		return err
+	}
+	if requeueAfter > 0 {
+		// Keep analysing on schedule rather than waiting for the next event
+		// or resync.
+		c.queue.AddAfter(key, requeueAfter)
+	}
+	return nil
+}
+
+// applyAnalysis runs metric analysis for the revision rolling out, if the
+// guard configures it. It can hold promotion (the rollout is complete but has
+// not passed enough checks) or block the rollout (enough consecutive
+// failures). It returns when to analyse next.
+func (c *RolloutGuardController) applyAnalysis(ctx context.Context, guard *unstructured.Unstructured, spec RolloutGuardSpec,
+	deployment *appsv1.Deployment, evaluation RolloutEvaluation, status *RolloutGuardStatus, promote, blocked *bool) (time.Duration, error) {
+
+	cfg := analysisConfigFrom(guard, spec.ServiceLabel(deployment.Name))
+	switch {
+	case !cfg.Enabled():
+		status.Analysis = nil
+		meta.RemoveStatusCondition(&status.Conditions, ConditionAnalysis)
+		return 0, nil
+	case cfg.Err != nil:
+		status.Analysis = nil
+		status.SetCondition(ConditionAnalysis, metav1.ConditionFalse, "InvalidChecks", cfg.Err.Error())
+		return 0, nil
+	case c.prometheus == nil:
+		status.Analysis = nil
+		status.SetCondition(ConditionAnalysis, metav1.ConditionFalse, "PrometheusNotConfigured",
+			"spec.checks is set but the controller has no --prometheus-url; only ProgressDeadlineExceeded is acted on")
+		return 0, nil
+	case deployment.Status.ObservedGeneration < deployment.Generation || deployment.Spec.Paused:
+		return 0, nil
+	}
+
+	// Identify the candidate: the Deployment's current template. The lookup
+	// lists ReplicaSets only when the Deployment's generation has moved.
+	a := status.Analysis
+	if a == nil || a.CandidateGeneration != deployment.Generation {
+		current, _, err := c.ownedReplicaSets(ctx, deployment)
+		if err != nil {
+			return 0, err
+		}
+		if current == nil {
+			return cfg.Interval, nil
+		}
+		hash, revision := current.Labels[podTemplateHashLabel], current.Annotations[revisionAnnotation]
+		if a == nil || a.CandidateTemplateHash != hash {
+			a = &AnalysisStatus{CandidateTemplateHash: hash}
+		}
+		a.CandidateRevision, a.CandidateGeneration = revision, deployment.Generation
+	}
+	if a.CandidateTemplateHash == status.HealthyTemplateHash {
+		status.Analysis = nil
+		status.SetCondition(ConditionAnalysis, metav1.ConditionTrue, "OnHealthyRevision",
+			fmt.Sprintf("deployment is on the healthy revision %s; nothing to analyse", status.HealthyRevision))
+		return 0, nil
+	}
+	status.Analysis = a
+
+	now := c.now().UTC()
+	last, err := time.Parse(time.RFC3339, a.LastCheckTime)
+	if err != nil || now.Sub(last) >= cfg.Interval {
+		result := analyze(ctx, c.prometheus, cfg, a.CandidateTemplateHash)
+		analysisTotal.WithLabelValues(result.Result).Inc()
+		a.LastCheckTime = now.Format(time.RFC3339)
+		a.LastResult, a.LastMessage = result.Result, result.Message
+		a.Requests, a.ErrorRatePct, a.LatencyP95Ms = result.Requests, result.ErrorRatePct, result.LatencyP95Ms
+		switch result.Result {
+		case AnalysisPassed:
+			a.ConsecutivePasses++
+			a.ConsecutiveFailures = 0
+		case AnalysisFailed:
+			a.ConsecutiveFailures++
+			a.ConsecutivePasses = 0
+		}
+		// Inconclusive results leave both counters as they are.
+	}
+
+	conditionStatus := metav1.ConditionUnknown
+	switch a.LastResult {
+	case AnalysisPassed:
+		conditionStatus = metav1.ConditionTrue
+	case AnalysisFailed:
+		conditionStatus = metav1.ConditionFalse
+	}
+	status.SetCondition(ConditionAnalysis, conditionStatus, analysisReason(a.LastResult),
+		fmt.Sprintf("revision %s: %s (%d consecutive failures of %d allowed, %d consecutive passes of %d needed)",
+			a.CandidateRevision, a.LastMessage, a.ConsecutiveFailures, cfg.ConsecutiveFailures, a.ConsecutivePasses, cfg.SuccessfulChecks))
+
+	switch {
+	case a.ConsecutiveFailures >= cfg.ConsecutiveFailures:
+		*blocked, *promote = true, false
+		status.Phase = PhaseBlocked
+		status.Reason = "AnalysisFailed"
+		status.Message = fmt.Sprintf("revision %s failed %d consecutive metric checks: %s", a.CandidateRevision, a.ConsecutiveFailures, a.LastMessage)
+		status.SetCondition(ConditionHealthy, metav1.ConditionFalse, status.Reason, status.Message)
+		status.SetCondition(ConditionBlocked, metav1.ConditionTrue, status.Reason, status.Message)
+	case evaluation.Healthy && a.ConsecutivePasses < cfg.SuccessfulChecks:
+		*promote = false
+		status.Phase = PhaseVerifying
+		status.Reason = "AnalysisPending"
+		status.Message = fmt.Sprintf("revision %s is rolled out; %d of %d metric checks passed so far", a.CandidateRevision, a.ConsecutivePasses, cfg.SuccessfulChecks)
+		status.SetCondition(ConditionHealthy, metav1.ConditionFalse, status.Reason, status.Message)
+	}
+	return cfg.Interval, nil
+}
+
+func analysisReason(result string) string {
+	switch result {
+	case AnalysisPassed:
+		return "ChecksPassed"
+	case AnalysisFailed:
+		return "ChecksFailed"
+	case AnalysisInconclusive:
+		return "Inconclusive"
+	}
+	return "Pending"
 }
 
 // finish writes the status if it changed, emits an event on phase or reason
@@ -327,6 +468,7 @@ func (c *RolloutGuardController) recordHealthyRevision(ctx context.Context, depl
 // only for failures worth retrying; decisions not to act are recorded in the
 // status and return nil.
 func (c *RolloutGuardController) rollback(ctx context.Context, guard *unstructured.Unstructured, deployment *appsv1.Deployment, status *RolloutGuardStatus) error {
+	cause, causeMessage := status.Reason, status.Message
 	if status.HealthyTemplateHash == "" {
 		status.Reason = reasonNoHealthyRevision
 		status.Message = fmt.Sprintf("rollout of %s is blocked and no healthy revision has been recorded; not rolling back", deployment.Name)
@@ -383,6 +525,7 @@ func (c *RolloutGuardController) rollback(ctx context.Context, guard *unstructur
 	updated.Annotations[rollbackToAnnotation] = toRevision
 	updated.Annotations[rollbackAtAnnotation] = time.Now().UTC().Format(time.RFC3339)
 	updated.Annotations[rollbackGuardAnnotation] = guard.GetName()
+	updated.Annotations[rollbackReasonAnnotation] = cause
 
 	if _, err := c.kube.AppsV1().Deployments(deployment.Namespace).Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
 		status.Phase = PhaseRollbackFailed
@@ -395,7 +538,7 @@ func (c *RolloutGuardController) rollback(ctx context.Context, guard *unstructur
 
 	status.Phase = PhaseRolledBack
 	status.Reason = reasonRollbackTriggered
-	status.Message = fmt.Sprintf("restored deployment %s from revision %s to healthy revision %s", deployment.Name, fromRevision, toRevision)
+	status.Message = fmt.Sprintf("restored deployment %s from revision %s to healthy revision %s after %s: %s", deployment.Name, fromRevision, toRevision, cause, causeMessage)
 	status.RollbackRevision = toRevision
 	status.RollbackTemplateHash = status.HealthyTemplateHash
 	status.SetCondition(ConditionRolledBack, metav1.ConditionTrue, reasonRollbackTriggered, status.Message)

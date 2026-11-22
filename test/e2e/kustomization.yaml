@@ -10,3 +10,12 @@ images:
   - name: ghcr.io/gaurav-gs7/attesta-controller
     newName: attesta-controller
     newTag: e2e
+patches:
+  # Point metric analysis at the in-cluster Prometheus stub the test deploys.
+  - target:
+      kind: Deployment
+      name: attesta-controller
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --prometheus-url=http://prom-stub.attesta-e2e.svc:9090

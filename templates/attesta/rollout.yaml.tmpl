@@ -6,10 +6,10 @@ metadata:
 spec:
   serviceRef: {{ .Service.Name }}
   strategy: {{ .Service.DeploymentStrategy }}
-  # steps, checks and rollback.consecutiveFailures are recorded for planned
-  # metric analysis. The controller does not evaluate them yet and does not
-  # shift traffic; it rolls back only on ProgressDeadlineExceeded, and only
-  # when rollback.enabled is true. See docs/controller-operator.md.
+  # steps are recorded for planned traffic shifting; the controller does not
+  # use them. It rolls back on ProgressDeadlineExceeded and, when the
+  # controller runs with --prometheus-url, on the metric checks below.
+  # See docs/controller-operator.md.
   steps:
     - weight: 10
       duration: 2m
@@ -20,10 +20,15 @@ spec:
     - weight: 100
       duration: 0m
   checks:
+    # Thresholds from the service's registered SLO, applied to the new
+    # revision only (its pod_template_hash label, added by the ServiceMonitor).
     errorRateThreshold: {{ .Service.SLOErrorRate }}
     latencyP95ThresholdMs: {{ .Service.SLOLatencyP95Ms }}
-    minAvailability: {{ printf "%.2f" .Service.SLOTarget }}
-    maxCpuSaturation: 80
+    window: 5m
+    interval: 30s
+    minRequests: 20
+    successfulChecks: 3
+    revisionLabel: pod_template_hash
   rollback:
     enabled: {{ .Service.RollbackOnFailure }}
     consecutiveFailures: 2

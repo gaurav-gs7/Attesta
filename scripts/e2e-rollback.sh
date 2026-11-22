@@ -8,7 +8,9 @@
 #   3. the rollback happens exactly once and the controller then leaves the
 #      Deployment alone;
 #   4. a paused Deployment is reported as Paused and never modified;
-#   5. the leader's /metrics counts the rollback.
+#   5. the leader's /metrics counts the rollback;
+#   6. with metric analysis, a rollout Kubernetes considers healthy is rolled
+#      back after consecutive failed checks of the new revision's metrics.
 #
 # Prerequisites: kubectl pointing at a disposable cluster, and the image
 # attesta-controller:e2e loaded into it (see test/e2e/kustomization.yaml).
@@ -20,6 +22,8 @@ cd "$ROOT_DIR"
 NS="${E2E_NAMESPACE:-attesta-e2e}"
 GOOD_IMAGE="${GOOD_IMAGE:-registry.k8s.io/pause:3.10}"
 BAD_IMAGE="${BAD_IMAGE:-registry.k8s.io/pause:attesta-e2e-does-not-exist}"
+OTHER_GOOD_IMAGE="${OTHER_GOOD_IMAGE:-registry.k8s.io/pause:3.9}"
+STUB_IMAGE="${STUB_IMAGE:-python:3.12-alpine}"
 SETTLE_SECONDS="${SETTLE_SECONDS:-45}"
 
 log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
@@ -33,6 +37,9 @@ dump() {
   kubectl -n "$NS" get rolloutguard app-rollout -o yaml
   kubectl -n "$NS" describe deployment app
   kubectl -n "$NS" get replicasets -o wide --show-labels
+  kubectl -n "$NS" get rolloutguard app2-rollout -o yaml
+  kubectl -n "$NS" describe deployment app2
+  kubectl -n "$NS" logs deployment/prom-stub --tail=50
   kubectl -n "$NS" get events --sort-by=.lastTimestamp
 }
 trap 'log "error near line $LINENO"; dump' ERR
@@ -52,9 +59,11 @@ wait_until() {
   log "ok: $what"
 }
 
-guard() { kubectl -n "$NS" get rolloutguard app-rollout -o "jsonpath={.status.$1}"; }
-image() { kubectl -n "$NS" get deployment app -o 'jsonpath={.spec.template.spec.containers[0].image}'; }
-annotation() { kubectl -n "$NS" get deployment app -o "jsonpath={.metadata.annotations.attesta\\.io/$1}"; }
+# Helpers act on the Deployment named in $APP and its guard $APP-rollout.
+APP=app
+guard() { kubectl -n "$NS" get rolloutguard "$APP-rollout" -o "jsonpath={.status.$1}"; }
+image() { kubectl -n "$NS" get deployment "$APP" -o 'jsonpath={.spec.template.spec.containers[0].image}'; }
+annotation() { kubectl -n "$NS" get deployment "$APP" -o "jsonpath={.metadata.annotations.attesta\\.io/$1}"; }
 has_healthy_template() { [[ -n "$(guard healthyTemplateHash)" ]]; }
 image_is() { [[ "$(image)" == "$1" ]]; }
 phase_is() { [[ "$(guard phase)" == "$1" ]]; }
@@ -158,4 +167,123 @@ log "ok: leader metrics count exactly one rollback"
 events="$(kubectl -n "$NS" get events --field-selector involvedObject.name=app-rollout,reason=RollbackTriggered -o name | wc -l)"
 ((events >= 1)) || fail "no RollbackTriggered event on the guard"
 
-log "PASS: rollback restored the healthy template once, paused rollouts were left alone"
+log "metric analysis: deploying the in-cluster Prometheus stub"
+kubectl -n "$NS" create configmap prom-stub --from-file=stub.py=test/e2e/prometheus_stub.py --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prom-stub
+  namespace: $NS
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prom-stub
+  template:
+    metadata:
+      labels:
+        app: prom-stub
+    spec:
+      containers:
+        - name: stub
+          image: $STUB_IMAGE
+          command: ["python", "/stub/stub.py"]
+          ports:
+            - containerPort: 9090
+          volumeMounts:
+            - name: stub
+              mountPath: /stub
+      volumes:
+        - name: stub
+          configMap:
+            name: prom-stub
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prom-stub
+  namespace: $NS
+spec:
+  selector:
+    app: prom-stub
+  ports:
+    - port: 9090
+      targetPort: 9090
+EOF
+kubectl -n "$NS" rollout status deployment/prom-stub --timeout=180s
+
+log "metric analysis: creating a guarded Deployment with spec.checks"
+APP=app2
+kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app2
+  namespace: $NS
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: e2e-app2
+  template:
+    metadata:
+      labels:
+        app: e2e-app2
+    spec:
+      containers:
+        - name: app
+          image: $GOOD_IMAGE
+          resources:
+            requests:
+              cpu: 5m
+              memory: 8Mi
+---
+apiVersion: attesta.io/v1
+kind: RolloutGuard
+metadata:
+  name: app2-rollout
+  namespace: $NS
+spec:
+  deploymentRef: app2
+  strategy: rolling
+  checks:
+    errorRateThreshold: 1
+    latencyP95ThresholdMs: 300
+    window: 1m
+    interval: 5s
+    minRequests: 10
+    successfulChecks: 2
+  rollback:
+    enabled: true
+    consecutiveFailures: 2
+EOF
+kubectl -n "$NS" rollout status deployment/app2 --timeout=120s
+wait_until "guard records app2's healthy template after passing checks" 120 has_healthy_template
+healthy_hash="$(guard healthyTemplateHash)"
+log "app2 healthy template hash: $healthy_hash"
+
+log "the stub now reports a 20% error rate for any revision other than $healthy_hash"
+kubectl -n "$NS" exec deployment/prom-stub -- python -c \
+  "import urllib.request; urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:9090/admin/healthy?hash=$healthy_hash', method='POST'))"
+
+log "rolling app2 out to $OTHER_GOOD_IMAGE, which pulls and runs fine"
+kubectl -n "$NS" set image deployment/app2 app="$OTHER_GOOD_IMAGE"
+wait_until "controller rolls app2 back to $GOOD_IMAGE on failed metric checks" 120 image_is "$GOOD_IMAGE"
+
+[[ "$(annotation rollback-reason)" == "AnalysisFailed" ]] || fail "app2 rollback-reason is '$(annotation rollback-reason)', want AnalysisFailed"
+[[ "$(guard rollbackTemplateHash)" == "$healthy_hash" ]] || fail "app2 rolled back to '$(guard rollbackTemplateHash)', want $healthy_hash"
+if kubectl -n "$NS" get deployment app2 -o 'jsonpath={.status.conditions[*].reason}' | grep -q ProgressDeadlineExceeded; then
+  fail "app2 hit ProgressDeadlineExceeded; the rollback must come from metric analysis"
+fi
+message="$(guard message)"
+[[ "$message" == *"error rate 20.00% > 1.00%"* ]] || fail "guard message does not carry the measured cause: $message"
+kubectl -n "$NS" rollout status deployment/app2 --timeout=120s
+
+failed="$(leader_metric 'attesta_rolloutguard_analysis_total{result="Failed"}')"
+((${failed:-0} >= 2)) || fail "leader reports analysis_total{result=\"Failed\"}=${failed:-absent}, want at least 2"
+triggered="$(leader_metric 'attesta_rolloutguard_rollback_total{outcome="triggered"}')"
+[[ "$triggered" == "2" ]] || fail "leader reports rollback_total{outcome=\"triggered\"}=${triggered:-absent}, want 2"
+log "ok: app2 rolled back by metric analysis: $message"
+
+log "PASS: deadline and metric-analysis rollbacks both restored the healthy template once; paused rollouts were left alone"

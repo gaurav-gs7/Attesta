@@ -32,6 +32,13 @@ var (
 		Help:      "Rollback decisions for blocked rollouts by outcome (triggered, failed, skipped_no_healthy_revision, skipped_already_healthy, skipped_healthy_revision_gone).",
 	}, []string{"outcome"})
 
+	analysisTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "attesta",
+		Subsystem: "rolloutguard",
+		Name:      "analysis_total",
+		Help:      "Metric analysis checks of rolling-out revisions by result (Passed, Failed, Inconclusive).",
+	}, []string{"result"})
+
 	phaseTransitions = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "attesta",
 		Subsystem: "rolloutguard",
@@ -47,7 +54,7 @@ var registerOnce sync.Once
 // has an effect.
 func RegisterMetrics(reg prometheus.Registerer) {
 	registerOnce.Do(func() {
-		reg.MustRegister(reconcileTotal, reconcileDuration, rollbackTotal, phaseTransitions)
+		reg.MustRegister(reconcileTotal, reconcileDuration, rollbackTotal, phaseTransitions, analysisTotal)
 		workqueue.SetProvider(newWorkqueueMetricsProvider(reg))
 	})
 }

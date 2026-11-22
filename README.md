@@ -10,7 +10,7 @@ Every value Attesta reports is either measured, recorded, or explicitly marked a
 
 | Area | What is real | What is not (yet) |
 | --- | --- | --- |
-| Rollout guard controller | Watches Deployments, writes status and Events, restores the last healthy template on `ProgressDeadlineExceeded` when `spec.rollback.enabled` is true. Leader election, metrics, probes. | No metric-based analysis: `spec.steps`, `spec.checks` and `consecutiveFailures` are not evaluated. No traffic shifting, so no true canary. |
+| Rollout guard controller | Watches Deployments, writes status and Events, and restores the last healthy template when Kubernetes reports `ProgressDeadlineExceeded` or when the new revision fails `consecutiveFailures` metric checks in a row (error rate, p95 latency, availability from Prometheus, scoped to that revision). Inconclusive data never decides. Leader election, metrics, probes. | No traffic shifting, so no true canary: `spec.steps` is not used. |
 | SLO gate | Error rate, p95, burn rate and 30-day error budget from Prometheus. Unknown data blocks `POST /rollouts`. | Single burn-rate window (1h); no multi-window alerting logic in the gate. |
 | Health gate | Applies thresholds to the metrics in the request. | It does not measure anything: inputs are caller-supplied, and thresholds are fixed at 300ms p99 and 1%. |
 | Rollback endpoints | Record a rollback request. | They do not change the cluster. Your deployment tooling, or the controller, must act. |
@@ -71,7 +71,7 @@ Run it against your current kube context:
 go run ./controller/cmd/attesta-controller --kubeconfig "$HOME/.kube/config" --leader-elect=false
 ```
 
-The controller classifies each guarded rollout as `Progressing`, `Healthy`, `Paused` or `Blocked`, where Blocked means Kubernetes reported `ProgressDeadlineExceeded` for the current generation. With `spec.rollback.enabled: true` it restores the last template it saw fully rolled out, never acts on a paused Deployment, and never rolls back twice onto the same template. See [docs/controller-operator.md](docs/controller-operator.md) for the rules, metrics and limits.
+The controller classifies each guarded rollout as `Progressing`, `Verifying`, `Healthy`, `Paused` or `Blocked`. Blocked means Kubernetes reported `ProgressDeadlineExceeded` for the current generation or, with `--prometheus-url` and `spec.checks`, that the new revision failed `consecutiveFailures` metric checks in a row. With `spec.rollback.enabled: true` it restores the last template that passed, never acts on a paused Deployment, and never rolls back twice onto the same template. See [docs/controller-operator.md](docs/controller-operator.md) for the rules, metrics and limits.
 
 ## SLO Evaluation
 
@@ -147,7 +147,7 @@ make lint   # golangci-lint and shellcheck
 make e2e    # controller end-to-end test on a local kind cluster
 ```
 
-CI runs on every push: formatting, `go mod tidy` drift, vet, race-enabled tests, golangci-lint, ShellCheck, govulncheck, manifest validation with kubeconform, actionlint, both container images (checked to run as non-root), and `scripts/e2e-rollback.sh` on kind. The end-to-end test deploys the controller, records a healthy revision, rolls out an image that cannot be pulled, and asserts exactly one rollback to the healthy template. It also checks that a paused Deployment is left alone and that the leader's metrics count the rollback.
+CI runs on every push: formatting, `go mod tidy` drift, vet, race-enabled tests, golangci-lint, ShellCheck, govulncheck, manifest validation with kubeconform, actionlint, both container images (checked to run as non-root), and `scripts/e2e-rollback.sh` on kind. The end-to-end test deploys the controller and runs two scenarios. First, an image that cannot be pulled is rolled back once on its progress deadline. Second, against an in-cluster Prometheus stub, an image that Kubernetes considers healthy but whose metrics fail is rolled back by metric analysis alone. It also checks that a paused Deployment is left alone and that the leader's metrics count each rollback.
 
 ## PostgreSQL Mode
 

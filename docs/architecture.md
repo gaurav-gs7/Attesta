@@ -11,9 +11,10 @@ The controller watches `RolloutGuard` resources and the Deployments they referen
 
 1. Waits until the Deployment controller has observed the current generation.
 2. Classifies the rollout as `Progressing`, `Healthy`, `Paused` or `Blocked` (`ProgressDeadlineExceeded`).
-3. On `Healthy`, records the current ReplicaSet's revision and template hash in the guard's status.
-4. On `Blocked`, with `spec.rollback.enabled: true`, restores the recorded healthy template, at most once per bad template.
-5. Writes status only when it changed and emits an Event only on a phase or reason transition.
+3. If the guard sets `spec.checks` and the controller has `--prometheus-url`, checks the new revision's error rate, p95 latency and availability in Prometheus every interval. Enough consecutive failures block the rollout; inconclusive data never decides.
+4. On `Healthy`, and with analysis only after enough passing checks, records the current ReplicaSet's revision and template hash in the guard's status.
+5. On `Blocked`, with `spec.rollback.enabled: true`, restores the recorded healthy template, at most once per bad template.
+6. Writes status only when it changed and emits an Event only on a phase or reason transition.
 
 It runs two replicas behind a leader-election Lease and exposes `/healthz`, `/readyz` and Prometheus metrics. The rules and limits are in [controller-operator.md](controller-operator.md).
 

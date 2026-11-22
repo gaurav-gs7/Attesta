@@ -1,6 +1,6 @@
 # Attesta Controller Operator
 
-`attesta-controller` watches `RolloutGuard` resources, compares each guard with its Deployment's live rollout status, writes status conditions, emits Kubernetes Events on state transitions, and, when explicitly enabled, restores the last healthy pod template of a rollout that Kubernetes has declared stuck.
+`attesta-controller` watches `RolloutGuard` resources, compares each guard with its Deployment's live rollout status, optionally checks the new revision's metrics in Prometheus, writes status conditions, emits Kubernetes Events on state transitions, and, when explicitly enabled, restores the last healthy pod template of a rollout that Kubernetes declared stuck or that failed its metric checks.
 
 ## Control Loop
 
@@ -12,9 +12,10 @@
    - `Blocked`: the `Progressing` condition is `False` with reason `ProgressDeadlineExceeded` at the observed generation.
    - `Healthy`: every replica runs the new template, old pods are gone and all replicas are available (the Deployment controller's own definition of complete).
    - `Progressing`: anything else, including the transient states every healthy rollout passes through.
-5. On `Healthy`, record the current ReplicaSet's revision and `pod-template-hash` as the last healthy template.
-6. On `Blocked`, if `spec.rollback.enabled` is true, restore the last healthy template. See Rollback Rules.
-7. Patch `status` only when it changed, and emit an Event only when the phase or reason changed.
+5. If the guard sets `spec.checks` and the controller has `--prometheus-url`, analyse the revision rolling out. See Metric Analysis.
+6. On `Healthy` (and, with analysis, after enough passing checks), record the current ReplicaSet's revision and `pod-template-hash` as the last healthy template.
+7. On `Blocked` (a progress deadline, or too many consecutive failed checks), if `spec.rollback.enabled` is true, restore the last healthy template. See Rollback Rules.
+8. Patch `status` only when it changed, and emit an Event only when the phase or reason changed.
 
 ## Rollback Rules
 
@@ -26,9 +27,36 @@ Rollback rewrites a Deployment's pod template, so every rule errs towards doing 
 - **Reuses the healthy ReplicaSet.** The template is restored without its `pod-template-hash` label and without extra annotations, so the Deployment controller adopts the existing healthy ReplicaSet, as `kubectl rollout undo` does. Audit annotations (`attesta.io/rollback-from-revision`, `rollback-to-revision`, `rollback-at`, `rollback-by-guard`) are written on the Deployment itself.
 - **Retried on failure.** API errors during rollback set `RollbackFailed` and return an error, so the workqueue retries with backoff. If the healthy ReplicaSet has been garbage-collected, the controller reports `HealthyRevisionGone` and stops.
 
-## Not Yet Implemented
+## Metric Analysis
 
-`spec.steps`, `spec.checks` and `spec.rollback.consecutiveFailures` are accepted by the CRD but not evaluated. The only rollback trigger today is Kubernetes' own `ProgressDeadlineExceeded`, which is already debounced by the Deployment's `progressDeadlineSeconds` (600 s by default). Metric-based analysis against Prometheus is planned.
+With `--prometheus-url`, a guard that sets any threshold in `spec.checks` has each new revision judged on its own metrics:
+
+```yaml
+spec:
+  checks:
+    errorRateThreshold: 1        # percent of requests with a 5xx status
+    latencyP95ThresholdMs: 300
+    minAvailability: 99.5        # optional, percent
+    window: 5m                   # look-back window for each check
+    interval: 30s                # time between checks (at least 5s)
+    minRequests: 20              # fewer requests than this is inconclusive
+    successfulChecks: 3          # passes needed before the revision counts as healthy
+    revisionLabel: pod_template_hash
+  rollback:
+    enabled: true
+    consecutiveFailures: 2       # failed checks in a row before the rollout is blocked
+```
+
+- **What is measured.** `http_requests_total` and `http_request_duration_seconds` for the guard's `service` label (`spec.serviceRef`, or the Deployment name) and the candidate's `pod_template_hash`, so old pods serving during the rollout do not dilute the result. The generated ServiceMonitor adds that label with `podTargetLabels`. Setting `revisionLabel: ""` measures the whole service instead.
+- **When.** While the Deployment's current template differs from the recorded healthy template: at most once per `interval`, on a timer that does not depend on cluster events.
+- **Failures must be consecutive.** A passing check resets the failure count. When the count reaches `consecutiveFailures`, the rollout is `Blocked` with reason `AnalysisFailed`, and the measured values go into the status message and the `attesta.io/rollback-reason` annotation.
+- **Missing data never decides.** Too few requests, no series, a `NaN` result or an unreachable Prometheus give an `Inconclusive` check. It counts neither as a pass nor a failure, so it can neither roll back nor promote.
+- **Promotion waits for evidence.** A rollout Kubernetes considers complete stays `Verifying` until `successfulChecks` checks have passed; only then is it recorded as the healthy rollback target.
+- **Invalid `spec.checks`** are reported in the `Analysis` condition with reason `InvalidChecks`, and no queries are sent. Without `--prometheus-url` the condition says so, and the guard relies on the progress deadline alone.
+
+`ProgressDeadlineExceeded` still blocks a rollout with or without analysis. It is debounced by the Deployment's `progressDeadlineSeconds` (600 s by default).
+
+Not implemented: traffic shifting. `spec.steps` is accepted but not used, so the whole Deployment rolls out and analysis judges the new revision's pods as they take traffic.
 
 If an Argo CD Application with `selfHeal: true` manages the same Deployment, Argo CD will revert the controller's rollback to the version in Git. Disable self-heal for guarded applications, or leave rollback disabled and act on the guard's status instead.
 
@@ -73,14 +101,15 @@ Metrics:
 - `attesta_rolloutguard_reconcile_total{result}` and `attesta_rolloutguard_reconcile_duration_seconds`
 - `attesta_rolloutguard_rollback_total{outcome}`: `triggered`, `failed`, or the reason a rollback was skipped
 - `attesta_rolloutguard_phase_transitions_total{phase}`
+- `attesta_rolloutguard_analysis_total{result}`: `Passed`, `Failed` or `Inconclusive` metric checks
 - client-go workqueue metrics (`workqueue_depth`, `workqueue_retries_total`, ...) for the `rolloutguard` queue, under the same names controller-runtime uses
 - Go runtime and process metrics
 
-Useful flags: `--namespace` to watch one namespace, `--workers`, `--resync`, `--leader-elect=false` for a single local process, and `--version`.
+Useful flags: `--prometheus-url` to enable metric analysis, `--namespace` to watch one namespace, `--workers`, `--resync`, `--leader-elect=false` for a single local process, and `--version`.
 
 ## Status Contract
 
-`status.phase` is one of `Progressing`, `Healthy`, `Paused`, `Blocked`, `RolledBack` or `RollbackFailed`.
+`status.phase` is one of `Progressing`, `Verifying` (rolled out, waiting for passing metric checks), `Healthy`, `Paused`, `Blocked`, `RolledBack` or `RollbackFailed`.
 
 Conditions:
 
