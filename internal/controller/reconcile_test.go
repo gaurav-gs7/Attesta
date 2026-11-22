@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -555,5 +556,57 @@ func TestReconcileReportsMissingDeployment(t *testing.T) {
 	}
 	if c := h.condition(ConditionDeploymentFound); c == nil || c["status"] != "False" {
 		t.Fatalf("DeploymentFound condition = %v, want False", c)
+	}
+}
+
+// Audit C-11, through the workqueue: a failed rollback is requeued with
+// backoff, not forgotten, and the retry completes it.
+func TestFailedRollbackIsRetriedByTheWorkqueue(t *testing.T) {
+	h := newHarness(t, map[string]any{"enabled": true}, nil)
+	h.mustReconcile()
+	h.startBadRollout()
+	failures := 1
+	h.kube.PrependReactor("update", "deployments", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if failures > 0 {
+			failures--
+			return true, nil, apierrors.NewServiceUnavailable("apiserver is restarting")
+		}
+		return false, nil, nil
+	})
+
+	process := func() {
+		t.Helper()
+		h.syncCaches()
+		done := make(chan struct{})
+		go func() { h.ctrl.processNext(h.ctx); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("no queued key to process")
+		}
+	}
+
+	h.ctrl.queue.Add(testGuardKey)
+	process()
+	if got := h.field("phase"); got != PhaseRollbackFailed {
+		t.Fatalf("phase = %s after a failed update, want %s", got, PhaseRollbackFailed)
+	}
+	if got := h.ctrl.queue.NumRequeues(testGuardKey); got != 1 {
+		t.Fatalf("failed rollback requeued %d times, want 1 (rate limited, not forgotten)", got)
+	}
+
+	process() // the rate-limited retry, a few milliseconds later
+	if h.image() != "payments-api:v1" {
+		t.Fatalf("retry did not roll back: image = %s", h.image())
+	}
+	if got := h.field("phase"); got != PhaseRolledBack {
+		t.Fatalf("phase = %s after the retry, want %s", got, PhaseRolledBack)
+	}
+	if got := h.ctrl.queue.NumRequeues(testGuardKey); got != 0 {
+		t.Fatalf("backoff not reset after success: %d requeues", got)
+	}
+	events := strings.Join(h.drainEvents(), "\n")
+	if !strings.Contains(events, reasonRollbackFailed) || !strings.Contains(events, reasonRollbackTriggered) {
+		t.Fatalf("expected RollbackFailed then RollbackTriggered events, got:\n%s", events)
 	}
 }
