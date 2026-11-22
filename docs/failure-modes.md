@@ -16,7 +16,7 @@ artifacts/failure-modes/<run-id>/
 
 ## Scenarios
 
-- Bad canary rolls back: a health-gate request with high p99 latency returns a rollback decision and records a `rollback-triggered` deployment.
+- Bad canary signal is recorded: a health-gate request with high p99 latency (caller-supplied) returns a `rollback` decision and records a `rollback-requested` deployment entry. Nothing in the cluster changes.
 - Low traffic waits for more samples: a high-latency request with too few samples returns `continue` instead of rolling back prematurely.
 - Prometheus unavailable fails closed: when `ATTESTA_PROMETHEUS_URL` is configured but a query fails, the SLO state is `unknown`, no values are reported, and `POST /rollouts` returns 409. The same applies when Prometheus answers with no data or `NaN`.
 - PostgreSQL unavailable fails predictably: API startup with an unreachable `DATABASE_URL` exits and records the catalog connection error.
@@ -33,4 +33,4 @@ These scenarios demonstrate production engineering judgment:
 - make duplicate operations safe
 - preserve workflow idempotency across API restarts when backed by durable storage
 - reject unsafe metadata before it reaches Kubernetes
-- preserve rollback evidence for RCA and audit
+- record rollback requests so they can be audited

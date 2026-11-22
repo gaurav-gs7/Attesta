@@ -48,7 +48,9 @@ type CreateServiceRequest struct {
 	SLOErrorRate       float64  `json:"sloErrorRate"`
 	DeploymentStrategy string   `json:"deploymentStrategy"`
 	Deployment         string   `json:"deployment"`
-	RollbackOnFailure  bool     `json:"rollbackOnFailure"`
+	// RollbackOnFailure defaults to true for canary and blue-green and false
+	// for rolling when omitted; an explicit false is honoured.
+	RollbackOnFailure *bool `json:"rollbackOnFailure"`
 }
 
 type Deployment struct {
@@ -110,7 +112,9 @@ type ReadinessCheck struct {
 }
 
 type ReadinessReport struct {
-	Service         string           `json:"service"`
+	Service string `json:"service"`
+	// Scope states what the score covers.
+	Scope           string           `json:"scope"`
 	Tier            string           `json:"tier"`
 	Score           int              `json:"score"`
 	Passed          []ReadinessCheck `json:"passed"`

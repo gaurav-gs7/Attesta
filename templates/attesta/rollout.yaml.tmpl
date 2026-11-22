@@ -6,6 +6,10 @@ metadata:
 spec:
   serviceRef: {{ .Service.Name }}
   strategy: {{ .Service.DeploymentStrategy }}
+  # steps, checks and rollback.consecutiveFailures are recorded for planned
+  # metric analysis. The controller does not evaluate them yet and does not
+  # shift traffic; it rolls back only on ProgressDeadlineExceeded, and only
+  # when rollback.enabled is true. See docs/controller-operator.md.
   steps:
     - weight: 10
       duration: 2m

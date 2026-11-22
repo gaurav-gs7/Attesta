@@ -35,8 +35,10 @@ go run ./cli/cmd/attesta service init payments-api \
 go run ./cli/cmd/attesta check payments-api
 go run ./cli/cmd/attesta slo status payments-api
 go run ./cli/cmd/attesta rollout status payments-api
+echo "SIMULATED: the next call posts hand-picked metrics; the health gate judges caller-supplied numbers"
 go run ./cli/cmd/attesta health-gate --name payments-api --p99-latency-ms 450 --error-rate 0.2 --success-count 100
 go run ./cli/cmd/attesta deployments --name payments-api
+echo "SIMULATED: the next call opens an incident from a hand-written alert; its error rate and latency are stored as sender-reported values"
 go run ./cli/cmd/attesta incident create --service payments-api --alert HighErrorRate --error-rate 8.2 --latency-p95-ms 850
 go run ./cli/cmd/attesta incident list
 go run ./cli/cmd/attesta workflows list

@@ -528,9 +528,9 @@ func (s *Server) rollback(w http.ResponseWriter, r *http.Request) {
 				var err error
 				deployment, err = s.store.RecordDeployment(ctx, models.Deployment{
 					ServiceID:   service.ID,
-					Version:     "rollback-" + time.Now().UTC().Format("20060102150405"),
+					Version:     "rollback-request-" + time.Now().UTC().Format("20060102150405"),
 					Environment: service.Environment,
-					Status:      "rollback-triggered",
+					Status:      "rollback-requested",
 					Strategy:    service.DeploymentStrategy,
 					StartedAt:   time.Now().UTC(),
 				})
@@ -546,7 +546,7 @@ func (s *Server) rollback(w http.ResponseWriter, r *http.Request) {
 		"service":    service.Name,
 		"deployment": deployment,
 		"workflow":   run,
-		"nextAction": "GitOps controller should sync the previous stable image tag",
+		"note":       "Attesta recorded a rollback request. It did not change the cluster; your deployment tooling must act on it.",
 	})
 }
 
@@ -574,6 +574,10 @@ func (s *Server) healthGate(w http.ResponseWriter, r *http.Request) {
 				MaxAttempts: 1,
 				Run: func(context.Context) error {
 					decision = reliability.EvaluateCanary(reliability.DefaultSLO(service.SLOTarget), metrics)
+					if !decision.Healthy && !service.RollbackOnFailure {
+						decision.Action = "hold"
+						decision.Reason += "; rollbackOnFailure is false for this service, so no rollback was requested"
+					}
 					return nil
 				},
 			},
@@ -581,14 +585,14 @@ func (s *Server) healthGate(w http.ResponseWriter, r *http.Request) {
 				Name:        "record-rollback-when-policy-breaches",
 				MaxAttempts: 1,
 				Run: func(ctx context.Context) error {
-					if decision.Healthy {
+					if decision.Healthy || decision.Action != "rollback" {
 						return nil
 					}
 					deployment, err := s.store.RecordDeployment(ctx, models.Deployment{
 						ServiceID:   service.ID,
-						Version:     "healthgate-rollback-" + time.Now().UTC().Format("20060102150405"),
+						Version:     "healthgate-rollback-request-" + time.Now().UTC().Format("20060102150405"),
 						Environment: service.Environment,
-						Status:      "rollback-triggered",
+						Status:      "rollback-requested",
 						Strategy:    service.DeploymentStrategy,
 						StartedAt:   time.Now().UTC(),
 					})
@@ -605,11 +609,14 @@ func (s *Server) healthGate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": run.Error, "workflow": run})
 		return
 	}
-	if !decision.Healthy {
+	if rollback != nil {
 		status = http.StatusAccepted
 	}
 	writeJSON(w, status, map[string]any{
-		"service":            service.Name,
+		"service": service.Name,
+		// The gate judges the numbers in the request body. Attesta does not
+		// measure the canary itself on this endpoint.
+		"inputSource":        "caller-supplied",
 		"metrics":            metrics,
 		"decision":           decision,
 		"rollbackDeployment": rollback,
@@ -781,26 +788,19 @@ func requestToService(req models.CreateServiceRequest) (models.Service, error) {
 	if tier == "" {
 		tier = "medium"
 	}
+	// Ownership and link metadata is stored only as given. The readiness score
+	// checks these fields, so filling them in here would make it meaningless.
 	repository := strings.TrimSpace(req.Repository)
 	if repository == "" {
 		repository = strings.TrimSpace(req.RepoURL)
 	}
-	if repository == "" {
-		repository = "github.com/example/" + strings.ToLower(strings.TrimSpace(req.Name))
-	}
 	runbookURL := strings.TrimSpace(req.RunbookURL)
-	if runbookURL == "" {
-		runbookURL = "runbooks/incident-runbook.md"
-	}
 	dashboardURL := strings.TrimSpace(req.DashboardURL)
-	if dashboardURL == "" {
-		dashboardURL = "observability/dashboard.json"
-	}
 	pager := strings.TrimSpace(req.Pager)
-	if pager == "" {
-		pager = strings.TrimSpace(req.Owner) + "-oncall"
+	rollbackOnFailure := strategy == "canary" || strategy == "blue-green"
+	if req.RollbackOnFailure != nil {
+		rollbackOnFailure = *req.RollbackOnFailure
 	}
-	rollbackOnFailure := req.RollbackOnFailure || strategy == "canary" || strategy == "blue-green"
 	return models.Service{
 		Name:               strings.ToLower(strings.TrimSpace(req.Name)),
 		Team:               strings.ToLower(strings.TrimSpace(req.Team)),

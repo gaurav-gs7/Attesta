@@ -1,56 +1,146 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
 	"time"
 )
 
+const serviceName = "{{ .Service.Name }}"
+
 func main() {
+	metrics := newMetrics()
+
+	app := http.NewServeMux()
+	app.HandleFunc("GET /", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"service": serviceName})
+	})
+
 	mux := http.NewServeMux()
+	// Probes and the metrics endpoint are not counted, so they do not dilute
+	// the request-based SLIs.
+	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "alive"})
+	})
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 	})
-	mux.HandleFunc("GET /metrics", metrics)
-	mux.HandleFunc("GET /", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"service": "{{ .Service.Name }}"})
-	})
+	mux.HandleFunc("GET /metrics", metrics.serve)
+	mux.Handle("/", metrics.instrument(app))
 
 	addr := ":" + env("PORT", "8080")
 	server := &http.Server{
 		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
-	log.Printf("{{ .Service.Name }} listening on %s", addr)
-	log.Fatal(server.ListenAndServe())
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		log.Printf("%s listening on %s", serviceName, addr)
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatal(err)
+		}
+	}()
+	<-ctx.Done()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("shutdown: %v", err)
+	}
 }
 
-func metrics(w http.ResponseWriter, _ *http.Request) {
+// latencyBuckets are the histogram's upper bounds in seconds.
+var latencyBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
+
+// metrics records the request counter and latency histogram that Attesta's
+// SLO queries read: http_requests_total and http_request_duration_seconds.
+type metrics struct {
+	mu       sync.Mutex
+	requests map[int]uint64 // by status code
+	buckets  []uint64       // per bucket, not cumulative
+	sum      float64
+	count    uint64
+}
+
+func newMetrics() *metrics {
+	return &metrics{requests: map[int]uint64{}, buckets: make([]uint64, len(latencyBuckets))}
+}
+
+func (m *metrics) instrument(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		m.observe(rec.status, time.Since(start).Seconds())
+	})
+}
+
+func (m *metrics) observe(status int, seconds float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.requests[status]++
+	m.sum += seconds
+	m.count++
+	for i, upper := range latencyBuckets {
+		if seconds <= upper {
+			m.buckets[i]++
+			break
+		}
+	}
+}
+
+func (m *metrics) serve(w http.ResponseWriter, _ *http.Request) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var b strings.Builder
+	b.WriteString("# HELP http_requests_total HTTP requests by status code.\n")
+	b.WriteString("# TYPE http_requests_total counter\n")
+	statuses := make([]int, 0, len(m.requests))
+	for status := range m.requests {
+		statuses = append(statuses, status)
+	}
+	sort.Ints(statuses)
+	for _, status := range statuses {
+		fmt.Fprintf(&b, "http_requests_total{service=%q,status=%q} %d\n", serviceName, strconv.Itoa(status), m.requests[status])
+	}
+	b.WriteString("# HELP http_request_duration_seconds HTTP request latency.\n")
+	b.WriteString("# TYPE http_request_duration_seconds histogram\n")
+	var cumulative uint64
+	for i, upper := range latencyBuckets {
+		cumulative += m.buckets[i]
+		fmt.Fprintf(&b, "http_request_duration_seconds_bucket{service=%q,le=%q} %d\n", serviceName, strconv.FormatFloat(upper, 'g', -1, 64), cumulative)
+	}
+	fmt.Fprintf(&b, "http_request_duration_seconds_bucket{service=%q,le=\"+Inf\"} %d\n", serviceName, m.count)
+	fmt.Fprintf(&b, "http_request_duration_seconds_sum{service=%q} %g\n", serviceName, m.sum)
+	fmt.Fprintf(&b, "http_request_duration_seconds_count{service=%q} %d\n", serviceName, m.count)
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-	_, _ = w.Write([]byte(`# HELP http_requests_total Total HTTP requests.
-# TYPE http_requests_total counter
-http_requests_total{service="{{ .Service.Name }}",status="200"} 1
-# HELP http_request_duration_seconds HTTP request latency.
-# TYPE http_request_duration_seconds histogram
-http_request_duration_seconds_bucket{service="{{ .Service.Name }}",le="0.3"} 1
-http_request_duration_seconds_bucket{service="{{ .Service.Name }}",le="0.5"} 1
-http_request_duration_seconds_bucket{service="{{ .Service.Name }}",le="+Inf"} 1
-http_request_duration_seconds_sum{service="{{ .Service.Name }}"} 0.12
-http_request_duration_seconds_count{service="{{ .Service.Name }}"} 1
-# HELP db_query_duration_seconds Database query latency.
-# TYPE db_query_duration_seconds histogram
-db_query_duration_seconds_bucket{service="{{ .Service.Name }}",operation="read",le="0.05"} 1
-db_query_duration_seconds_bucket{service="{{ .Service.Name }}",operation="read",le="0.1"} 1
-db_query_duration_seconds_bucket{service="{{ .Service.Name }}",operation="read",le="+Inf"} 1
-db_query_duration_seconds_sum{service="{{ .Service.Name }}",operation="read"} 0.04
-db_query_duration_seconds_count{service="{{ .Service.Name }}",operation="read"} 1
-# HELP db_connections_active Active database connections.
-# TYPE db_connections_active gauge
-db_connections_active{service="{{ .Service.Name }}"} 2
-`))
+	_, _ = w.Write([]byte(b.String()))
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(status int) {
+	r.status = status
+	r.ResponseWriter.WriteHeader(status)
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
@@ -60,9 +150,8 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 }
 
 func env(key, fallback string) string {
-	value := os.Getenv(key)
-	if value == "" {
-		return fallback
+	if value := os.Getenv(key); value != "" {
+		return value
 	}
-	return value
+	return fallback
 }

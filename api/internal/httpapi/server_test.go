@@ -116,7 +116,7 @@ func TestHealthGateRecordsRollbackDeployment(t *testing.T) {
 	if deployments.Code != http.StatusOK {
 		t.Fatalf("expected deployments 200, got %d: %s", deployments.Code, deployments.Body.String())
 	}
-	if !bytes.Contains(deployments.Body.Bytes(), []byte("rollback-triggered")) {
+	if !bytes.Contains(deployments.Body.Bytes(), []byte("rollback-requested")) {
 		t.Fatalf("expected rollback deployment, got %s", deployments.Body.String())
 	}
 }

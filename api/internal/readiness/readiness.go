@@ -26,6 +26,7 @@ func Evaluate(service models.Service) models.ReadinessReport {
 
 	report := models.ReadinessReport{
 		Service:     service.Name,
+		Scope:       "metadata-only: scores the fields registered for this service; the cluster and the repository are not inspected",
 		Tier:        service.Tier,
 		EvaluatedAt: time.Now().UTC(),
 	}

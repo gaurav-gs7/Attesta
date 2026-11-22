@@ -9,7 +9,8 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: {{ if .Service.RepoURL }}{{ .Service.RepoURL }}{{ else }}https://github.com/example/{{ .Service.Name }}.git{{ end }}
+    # No repository URL was registered for this service: replace the placeholder.
+    repoURL: {{ if .Service.RepoURL }}{{ .Service.RepoURL }}{{ else }}https://github.com/CHANGE-ME/{{ .Service.Name }}.git{{ end }}
     targetRevision: main
     path: k8s/overlays/{{ .Service.Environment }}
   destination:

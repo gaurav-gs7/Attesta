@@ -21,6 +21,9 @@ spec:
           labels:
             severity: page
             team: {{ .Service.Team }}
+            service: {{ .Service.Name }}
           annotations:
             summary: "{{ .Service.Name }} is burning error budget quickly"
-            runbook_url: "runbooks/incident-runbook.md"
+{{- if .Service.RunbookURL }}
+            runbook_url: "{{ .Service.RunbookURL }}"
+{{- end }}

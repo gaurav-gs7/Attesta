@@ -1,6 +1,6 @@
 # Production Readiness
 
-Attesta defines production readiness as a service having enough metadata, Kubernetes safety controls, observability, SLOs, rollout policy, and incident ownership to be safely operated.
+Attesta's readiness score checks that a service has registered the metadata needed to operate it: ownership, paging, SLOs, rollout policy and links. It scores registered fields only; it does not inspect the cluster or the repository. The API does not fill these fields in, so a field you did not register fails its check.
 
 ## Attesta Service Checks
 
@@ -36,4 +36,4 @@ Generated services include:
 
 ## Demo Evidence
 
-`make demo-full` proves these controls by generating a service, validating the scaffold, rendering Kustomize, building images, deploying to kind, verifying runtime readiness and metrics, triggering a failed canary signal, rolling back, creating an incident, and generating a timeline/postmortem.
+`make demo-full` exercises these controls by generating a service, validating the scaffold, rendering Kustomize, building images, deploying to kind and checking readiness and metrics. Its canary signal, rollback and incident steps are simulated; see [local-ci-cd.md](local-ci-cd.md).

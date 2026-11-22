@@ -203,16 +203,16 @@ service_ci() {
   perl -0pi -e "s#image: ghcr.io/example/$SERVICE_NAME:latest#image: $STABLE_IMAGE_NAME#g" "$stable_rendered_file"
   perl -0pi -e "s#image: ghcr.io/example/$SERVICE_NAME:latest#image: $CANARY_IMAGE_NAME#g" "$canary_rendered_file"
   log "pinned stable manifest image to $STABLE_IMAGE_NAME"
-  log "pinned canary manifest image to $CANARY_IMAGE_NAME"
+  log "pinned candidate manifest image to $CANARY_IMAGE_NAME (the whole Deployment is updated; there is no traffic splitting)"
 }
 
 build_and_scan_image() {
   local service_dir="generated/services/$SERVICE_NAME"
-  log "building stable and canary container images"
+  log "building stable and candidate container images"
   run docker build -t "$STABLE_IMAGE_NAME" -t "$CANARY_IMAGE_NAME" "$service_dir"
 
   if command -v trivy >/dev/null 2>&1; then
-    log "scanning canary image with Trivy"
+    log "scanning candidate image with Trivy"
     run trivy image --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed "$CANARY_IMAGE_NAME"
   else
     printf 'trivy scan skipped: trivy not installed\n' >"$run_dir/trivy-skipped.txt"
@@ -250,7 +250,7 @@ deploy_to_kind() {
   run kubectl -n "$NAMESPACE" rollout status "deployment/$SERVICE_NAME" --timeout=180s
   verify_deployment_image "$STABLE_IMAGE_NAME"
 
-  log "deploying canary rendered manifests"
+  log "deploying candidate revision (replaces every pod; not a traffic-split canary)"
   run kubectl apply --dry-run=server -f "$canary_rendered_file"
   run kubectl apply -f "$canary_rendered_file"
   run kubectl -n "$NAMESPACE" rollout status "deployment/$SERVICE_NAME" --timeout=180s
@@ -280,7 +280,7 @@ verify_runtime() {
 }
 
 attesta_reliability_demo() {
-  log "recording failed canary through Attesta health gate"
+  log "SIMULATED: posting fixed bad metrics (p99 450ms) to the Attesta health gate; nothing is measured from the cluster"
   run env GOCACHE="$GOCACHE" GOMODCACHE="$GOMODCACHE" ATTESTA_API_TOKEN="$ATTESTA_API_TOKEN" ATTESTA_API_URL="$ATTESTA_API_URL" \
     go run ./cli/cmd/attesta health-gate \
       --name "$SERVICE_NAME" \
@@ -305,7 +305,7 @@ attesta_reliability_demo() {
 }
 
 simulate_incident() {
-  log "creating incident from simulated Alertmanager signal"
+  log "SIMULATED: opening an incident with a hand-written alert payload"
   env GOCACHE="$GOCACHE" GOMODCACHE="$GOMODCACHE" ATTESTA_API_TOKEN="$ATTESTA_API_TOKEN" ATTESTA_API_URL="$ATTESTA_API_URL" \
     go run ./cli/cmd/attesta incident create \
       --service "$SERVICE_NAME" \
@@ -323,7 +323,7 @@ simulate_incident() {
 }
 
 automate_kubernetes_rollback() {
-  log "automating Kubernetes rollback to previous stable ReplicaSet"
+  log "this script runs kubectl rollout undo itself, standing in for the deployment tooling that would act on the recorded rollback request"
   run kubectl -n "$NAMESPACE" rollout history "deployment/$SERVICE_NAME"
   run kubectl -n "$NAMESPACE" rollout undo "deployment/$SERVICE_NAME"
   run kubectl -n "$NAMESPACE" rollout status "deployment/$SERVICE_NAME" --timeout=180s

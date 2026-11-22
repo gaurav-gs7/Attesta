@@ -1,96 +1,54 @@
 # Attesta Architecture
 
-Attesta is a Kubernetes reliability platform with a Harbor-style onboarding path and an embedded Helios-style workflow runner. Attesta owns reliability policy and Kubernetes operations; the runner owns ordered in-process steps, retries, state transitions, and audit events.
+Attesta has two processes that do not depend on each other:
 
-## Planes
+- **`attesta-controller`** reconciles `RolloutGuard` resources against Deployments in the cluster. It is the only part of Attesta that changes cluster state, and only when a guard opts in to rollback.
+- **`attesta-api`** is an HTTP service with a catalog of registered services, an SLO gate backed by Prometheus, incident records, a metadata readiness score, a scaffold generator and an in-process workflow runner. It records decisions and requests; it does not change the cluster.
 
-Reliability plane:
+## Controller
 
-- Attesta API server
-- Attesta RolloutGuard controller/operator
-- Service registry
-- Production-readiness engine
-- SLO/error-budget engine
-- Rollout guard
-- Incident engine
-- RCA timeline and postmortem generator
+The controller watches `RolloutGuard` resources and the Deployments they reference. For each guard it:
 
-Workflow execution plane:
+1. Waits until the Deployment controller has observed the current generation.
+2. Classifies the rollout as `Progressing`, `Healthy`, `Paused` or `Blocked` (`ProgressDeadlineExceeded`).
+3. On `Healthy`, records the current ReplicaSet's revision and template hash in the guard's status.
+4. On `Blocked`, with `spec.rollback.enabled: true`, restores the recorded healthy template, at most once per bad template.
+5. Writes status only when it changed and emits an Event only on a phase or reason transition.
 
-- Helios-style workflow engine
-- Workflow run state: pending, running, succeeded, failed
-- Ordered workflow steps with retry metadata
-- Idempotency keys for safely repeatable operations
-- Audit-style workflow events exposed through `/api/v1/workflows`
+It runs two replicas behind a leader-election Lease and exposes `/healthz`, `/readyz` and Prometheus metrics. The rules and limits are in [controller-operator.md](controller-operator.md).
 
-Delivery plane:
+## API
 
-- Generated service scaffold
-- GitHub Actions workflow
-- Kustomize base and overlays
-- Argo CD application template
-- Attesta CRD-style resources: `AttestaService`, `SLOPolicy`, `RolloutGuard`, `Incident`
-- kind-based local deployment runner
+### SLO gate
 
-Observability plane:
+`GET /slos` queries Prometheus for the service's error rate and p95 latency (5m), burn rate (1h), and availability and remaining error budget (30d). The gate is `allowed`, `blocked` or `unknown`. Unknown, which covers no Prometheus, failed queries, no traffic, no series and `NaN`, blocks `POST /rollouts`. Values that could not be measured are omitted, never reported as zero.
 
-- Prometheus scrape annotations
-- ServiceMonitor template
-- PrometheusRule and burn-rate alert templates
-- Prometheus query-backed SLO evaluation for request rate, 5xx error rate, and p95 latency
-- Grafana dashboard JSON
-- OpenTelemetry Collector and Jaeger templates
-- App metrics for request rate, error rate, p95/p99 latency, and database latency
+### Incidents
 
-## Request Flow
+Incidents open from Alertmanager's webhook or a JSON call. Opening an incident evaluates the SLO gate, loads deployment records from the previous 2 hours, and builds a timeline from those records, the alert and the evaluation. A rollout recorded in that window is named as a rollback candidate and labelled as a correlation. The postmortem draft marks the cause and follow-ups as TODO.
 
-1. Developer runs `attesta service init payments-api`.
-2. CLI sends service metadata to `POST /api/v1/services`.
-3. API validates metadata and production guardrails.
-4. A workflow run starts for service onboarding.
-5. Workflow steps store the service, record the initial deployment, and render the golden-path scaffold.
-6. Template generator writes service code, Kubernetes manifests, CI/CD, SLO, rollout, observability, and runbook files.
-7. Developer runs `attesta check payments-api`.
-8. Readiness evaluation runs as a workflow and returns production-readiness score, recommendations, and workflow evidence.
-9. Local CI/CD runner builds images, deploys stable and canary revisions to kind, and verifies runtime health.
-10. Health gate runs as a workflow that evaluates canary latency/error signals and records rollback intent if the policy breaches.
-11. If the gate fails, the runner executes `kubectl rollout undo`.
-12. Incident ingestion runs as a workflow that evaluates SLO impact, enriches service ownership, generates a timeline, and stores the incident record durably.
+### Health gate and rollback requests
 
-## Controller Reconciliation
+The health gate applies fixed thresholds to metrics in the request body; it measures nothing itself. Rollback endpoints record a `rollback-requested` entry. Acting on that request is left to deployment tooling or to the controller.
 
-The `attesta-controller` process is the Kubernetes reconciliation layer. It watches `RolloutGuard` resources, resolves the referenced Deployment, evaluates live rollout state, updates `status.conditions`, emits Kubernetes Events, and, when rollback is enabled, restores the last healthy pod template of a rollout Kubernetes has declared stuck (`ProgressDeadlineExceeded`).
+### Readiness score
 
-This keeps responsibilities separated:
+The score counts which metadata fields were registered for a service. It does not inspect the cluster or the repository.
 
-- Attesta API and Helios-style workflows execute explicit reliability operations and expose audit evidence.
-- The controller continuously reconciles Kubernetes desired state and actual state.
-- CRDs remain the cluster-native contract between service teams, GitOps, and Attesta automation.
+### Workflow runner
 
-## Workflow Boundaries
+API operations run as ordered steps in-process. Each run records per-step state, attempts and events, and is persisted to PostgreSQL when `DATABASE_URL` is set. Service onboarding uses a deterministic idempotency key derived from the normalised spec.
 
-Attesta does not run a second standalone control plane next to Helios. Instead, Attesta embeds Helios-style orchestration where reliability operations need ordered execution and a persisted audit trail:
+The runner is not crash-resumable: if the process exits mid-run, the last persisted state stays `running` and the run is not resumed. Retries are immediate, without backoff. A failed onboarding run is currently replayed for the same spec instead of being retried; this is a known issue. Persistence failures fail the request rather than being reported as success.
 
-- `attesta.service.onboarding`: validates and creates service metadata, records initial deployment, renders templates.
-- `attesta.readiness.check`: evaluates production-readiness policy.
-- `attesta.slo.evaluate`: evaluates SLO/error-budget state and deployment gate.
-- `attesta.rollout.start`: checks deployment eligibility and records rollout start.
-- `attesta.rollout.health-gate`: evaluates canary metrics and records rollback intent on breach.
-- `attesta.rollout.rollback`: records rollback intent for GitOps/Kubernetes execution.
-- `attesta.incident.enrichment`: correlates alerts with service metadata, SLO impact, RCA timeline, and postmortem context.
+## CRDs
 
-## Durable State
+| CRD | Reconciled | Purpose |
+| --- | --- | --- |
+| `RolloutGuard` | Yes, by `attesta-controller` | Guards one Deployment's rollouts |
+| `AttestaService` | No | Declarative record of service metadata, generated by the scaffold |
+| `SLOPolicy` | No | Declarative record of SLO targets and queries, generated by the scaffold |
 
-With PostgreSQL enabled, Attesta persists:
+## Data
 
-- service catalog and deployment history
-- workflow runs, steps, events, and idempotency keys
-- incident records, enriched SLO signals, and RCA timeline events
-
-Workflow idempotency lookup is durable, so repeated operations with the same idempotency key can be recognized after an API restart. Service onboarding uses a deterministic key derived from the normalized service spec.
-
-The embedded runner is not a crash-resumable workflow engine. A process exit can leave the last persisted run in `running`, and the current implementation does not resume from the last completed step. Persistence failures fail the active request closed and are returned as workflow failures; they are not silently presented as successful durable execution. Operations that require crash recovery should be delegated to an external workflow engine or wait for a future resumable runner.
-
-## Local-First Production Design
-
-Attesta avoids paid services. It runs locally with Go, PostgreSQL through Docker Compose, kind, kubectl, Kustomize, and optional Trivy. The architecture still maps cleanly to production platforms because the generated contracts are Kubernetes-native and GitOps-friendly.
+With PostgreSQL, Attesta stores the service catalog, deployment records, workflow runs with their steps and events, and incident records. Without it, everything is kept in memory and lost on restart.

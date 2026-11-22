@@ -218,7 +218,7 @@ bad_canary_rolls_back_and_records_evidence() {
   assert_contains "$output" '"action"[[:space:]]*:[[:space:]]*"rollback"' "expected bad canary to request rollback"
   assert_contains "$output" '"rollbackDeployment"[[:space:]]*:[[:space:]]*\{' "expected rollback deployment evidence in health-gate response"
   api GET "/api/v1/services/$SERVICE_NAME/deployments" "" "$deployments" 200
-  assert_contains "$deployments" 'rollback-triggered' "expected rollback deployment to be recorded"
+  assert_contains "$deployments" 'rollback-requested' "expected the rollback request to be recorded"
   cp "$output" "$rollback"
   record "bad-canary-rolls-back" "$output"
   record "rollback-evidence-recorded" "$rollback"

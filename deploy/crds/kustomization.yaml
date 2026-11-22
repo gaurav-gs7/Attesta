@@ -4,4 +4,3 @@ resources:
   - attesta.io_attestaservices.yaml
   - attesta.io_slopolicies.yaml
   - attesta.io_rolloutguards.yaml
-  - attesta.io_incidents.yaml

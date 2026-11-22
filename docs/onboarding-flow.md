@@ -3,10 +3,10 @@
 1. Developer runs `attesta service init payments-api`.
 2. CLI sends metadata to `POST /api/v1/services`.
 3. API validates ownership, tier, pager, naming, SLO, and deployment strategy.
-4. A Helios-style workflow run starts for onboarding.
+4. An onboarding workflow run starts in the API's in-process runner.
 5. Workflow steps store the service, record the initial generated deployment, and render the scaffold.
 6. Template engine generates source, Dockerfile, CI, Kustomize overlays, Attesta CR-style resources, observability, Terraform, Argo CD, and runbooks.
 7. Developer commits generated assets to the service repository or GitOps repository.
 8. GitHub Actions builds, tests, scans, and publishes the image.
 9. Argo CD syncs the Kubernetes desired state.
-10. Attesta readiness, SLO, rollout, and incident workflows operate the service after deployment.
+10. Attesta's SLO gate, incident ingestion and, if a RolloutGuard is applied with rollback enabled, the controller then cover the running service.

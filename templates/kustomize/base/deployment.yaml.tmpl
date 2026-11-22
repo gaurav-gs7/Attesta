@@ -47,7 +47,7 @@ spec:
             periodSeconds: 10
           livenessProbe:
             httpGet:
-              path: /readyz
+              path: /livez
               port: http
             initialDelaySeconds: 10
             periodSeconds: 20

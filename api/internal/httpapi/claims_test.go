@@ -341,3 +341,70 @@ func TestAlertmanagerWebhookRejectsOtherVersions(t *testing.T) {
 		t.Fatalf("version 3: got %d, want 400", rec.Code)
 	}
 }
+
+// Audit T-8: a 5-field payload used to score 100 because the API filled in
+// pager, runbook, dashboard and repository itself.
+func TestReadinessScoresOnlyRegisteredMetadata(t *testing.T) {
+	server := testServer(t, WithAPIToken("secret"))
+	if rec := authorizedRequest(server, http.MethodPost, "/api/v1/services",
+		[]byte(`{"name":"bare-api","team":"t","owner":"o","language":"go","environment":"prod"}`)); rec.Code != http.StatusCreated {
+		t.Fatalf("onboard: %d %s", rec.Code, rec.Body.String())
+	}
+	rec := authorizedRequest(server, http.MethodGet, "/api/v1/services/bare-api/readiness", nil)
+	var out struct {
+		Report models.ReadinessReport `json:"report"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Report.Score >= 100 {
+		t.Fatalf("minimal payload scored %d", out.Report.Score)
+	}
+	failed := map[string]bool{}
+	for _, c := range out.Report.Failed {
+		failed[c.Name] = true
+	}
+	for _, name := range []string{"pager", "runbook", "dashboard", "repository"} {
+		if !failed[name] {
+			t.Fatalf("check %q passed without the field being registered: %+v", name, out.Report.Failed)
+		}
+	}
+	if !strings.HasPrefix(out.Report.Scope, "metadata-only") {
+		t.Fatalf("scope = %q", out.Report.Scope)
+	}
+	svc := authorizedRequest(server, http.MethodGet, "/api/v1/services/bare-api", nil).Body.String()
+	if strings.Contains(svc, "github.com/example") || strings.Contains(svc, "-oncall") {
+		t.Fatalf("service record carries invented metadata: %s", svc)
+	}
+}
+
+func TestExplicitRollbackOnFailureFalseIsHonoured(t *testing.T) {
+	server := testServer(t, WithAPIToken("secret"))
+	body := `{"name":"hold-api","team":"t","owner":"o","language":"go","environment":"staging","deploymentStrategy":"canary","rollbackOnFailure":false}`
+	if rec := authorizedRequest(server, http.MethodPost, "/api/v1/services", []byte(body)); rec.Code != http.StatusCreated {
+		t.Fatalf("onboard: %d %s", rec.Code, rec.Body.String())
+	}
+	svc := authorizedRequest(server, http.MethodGet, "/api/v1/services/hold-api", nil).Body.String()
+	if !strings.Contains(svc, `"rollbackOnFailure":false`) {
+		t.Fatalf("explicit false was overridden for a canary service: %s", svc)
+	}
+
+	// Audit S-5: the health gate must not record a rollback request for it.
+	gate := authorizedRequest(server, http.MethodPost, "/api/v1/services/hold-api/health-gate", []byte(`{"p99LatencyMs":900,"errorRate":5,"successCount":500}`))
+	if gate.Code != http.StatusOK || !strings.Contains(gate.Body.String(), `"action":"hold"`) || !strings.Contains(gate.Body.String(), `"inputSource":"caller-supplied"`) {
+		t.Fatalf("health gate: %d %s", gate.Code, gate.Body.String())
+	}
+	deps := authorizedRequest(server, http.MethodGet, "/api/v1/services/hold-api/deployments", nil).Body.String()
+	if strings.Contains(deps, "rollback-requested") {
+		t.Fatalf("rollback recorded although rollbackOnFailure is false: %s", deps)
+	}
+}
+
+func TestCanaryDefaultsToRollbackOnFailure(t *testing.T) {
+	server := testServer(t, WithAPIToken("secret"))
+	onboard(t, server)
+	svc := authorizedRequest(server, http.MethodGet, "/api/v1/services/payments-api", nil).Body.String()
+	if !strings.Contains(svc, `"rollbackOnFailure":true`) {
+		t.Fatalf("canary service without the field should default to true: %s", svc)
+	}
+}

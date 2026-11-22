@@ -1,10 +1,12 @@
 # Incident Flow
 
-1. Alertmanager fires an SLO or Kubernetes health alert.
-2. On-call opens the generated runbook.
-3. The service status endpoint shows current SLO and deployment state.
-4. The incident enrichment workflow correlates the alert with service owner, tier, SLO state, recent deployment context, and runbook metadata.
-5. If a canary breaches the health gate, Attesta records rollback intent through a workflow-backed rollout step.
-6. GitOps or the local runner restores the last known good image or manifest.
-7. The workflow event trail, incident timeline, and postmortem draft become RCA evidence.
-8. The incident is reviewed and the generated runbook is updated with learnings.
+1. A Prometheus alerting rule fires. Generated rules carry a `service` label.
+2. Alertmanager posts the alert to `POST /api/v1/alerts/alertmanager`. A JSON call to `POST /api/v1/incidents` works too.
+3. Attesta opens an incident unless one is already active for the alert's fingerprint. It records:
+   - the SLO evaluation at that moment, or `unknown` with the reason;
+   - deployment records from the 2 hours before the alert;
+   - values the sender reported, kept separate from Attesta's own measurements.
+4. The timeline orders those records. If a rollout was recorded in the window, a correlation event names it as a rollback candidate and says it is not a confirmed cause.
+5. On-call works from the generated runbook and the RolloutGuard's status. Attesta does not roll back on an incident. The controller rolls back only on `ProgressDeadlineExceeded`, and only for guards with rollback enabled.
+6. When Alertmanager sends the resolved notification, Attesta resolves the incident at the alert's `endsAt`. `POST /api/v1/incidents/{id}/resolve` resolves it manually, with an optional note.
+7. `GET /api/v1/incidents/{id}/postmortem` returns a draft. The cause and follow-ups are left as TODO for the review.

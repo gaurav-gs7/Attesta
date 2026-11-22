@@ -1,48 +1,37 @@
-# Local CI/CD And Deployment Runner
+# Local CI/CD Demo
 
-`scripts/local-ci-cd.sh` is the full laptop-local proof path for Attesta.
-
-It intentionally mirrors a production delivery flow without requiring paid services.
+`scripts/local-ci-cd.sh` (`make demo-full`) runs the generated service through a laptop-local delivery flow on kind. Several steps are simulated; the script's log prefixes those with `SIMULATED` or says what it does instead.
 
 ## Flow
 
-1. Run preflight checks for Go, Docker, kind, kubectl, curl, and perl.
-2. Start the Attesta API if needed.
-3. Onboard `payments-api` through `attesta service init`.
-4. Validate generated service guardrails.
-5. Run generated service tests.
-6. Render Kustomize manifests.
-7. Build stable and canary Docker image tags.
-8. Run Trivy if installed, otherwise record a scan skip.
-9. Create or reuse the `attesta-local` kind cluster.
-10. Load images into kind.
-11. Deploy the stable revision.
-12. Deploy the canary revision.
-13. Verify `/readyz` and `/metrics`.
-14. Send a failing canary signal to Attesta.
-15. Record rollback intent.
-16. Execute `kubectl rollout undo`.
-17. Verify the live deployment image is back to the stable tag.
-18. Run readiness and SLO status checks.
-19. Create an incident from an Alertmanager-style signal.
-20. Generate incident timeline and postmortem output.
-21. List Helios-style workflow runs to show the execution trail behind onboarding, checks, rollback, and incident enrichment.
+1. Preflight checks for Go, Docker, kind, kubectl, curl and perl.
+2. Start the Attesta API if it is not running.
+3. Onboard `payments-api` with `attesta service init`.
+4. Validate the generated scaffold with `scripts/validate-service-scaffold.sh`.
+5. Run the generated service's tests.
+6. Render the Kustomize manifests.
+7. Build a stable and a candidate image tag.
+8. Scan the candidate image with Trivy if it is installed; otherwise record that the scan was skipped.
+9. Create or reuse the `attesta-local` kind cluster and load both images.
+10. Deploy the stable revision.
+11. Deploy the candidate revision. This replaces every pod; there is no traffic splitting.
+12. Check `/readyz` and `/metrics` through a port-forward.
+13. **Simulated:** post fixed bad metrics (p99 450ms) to the health gate, which records a rollback request.
+14. Run `kubectl rollout undo` from the script, standing in for the tooling that would act on that request, and check the stable image is back.
+15. Show the readiness score and SLO status. Without Prometheus the SLO state is `unknown`.
+16. **Simulated:** open an incident from a hand-written alert, then print its timeline and postmortem draft.
+17. List the workflow runs behind these calls.
+
+The RolloutGuard controller is not part of this demo.
 
 ## Evidence
 
-Each run writes evidence under:
-
-```text
-artifacts/local-ci-cd/<run-id>/
-```
-
-Key files:
+Each run writes to `artifacts/local-ci-cd/<run-id>/`:
 
 - `pipeline.log`
 - `summary.json`
 - `rendered-stable.yaml`
-- `rendered-canary.yaml`
+- `rendered-canary.yaml` (the candidate revision)
 - `rollback.json`
 - `incident.json`
-- workflow output in `pipeline.log`
 - `trivy-skipped.txt` when Trivy is not installed

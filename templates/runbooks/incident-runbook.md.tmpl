@@ -4,30 +4,40 @@
 
 - Team: {{ .Service.Team }}
 - Owner: {{ .Service.Owner }}
+- Pager: {{ if .Service.Pager }}{{ .Service.Pager }}{{ else }}TODO: register a pager rotation{{ end }}
 - Namespace: {{ .Service.Namespace }}
 - Environment: {{ .Service.Environment }}
 
 ## SLO
 
-- Availability target: {{ printf "%.2f" .Service.SLOTarget }}%
-- P99 latency objective: 300ms
-- Error-rate rollback threshold: 1%
+- Availability target: {{ printf "%.2f" .Service.SLOTarget }}% over 30 days
+- p95 latency target: {{ .Service.SLOLatencyP95Ms }}ms
+- Error-rate threshold: {{ .Service.SLOErrorRate }}%
 - Deployment strategy: {{ .Service.DeploymentStrategy }}
+- Rollback on failure: {{ .Service.RollbackOnFailure }}
 
 ## Triage
 
 1. Check the current rollout: `kubectl -n {{ .Service.Namespace }} rollout status deploy/{{ .Service.Name }}`
-2. Inspect recent events: `kubectl -n {{ .Service.Namespace }} get events --sort-by=.lastTimestamp`
-3. Check pod health: `kubectl -n {{ .Service.Namespace }} get pods -l app.kubernetes.io/name={{ .Service.Name }}`
-4. Compare p99 latency and error rate against the SLO dashboard.
-5. Check the latest image scan and deployment commit.
+2. Check the RolloutGuard: `kubectl -n {{ .Service.Namespace }} describe rolloutguard {{ .Service.Name }}-rollout`
+3. Inspect recent events: `kubectl -n {{ .Service.Namespace }} get events --sort-by=.lastTimestamp`
+4. Check pod health: `kubectl -n {{ .Service.Namespace }} get pods -l app.kubernetes.io/name={{ .Service.Name }}`
+5. Check measured SLO state: `attesta slo status {{ .Service.Name }}`
 
 ## Rollback
 
+Roll back in the cluster:
+
 ```bash
-curl -X POST http://attesta-api/api/v1/services/{{ .Service.Name }}/rollback
+kubectl -n {{ .Service.Namespace }} rollout undo deploy/{{ .Service.Name }}
+```
+
+Record the decision in Attesta (this records a request; it does not change the cluster):
+
+```bash
+curl -X POST -H "X-Attesta-Token: $ATTESTA_API_TOKEN" "$ATTESTA_API_URL/api/v1/services/{{ .Service.Name }}/rollback"
 ```
 
 ## Escalation
 
-Page {{ .Service.Team }} if the SLO burn continues for more than 10 minutes or rollback fails.
+Page {{ .Service.Team }} if the SLO burn continues for more than 10 minutes or the rollback fails.
