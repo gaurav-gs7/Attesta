@@ -1,0 +1,45 @@
+# The only write the controller makes outside its own resources: updating a
+# Deployment's pod template to roll it back. A Deployment must also opt in by
+# naming the guard in its attesta.io/rollback-guards annotation; the
+# controller refuses otherwise.
+#
+# This default binds the right cluster-wide. To limit rollback to chosen
+# namespaces, delete the ClusterRoleBinding below and add, in each namespace:
+#
+#   apiVersion: rbac.authorization.k8s.io/v1
+#   kind: RoleBinding
+#   metadata:
+#     name: attesta-controller-rollback
+#     namespace: <namespace>
+#   roleRef:
+#     apiGroup: rbac.authorization.k8s.io
+#     kind: ClusterRole
+#     name: attesta-controller-rollback
+#   subjects:
+#     - kind: ServiceAccount
+#       name: attesta-controller
+#       namespace: attesta-system
+#
+# Guards elsewhere keep reporting; a rollback attempt there fails as
+# RollbackFailed (forbidden).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: attesta-controller-rollback
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: attesta-controller-rollback
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: attesta-controller-rollback
+subjects:
+  - kind: ServiceAccount
+    name: attesta-controller
+    namespace: attesta-system

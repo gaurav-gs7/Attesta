@@ -2,7 +2,8 @@
 # End-to-end test of the RolloutGuard controller on a live cluster (kind in CI).
 #
 # Asserts that:
-#   1. the controller records the healthy template of a rolled-out Deployment;
+#   1. the controller records the healthy template of a rolled-out Deployment
+#      that consents to rollback through attesta.io/rollback-guards;
 #   2. a rollout that exceeds its progress deadline is rolled back to that
 #      template, with audit annotations on the Deployment;
 #   3. the rollback happens exactly once and the controller then leaves the
@@ -111,6 +112,8 @@ kind: Deployment
 metadata:
   name: app
   namespace: $NS
+  annotations:
+    attesta.io/rollback-guards: app-rollout
 spec:
   replicas: 2
   progressDeadlineSeconds: 20
@@ -149,6 +152,8 @@ kubectl -n "$NS" rollout status deployment/app --timeout=120s
 wait_until "guard records the healthy template" 120 has_healthy_template
 healthy_hash="$(guard healthyTemplateHash)"
 log "healthy template hash: $healthy_hash (revision $(guard healthyRevision))"
+authorized="$(kubectl -n "$NS" get rolloutguard app-rollout -o 'jsonpath={.status.conditions[?(@.type=="RollbackAuthorized")].status}')"
+[[ "$authorized" == "True" ]] || fail "RollbackAuthorized=$authorized for a Deployment that names the guard"
 
 log "pausing the Deployment: the controller must report Paused and change nothing"
 kubectl -n "$NS" rollout pause deployment/app
@@ -266,6 +271,8 @@ kind: Deployment
 metadata:
   name: app2
   namespace: $NS
+  annotations:
+    attesta.io/rollback-guards: app2-rollout
 spec:
   replicas: 2
   selector:

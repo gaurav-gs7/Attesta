@@ -29,7 +29,7 @@ var (
 		Namespace: "attesta",
 		Subsystem: "rolloutguard",
 		Name:      "rollback_total",
-		Help:      "Rollback decisions for blocked rollouts by outcome (triggered, failed, skipped_no_healthy_revision, skipped_already_healthy, skipped_reverted, skipped_healthy_revision_gone).",
+		Help:      "Rollback decisions for blocked rollouts by outcome (triggered, failed, skipped_not_authorized, skipped_no_healthy_revision, skipped_already_healthy, skipped_reverted, skipped_healthy_revision_gone).",
 	}, []string{"outcome"})
 
 	analysisTotal = prometheus.NewCounterVec(prometheus.CounterOpts{

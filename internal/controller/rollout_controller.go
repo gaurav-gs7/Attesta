@@ -52,6 +52,13 @@ const (
 	reasonRollbackTriggered   = "RollbackTriggered"
 	reasonRollbackFailed      = "RollbackFailed"
 	reasonRollbackReverted    = "RollbackReverted"
+	reasonNotAuthorized       = "RollbackNotAuthorized"
+
+	// rollbackGuardsAnnotation on a Deployment lists, comma-separated, the
+	// RolloutGuards allowed to roll it back. Setting it requires update rights
+	// on the Deployment, which is what stops a user who can only create
+	// guards from using the controller's own Deployment rights.
+	rollbackGuardsAnnotation = "attesta.io/rollback-guards"
 
 	argoTrackingAnnotation = "argocd.argoproj.io/tracking-id"
 	fluxKustomizeLabel     = "kustomize.toolkit.fluxcd.io/name"
@@ -415,6 +422,16 @@ func (c *RolloutGuardController) Reconcile(ctx context.Context, key string) erro
 
 	evaluation := EvaluateDeploymentRollout(deployment)
 	status := nextStatus(prev, guard, spec, deployment, evaluation)
+	if spec.RollbackEnabled {
+		if rollbackAuthorized(deployment, guard.GetName()) {
+			status.SetCondition(ConditionRollbackAuthorized, metav1.ConditionTrue, "DeploymentConsents",
+				fmt.Sprintf("deployment %s lists this guard in %s", deployment.Name, rollbackGuardsAnnotation))
+		} else {
+			status.SetCondition(ConditionRollbackAuthorized, metav1.ConditionFalse, reasonNotAuthorized, notAuthorizedMessage(deployment, guard.GetName()))
+		}
+	} else {
+		meta.RemoveStatusCondition(&status.Conditions, ConditionRollbackAuthorized)
+	}
 
 	promote, blocked := evaluation.Healthy, evaluation.Blocked
 	requeueAfter, err := c.applyAnalysis(ctx, guard, spec, deployment, evaluation, &status, &promote, &blocked)
@@ -614,6 +631,16 @@ func (c *RolloutGuardController) recordHealthyRevision(ctx context.Context, depl
 // status and return nil.
 func (c *RolloutGuardController) rollback(ctx context.Context, guard *unstructured.Unstructured, deployment *appsv1.Deployment, status *RolloutGuardStatus) error {
 	cause, causeMessage := status.Reason, status.Message
+	if !rollbackAuthorized(deployment, guard.GetName()) {
+		// The controller can update any Deployment it watches. Acting for a
+		// guard the Deployment never named would let anyone who can create a
+		// guard rewrite a Deployment they have no rights on.
+		status.Reason = reasonNotAuthorized
+		status.Message = notAuthorizedMessage(deployment, guard.GetName())
+		status.SetCondition(ConditionRolledBack, metav1.ConditionFalse, reasonNotAuthorized, status.Message)
+		rollbackTotal.WithLabelValues("skipped_not_authorized").Inc()
+		return nil
+	}
 	if status.HealthyTemplateHash == "" {
 		status.Reason = reasonNoHealthyRevision
 		status.Message = fmt.Sprintf("rollout of %s is blocked and no healthy revision has been recorded; not rolling back", deployment.Name)
@@ -782,6 +809,22 @@ func (c *RolloutGuardController) patchStatus(ctx context.Context, guard *unstruc
 		"status",
 	)
 	return err
+}
+
+// rollbackAuthorized reports whether the Deployment names the guard in its
+// rollback-guards annotation.
+func rollbackAuthorized(deployment *appsv1.Deployment, guardName string) bool {
+	for _, name := range strings.Split(deployment.Annotations[rollbackGuardsAnnotation], ",") {
+		if strings.TrimSpace(name) == guardName {
+			return true
+		}
+	}
+	return false
+}
+
+func notAuthorizedMessage(deployment *appsv1.Deployment, guardName string) string {
+	return fmt.Sprintf("deployment %s does not list guard %s in its %s annotation; the controller will not roll it back. "+
+		"Someone with update rights on the Deployment must add it", deployment.Name, guardName, rollbackGuardsAnnotation)
 }
 
 // gitOpsHint names the GitOps tool that manages the Deployment, if its

@@ -30,6 +30,12 @@ Attesta does not write to Git, so it treats a rollback as an emergency override 
 
 Writing the revert to Git (opening a revert commit from the controller) would remove the conflict entirely. It is not implemented.
 
+### Who may make the controller act
+
+The controller holds `update` on Deployments, so a RolloutGuard must not let its author borrow that right. The target Deployment has to name the guard in its `attesta.io/rollback-guards` annotation, which only someone with update rights on the Deployment can set. The controller checks it every time it is about to roll back, so revoking consent takes effect immediately.
+
+An admission webhook that runs a SubjectAccessReview for the guard's creator was the alternative. It was not chosen: it adds a TLS serving certificate and a component that must be up for guards to be created, it checks only once, at creation, and it is bypassed whenever its failure policy lets requests through. The update right can also be bound per namespace (`deploy/controller/rollback-rbac.yaml`), so a cluster can limit where rollback is possible at all.
+
 ## API
 
 ### SLO gate

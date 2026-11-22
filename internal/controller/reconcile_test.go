@@ -69,7 +69,7 @@ func healthyDeployment(generation int64, image string) *appsv1.Deployment {
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "payments-api", Namespace: testNamespace, UID: testUID, Generation: generation,
-			Annotations: map[string]string{revisionAnnotation: "1"},
+			Annotations: map[string]string{revisionAnnotation: "1", rollbackGuardsAnnotation: "payments-api-rollout"},
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,

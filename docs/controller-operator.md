@@ -31,6 +31,7 @@ The controller watches RolloutGuards, Deployments and ReplicaSets once, at start
 Rollback rewrites a Deployment's pod template, so every rule errs towards doing nothing:
 
 - **Opt-in.** A guard without `spec.rollback.enabled: true` only reports.
+- **The Deployment must consent.** The target Deployment has to name the guard in its `attesta.io/rollback-guards` annotation (comma-separated for several guards). Otherwise the controller reports `RollbackNotAuthorized` and does nothing. The guard's `RollbackAuthorized` condition shows the answer before any incident. This closes a confused-deputy hole: the controller can update Deployments, so without consent anyone allowed to create a RolloutGuard in a namespace could have it rewrite a Deployment there that they have no rights on. Only someone with update rights on the Deployment can set the annotation, and the controller checks it at the moment it acts, not just when the guard is created. Name a guard only once it exists, or limit who can create RolloutGuards, so nobody can create a listed guard first.
 - **Healthy target only.** The controller restores the template it last saw fully rolled out. If it has never seen this Deployment healthy, it reports `NoHealthyRevision` and does nothing.
 - **Never twice.** If the Deployment is already on the last healthy template and still blocked, it reports `HealthyRevisionFailing` and does nothing. This prevents rolling "back" onto a bad revision after the controller's own rollback produced a newer revision number.
 - **Reuses the healthy ReplicaSet.** The template is restored without its `pod-template-hash` label and without extra annotations, so the Deployment controller adopts the existing healthy ReplicaSet, as `kubectl rollout undo` does. Audit annotations (`attesta.io/rollback-from-revision`, `rollback-to-revision`, `rollback-at`, `rollback-by-guard`) are written on the Deployment itself.
@@ -83,6 +84,8 @@ kubectl apply -k deploy/crds
 kubectl apply -k deploy/controller
 ```
 
+RBAC is split. `rbac.yaml` grants read access, status writes on RolloutGuards and Events. `rollback-rbac.yaml` holds the one other write, `update` on Deployments, in its own ClusterRole, `attesta-controller-rollback`. The default binds it cluster-wide; the file shows how to replace that with a RoleBinding in each namespace where rollback is allowed.
+
 `deploy/controller` runs two replicas with leader election (a Lease named `attesta-controller` in `attesta-system`), so one replica reconciles and the other takes over if it goes away. Handover never overlaps: on shutdown the leader stops its workers, waits for in-flight reconciles to finish (up to `--renew-deadline`), and only then releases the Lease. client-go's own release-on-cancel does not wait, which would let the standby start while the old leader was still mid-rollback. A leader that loses the Lease without shutting down exits and restarts with fresh caches. Rollback state lives in the guard's status, not in memory, so a new leader does not repeat a rollback it inherits. Pods run as UID 65532 from a distroless image with a read-only root filesystem.
 
 Images are published to `ghcr.io/gaurav-gs7/attesta-controller` by `.github/workflows/release.yml`: `main` on every push to main, and a version tag for every `v*` git tag. The kustomization defaults to `main`; pin a version or digest for anything that matters:
@@ -127,6 +130,8 @@ Conditions:
 - `Healthy`
 - `Blocked`
 - `RolledBack`, once a rollback has been attempted. It stays `True` until a different revision rolls out healthy.
+- `Analysis`, when the guard sets `spec.checks`.
+- `RollbackAuthorized`, when rollback is enabled: whether the Deployment names the guard in `attesta.io/rollback-guards`.
 
 `lastTransitionTime` changes only when a condition's status changes. Other fields: `healthyRevision`, `healthyTemplateHash`, `healthyGeneration`, `rollbackRevision`, `rollbackTemplateHash`, `rollbackFromTemplateHash`, replica counts, and the observed generations of the guard and the Deployment.
 

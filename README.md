@@ -10,7 +10,7 @@ Every value Attesta reports is either measured, recorded, or explicitly marked a
 
 | Area | What is real | What is not (yet) |
 | --- | --- | --- |
-| Rollout guard controller | Watches Deployments, writes status and Events, and restores the last healthy template when Kubernetes reports `ProgressDeadlineExceeded` or when the new revision fails `consecutiveFailures` metric checks in a row (error rate, p95 latency, availability from Prometheus, scoped to that revision). Inconclusive data never decides. Leader election, metrics, probes. | No traffic shifting, so no true canary: `spec.steps` is not used. |
+| Rollout guard controller | Watches Deployments, writes status and Events, and restores the last healthy template when Kubernetes reports `ProgressDeadlineExceeded` or when the new revision fails `consecutiveFailures` metric checks in a row (error rate, p95 latency, availability from Prometheus, scoped to that revision). Inconclusive data never decides. Rolls back only Deployments that name the guard in `attesta.io/rollback-guards`, and never fights a GitOps tool that re-applies the bad version. Leader election, metrics, probes. | No traffic shifting, so no true canary: `spec.steps` is not used. |
 | SLO gate | Error rate, p95, burn rate and 30-day error budget from Prometheus. Unknown data blocks `POST /rollouts`. | Single burn-rate window (1h); no multi-window alerting logic in the gate. |
 | Health gate | Applies thresholds to the metrics in the request. | It does not measure anything: inputs are caller-supplied, and thresholds are fixed at 300ms p99 and 1%. |
 | Rollback endpoints | Record a rollback request. | They do not change the cluster. Your deployment tooling, or the controller, must act. |

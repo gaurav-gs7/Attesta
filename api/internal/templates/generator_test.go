@@ -283,3 +283,27 @@ func TestArgoSelfHealIsOffWhenTheControllerOwnsRollback(t *testing.T) {
 		}
 	}
 }
+
+// Audit C-13: the controller rolls back only Deployments that name the guard.
+func TestGeneratedDeploymentConsentsOnlyWhenRollbackIsOn(t *testing.T) {
+	for _, rollback := range []bool{true, false} {
+		service := testService("go")
+		service.RollbackOnFailure = rollback
+		raw := read(t, generate(t, service), "k8s/base/deployment.yaml")
+		var d struct {
+			Metadata struct {
+				Annotations map[string]string `json:"annotations"`
+			} `json:"metadata"`
+		}
+		if err := yaml.Unmarshal([]byte(raw), &d); err != nil {
+			t.Fatalf("deployment.yaml does not parse: %v\n%s", err, raw)
+		}
+		got, ok := d.Metadata.Annotations["attesta.io/rollback-guards"]
+		if rollback && got != "payments-api-rollout" {
+			t.Fatalf("rollback on: attesta.io/rollback-guards = %q, want payments-api-rollout", got)
+		}
+		if !rollback && ok {
+			t.Fatalf("rollback off: deployment still consents to rollback (%q)", got)
+		}
+	}
+}

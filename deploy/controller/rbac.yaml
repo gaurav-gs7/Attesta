@@ -9,10 +9,11 @@ rules:
   - apiGroups: ["attesta.io"]
     resources: ["rolloutguards/status"]
     verbs: ["get", "patch", "update"]
-  # update is needed only to restore a pod template when rollback is enabled.
+  # Read-only. The right to update Deployments is in rollback-rbac.yaml so it
+  # can be bound per namespace instead of cluster-wide.
   - apiGroups: ["apps"]
     resources: ["deployments"]
-    verbs: ["get", "list", "watch", "update"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["apps"]
     resources: ["replicasets"]
     verbs: ["get", "list", "watch"]

@@ -32,6 +32,9 @@ const (
 	ConditionBlocked         = "Blocked"
 	ConditionRolledBack      = "RolledBack"
 	ConditionAnalysis        = "Analysis"
+	// ConditionRollbackAuthorized reports, while rollback is enabled, whether
+	// the target Deployment has consented to this guard rolling it back.
+	ConditionRollbackAuthorized = "RollbackAuthorized"
 )
 
 type RolloutGuardSpec struct {

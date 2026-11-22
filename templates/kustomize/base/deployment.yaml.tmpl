@@ -6,6 +6,12 @@ metadata:
   labels:
     app.kubernetes.io/name: {{ .Service.Name }}
     app.kubernetes.io/managed-by: attesta
+{{- if .Service.RollbackOnFailure }}
+  annotations:
+    # Lets the Attesta controller roll this Deployment back for the named
+    # guard. Without it the guard only reports.
+    attesta.io/rollback-guards: {{ .Service.Name }}-rollout
+{{- end }}
 spec:
   replicas: 2
   selector:
