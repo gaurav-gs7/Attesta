@@ -8,8 +8,11 @@
 #   3. the rollback happens exactly once and the controller then leaves the
 #      Deployment alone;
 #   4. a paused Deployment is reported as Paused and never modified;
-#   5. the leader's /metrics counts the rollback;
-#   6. with metric analysis, a rollout Kubernetes considers healthy is rolled
+#   5. the leader's /metrics counts the rollback and the standby replica did
+#      nothing;
+#   6. after the leader pod is deleted the standby takes the Lease, and the
+#      new leader does not repeat the rollback it inherits;
+#   7. with metric analysis, a rollout Kubernetes considers healthy is rolled
 #      back after consecutive failed checks of the new revision's metrics.
 #
 # Prerequisites: kubectl pointing at a disposable cluster, and the image
@@ -68,11 +71,26 @@ has_healthy_template() { [[ -n "$(guard healthyTemplateHash)" ]]; }
 image_is() { [[ "$(image)" == "$1" ]]; }
 phase_is() { [[ "$(guard phase)" == "$1" ]]; }
 
-leader_metric() {
-  local leader
-  leader="$(kubectl -n attesta-system get lease attesta-controller -o 'jsonpath={.spec.holderIdentity}')"
-  kubectl get --raw "/api/v1/namespaces/attesta-system/pods/${leader}:8080/proxy/metrics" | grep -F "$1" | awk '{print $2}'
+leader() { kubectl -n attesta-system get lease attesta-controller -o 'jsonpath={.spec.holderIdentity}'; }
+
+pod_metric() {
+  kubectl get --raw "/api/v1/namespaces/attesta-system/pods/$1:8080/proxy/metrics" | grep -F "$2" | awk '{print $2}'
 }
+
+leader_metric() { pod_metric "$(leader)" "$1"; }
+
+# all_replicas_metric <metric> sums a counter over every controller pod; a
+# replica that never acted does not export the series and counts as zero.
+all_replicas_metric() {
+  local total=0 pod value
+  for pod in $(kubectl -n attesta-system get pods -l app.kubernetes.io/name=attesta-controller -o 'jsonpath={.items[*].metadata.name}'); do
+    value="$(pod_metric "$pod" "$1" || true)"
+    total=$((total + ${value:-0}))
+  done
+  echo "$total"
+}
+
+holder_changed_from() { local now; now="$(leader)"; [[ -n "$now" && "$now" != "$1" ]]; }
 
 log "installing CRDs and the controller"
 kubectl apply -k deploy/crds
@@ -162,10 +180,23 @@ image_is "$GOOD_IMAGE" || fail "image changed after the rollback: $(image)"
 
 triggered="$(leader_metric 'attesta_rolloutguard_rollback_total{outcome="triggered"}')"
 [[ "$triggered" == "1" ]] || fail "leader reports rollback_total{outcome=\"triggered\"}=${triggered:-absent}, want 1"
-log "ok: leader metrics count exactly one rollback"
+total="$(all_replicas_metric 'attesta_rolloutguard_rollback_total{outcome="triggered"}')"
+[[ "$total" == "1" ]] || fail "replicas together report $total rollbacks, want 1: the standby acted"
+log "ok: leader metrics count exactly one rollback and the standby did nothing"
 
 events="$(kubectl -n "$NS" get events --field-selector involvedObject.name=app-rollout,reason=RollbackTriggered -o name | wc -l)"
 ((events >= 1)) || fail "no RollbackTriggered event on the guard"
+
+old_leader="$(leader)"
+log "failover: deleting the leader pod $old_leader"
+kubectl -n attesta-system delete pod "$old_leader" --wait=false
+wait_until "the standby to take the leader lease" 60 holder_changed_from "$old_leader"
+log "ok: $(leader) now holds the lease"
+wait_until "the new leader to sync and report ready" 60 \
+  kubectl -n attesta-system wait --for=condition=Ready "pod/$(leader)" --timeout=5s
+sleep 10
+[[ "$(annotation rollback-at)" == "$rolled_back_at" ]] || fail "the new leader repeated the inherited rollback"
+log "ok: the new leader left the already rolled-back Deployment alone"
 
 log "metric analysis: deploying the in-cluster Prometheus stub"
 kubectl -n "$NS" create configmap prom-stub --from-file=stub.py=test/e2e/prometheus_stub.py --dry-run=client -o yaml | kubectl apply -f -
@@ -284,7 +315,8 @@ kubectl -n "$NS" rollout status deployment/app2 --timeout=120s
 failed="$(leader_metric 'attesta_rolloutguard_analysis_total{result="Failed"}')"
 ((${failed:-0} >= 2)) || fail "leader reports analysis_total{result=\"Failed\"}=${failed:-absent}, want at least 2"
 triggered="$(leader_metric 'attesta_rolloutguard_rollback_total{outcome="triggered"}')"
-[[ "$triggered" == "2" ]] || fail "leader reports rollback_total{outcome=\"triggered\"}=${triggered:-absent}, want 2"
+# The leader changed after the first rollback, so its counter holds only this one.
+[[ "$triggered" == "1" ]] || fail "new leader reports rollback_total{outcome=\"triggered\"}=${triggered:-absent}, want 1"
 log "ok: app2 rolled back by metric analysis: $message"
 
 log "PASS: deadline and metric-analysis rollbacks both restored the healthy template once; paused rollouts were left alone"

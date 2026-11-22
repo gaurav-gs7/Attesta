@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -146,12 +147,6 @@ func run(o options, logger *slog.Logger) error {
 		leading.Store(true)
 		return ctrl.Run(runCtx, o.workers)
 	}
-	return runWithLeaderElection(runCtx, cfg, o, logger, &leading, func(leaderCtx context.Context) error {
-		return ctrl.Run(leaderCtx, o.workers)
-	})
-}
-
-func runWithLeaderElection(ctx context.Context, cfg *rest.Config, o options, logger *slog.Logger, leading *atomic.Bool, work func(context.Context) error) error {
 	kube, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		return err
@@ -160,6 +155,23 @@ func runWithLeaderElection(ctx context.Context, cfg *rest.Config, o options, log
 	if err != nil {
 		return fmt.Errorf("leader election identity: %w", err)
 	}
+	return runWithLeaderElection(runCtx, kube, identity, o, logger, &leading, func(leaderCtx context.Context) error {
+		return ctrl.Run(leaderCtx, o.workers)
+	})
+}
+
+// runWithLeaderElection runs work only while this replica holds the Lease.
+//
+// On shutdown the Lease is released only after work has returned. client-go's
+// ReleaseOnCancel releases as soon as its context is cancelled, without
+// waiting for OnStartedLeading to finish, so a standby could start
+// reconciling while this replica is still inside a reconcile, possibly mid
+// rollback. Here the elector runs on its own context, which is cancelled once
+// work has stopped (or after renewDeadline, if it does not stop).
+//
+// If the Lease is lost instead, work's context is cancelled and an error is
+// returned so the process exits and restarts with fresh caches.
+func runWithLeaderElection(ctx context.Context, kube kubernetes.Interface, identity string, o options, logger *slog.Logger, leading *atomic.Bool, work func(context.Context) error) error {
 	ns := o.leaderElectionNS
 	if ns == "" {
 		ns = os.Getenv("POD_NAMESPACE")
@@ -173,9 +185,37 @@ func runWithLeaderElection(ctx context.Context, cfg *rest.Config, o options, log
 		return fmt.Errorf("leader election lock: %w", err)
 	}
 
+	electorCtx, cancelElector := context.WithCancel(context.Background())
+	defer cancelElector()
+	workStarted, workDone := make(chan struct{}), make(chan struct{})
+	// mu guards the hand-off between the elector's OnStartedLeading goroutine
+	// and this function's return: work never starts after RunOrDie returned.
+	var (
+		mu       sync.Mutex
+		started  bool
+		returned bool
+	)
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-electorCtx.Done():
+			return
+		}
+		select {
+		case <-workStarted:
+			select {
+			case <-workDone:
+			case <-time.After(o.renewDeadline):
+				logger.Warn("work did not stop before the renew deadline; releasing the lease anyway")
+			}
+		default:
+		}
+		cancelElector()
+	}()
+
 	var workErr error
 	lostLease := false
-	leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
+	leaderelection.RunOrDie(electorCtx, leaderelection.LeaderElectionConfig{
 		Lock:            lock,
 		LeaseDuration:   o.leaseDuration,
 		RenewDeadline:   o.renewDeadline,
@@ -184,11 +224,27 @@ func runWithLeaderElection(ctx context.Context, cfg *rest.Config, o options, log
 		Name:            o.leaderElectionID,
 		Callbacks: leaderelection.LeaderCallbacks{
 			OnStartedLeading: func(leaderCtx context.Context) {
+				mu.Lock()
+				if returned {
+					mu.Unlock()
+					return
+				}
+				started = true
+				mu.Unlock()
+				close(workStarted)
+				defer close(workDone)
+				// Work stops on shutdown or on losing the lease, whichever
+				// comes first.
+				workCtx, cancelWork := context.WithCancel(leaderCtx)
+				defer cancelWork()
+				stop := context.AfterFunc(ctx, cancelWork)
+				defer stop()
 				leading.Store(true)
 				logger.Info("acquired leader lease", "identity", identity, "lease", ns+"/"+o.leaderElectionID)
-				workErr = work(leaderCtx)
+				workErr = work(workCtx)
 			},
 			OnStoppedLeading: func() {
+				leading.Store(false)
 				if ctx.Err() == nil {
 					lostLease = true
 				}
@@ -201,6 +257,19 @@ func runWithLeaderElection(ctx context.Context, cfg *rest.Config, o options, log
 			},
 		},
 	})
+	// RunOrDie does not wait for OnStartedLeading. Wait for work here, so
+	// workErr is safe to read and nothing is still reconciling on return.
+	mu.Lock()
+	returned = true
+	wasStarted := started
+	mu.Unlock()
+	if wasStarted {
+		select {
+		case <-workDone:
+		case <-time.After(o.renewDeadline):
+			return errors.New("work did not stop after leadership ended")
+		}
+	}
 	if workErr != nil {
 		return workErr
 	}

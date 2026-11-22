@@ -147,7 +147,7 @@ make lint   # golangci-lint and shellcheck
 make e2e    # controller end-to-end test on a local kind cluster
 ```
 
-CI runs on every push: formatting, `go mod tidy` drift, vet, race-enabled tests, golangci-lint, ShellCheck, govulncheck, manifest validation with kubeconform, actionlint, both container images (checked to run as non-root), and `scripts/e2e-rollback.sh` on kind. The end-to-end test deploys the controller and runs two scenarios. First, an image that cannot be pulled is rolled back once on its progress deadline. Second, against an in-cluster Prometheus stub, an image that Kubernetes considers healthy but whose metrics fail is rolled back by metric analysis alone. It also checks that a paused Deployment is left alone and that the leader's metrics count each rollback.
+CI runs on every push: formatting, `go mod tidy` drift, vet, race-enabled tests, golangci-lint, ShellCheck, govulncheck, manifest validation with kubeconform, actionlint, both container images (checked to run as non-root), and `scripts/e2e-rollback.sh` on kind. The end-to-end test deploys the controller and runs two scenarios. First, an image that cannot be pulled is rolled back once on its progress deadline. Second, against an in-cluster Prometheus stub, an image that Kubernetes considers healthy but whose metrics fail is rolled back by metric analysis alone. It also checks that a paused Deployment is left alone, that only the leader acted, and that after the leader pod is deleted the standby takes over without repeating the rollback.
 
 ## PostgreSQL Mode
 

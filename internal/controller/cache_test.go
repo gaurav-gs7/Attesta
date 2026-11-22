@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -220,4 +221,52 @@ func successfulReconciles(t *testing.T) float64 {
 		}
 	}
 	return 0
+}
+
+// Audit C-10: Run returns only after in-flight reconciles finish, so the
+// caller can hand leadership over without two replicas overlapping.
+func TestRunWaitsForInFlightReconcile(t *testing.T) {
+	guard := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "attesta.io/v1", "kind": "RolloutGuard",
+		"metadata": map[string]any{"name": "payments-api-rollout", "namespace": testNamespace, "generation": int64(1)},
+		"spec":     map[string]any{"serviceRef": "payments-api"},
+	}}
+	kube := kubefake.NewSimpleClientset(
+		healthyDeployment(1, "payments-api:v1"),
+		replicaSet("payments-api-h1", 1, "h1", "payments-api:v1"),
+	)
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{rolloutGuardGVR: "RolloutGuardList"}, guard)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	dyn.PrependReactor("patch", "rolloutguards", func(k8stesting.Action) (bool, runtime.Object, error) {
+		once.Do(func() { close(entered) })
+		<-release // a status write that is slow to return
+		return false, nil, nil
+	})
+	ctrl := NewRolloutGuardControllerWithClients(kube, dyn, Options{Recorder: record.NewFakeRecorder(100)})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- ctrl.Run(ctx, 1) }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reconcile never reached the status patch")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		t.Fatalf("Run returned (%v) while a reconcile was still in flight", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after the reconcile finished")
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -196,10 +197,19 @@ func (c *RolloutGuardController) Run(ctx context.Context, workers int) error {
 	if !cache.WaitForCacheSync(ctx.Done(), c.HasSynced) {
 		return errors.New("rollout guard controller cache sync failed")
 	}
+	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
-		go wait.UntilWithContext(ctx, c.worker, time.Second)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			wait.UntilWithContext(ctx, c.worker, time.Second)
+		}()
 	}
 	<-ctx.Done()
+	// Return only once in-flight reconciles have finished, so a caller that
+	// hands over leadership after Run returns never overlaps with this one.
+	c.queue.ShutDown()
+	wg.Wait()
 	return nil
 }
 

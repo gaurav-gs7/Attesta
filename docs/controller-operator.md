@@ -82,7 +82,7 @@ kubectl apply -k deploy/crds
 kubectl apply -k deploy/controller
 ```
 
-`deploy/controller` runs two replicas with leader election (a Lease named `attesta-controller` in `attesta-system`), so one replica reconciles and the other takes over if it goes away. Pods run as UID 65532 from a distroless image with a read-only root filesystem.
+`deploy/controller` runs two replicas with leader election (a Lease named `attesta-controller` in `attesta-system`), so one replica reconciles and the other takes over if it goes away. Handover never overlaps: on shutdown the leader stops its workers, waits for in-flight reconciles to finish (up to `--renew-deadline`), and only then releases the Lease. client-go's own release-on-cancel does not wait, which would let the standby start while the old leader was still mid-rollback. A leader that loses the Lease without shutting down exits and restarts with fresh caches. Rollback state lives in the guard's status, not in memory, so a new leader does not repeat a rollback it inherits. Pods run as UID 65532 from a distroless image with a read-only root filesystem.
 
 Images are published to `ghcr.io/gaurav-gs7/attesta-controller` by `.github/workflows/release.yml`: `main` on every push to main, and a version tag for every `v*` git tag. The kustomization defaults to `main`; pin a version or digest for anything that matters:
 
