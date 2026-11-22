@@ -33,6 +33,9 @@ func NewMemoryStore() *MemoryStore {
 	}
 }
 
+// Ping always succeeds: the in-memory store has nothing to reach.
+func (s *MemoryStore) Ping(context.Context) error { return nil }
+
 func (s *MemoryStore) CreateService(_ context.Context, service models.Service) (models.Service, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

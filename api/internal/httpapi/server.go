@@ -135,12 +135,27 @@ func (s *Server) live(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "alive"})
 }
 
-func (s *Server) ready(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status":      "ready",
+// readyTimeout bounds the store check in /readyz, so a hung database makes
+// the probe fail rather than hang past the kubelet's timeout.
+const readyTimeout = 2 * time.Second
+
+// ready reports ready only when the store answers. Liveness (/livez) does not
+// depend on the store, so a database outage takes the API out of the Service
+// endpoints without restarting it.
+func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), readyTimeout)
+	defer cancel()
+	body := map[string]any{
 		"authEnabled": s.apiToken != "",
 		"uptimeSec":   int(time.Since(s.startedAt).Seconds()),
-	})
+	}
+	if err := s.store.Ping(ctx); err != nil {
+		body["status"], body["store"] = "not ready", "unreachable: "+err.Error()
+		writeJSON(w, http.StatusServiceUnavailable, body)
+		return
+	}
+	body["status"], body["store"] = "ready", "ok"
+	writeJSON(w, http.StatusOK, body)
 }
 
 func (s *Server) createService(w http.ResponseWriter, r *http.Request) {

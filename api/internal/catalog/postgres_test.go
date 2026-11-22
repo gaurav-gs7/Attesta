@@ -266,3 +266,14 @@ func TestPostgresIgnoresLegacyEventRowsInDeploymentHistory(t *testing.T) {
 		t.Fatalf("history = %+v (%v), want only v1", history, err)
 	}
 }
+
+func TestPostgresPingFailsWhenClosed(t *testing.T) {
+	store, _ := postgresForTest(t)
+	if err := store.Ping(context.Background()); err != nil {
+		t.Fatalf("ping a live database: %v", err)
+	}
+	_ = store.Close()
+	if err := store.Ping(context.Background()); err == nil {
+		t.Fatal("ping succeeded on a closed store")
+	}
+}

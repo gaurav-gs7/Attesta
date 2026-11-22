@@ -49,6 +49,11 @@ func newPostgresStore(ctx context.Context, databaseURL string, tracer pgx.QueryT
 	return store, nil
 }
 
+// Ping checks that PostgreSQL answers.
+func (s *PostgresStore) Ping(ctx context.Context) error {
+	return s.db.PingContext(ctx)
+}
+
 func (s *PostgresStore) Close() error {
 	return s.db.Close()
 }

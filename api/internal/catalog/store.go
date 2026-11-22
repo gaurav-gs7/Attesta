@@ -18,6 +18,8 @@ var ErrNotFound = errors.New("not found")
 var ErrConflict = errors.New("conflict")
 
 type Store interface {
+	// Ping reports whether the store can serve requests.
+	Ping(context.Context) error
 	CreateService(context.Context, models.Service) (models.Service, error)
 	ListServices(context.Context) ([]models.Service, error)
 	GetServiceByName(context.Context, string) (models.Service, error)
