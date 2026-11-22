@@ -62,29 +62,43 @@ type Deployment struct {
 	CompletedAt *time.Time `json:"completedAt,omitempty"`
 }
 
+// ServiceStatus is the current state of a service. Every value is either read
+// from a record or evaluated from telemetry; nothing is filled in.
 type ServiceStatus struct {
-	Service         string    `json:"service"`
-	Environment     string    `json:"environment"`
-	Deployment      string    `json:"deployment"`
-	SLO             float64   `json:"slo"`
-	P99LatencyMs    float64   `json:"p99LatencyMs"`
-	ErrorRate       float64   `json:"errorRate"`
-	LastDeployment  time.Time `json:"lastDeployment"`
-	HealthGate      string    `json:"healthGate"`
-	RollbackAllowed bool      `json:"rollbackAllowed"`
+	Service           string      `json:"service"`
+	Environment       string      `json:"environment"`
+	LatestDeployment  *Deployment `json:"latestDeployment,omitempty"`
+	SLO               SLOStatus   `json:"slo"`
+	RollbackOnFailure bool        `json:"rollbackOnFailure"`
 }
 
 type Incident struct {
-	ID         string     `json:"id"`
-	ServiceID  string     `json:"serviceId"`
-	Service    string     `json:"service"`
-	Severity   string     `json:"severity"`
-	Title      string     `json:"title"`
-	Status     string     `json:"status"`
-	AlertName  string     `json:"alertName,omitempty"`
-	RootCause  string     `json:"rootCause,omitempty"`
-	CreatedAt  time.Time  `json:"createdAt"`
-	ResolvedAt *time.Time `json:"resolvedAt,omitempty"`
+	ID        string `json:"id"`
+	ServiceID string `json:"serviceId"`
+	Service   string `json:"service"`
+	Severity  string `json:"severity"`
+	Title     string `json:"title"`
+	Status    string `json:"status"`
+	AlertName string `json:"alertName,omitempty"`
+	// Source is how the incident was opened: "api" or "alertmanager".
+	Source string `json:"source"`
+	// Fingerprint is Alertmanager's alert fingerprint, used to match the
+	// resolved notification to the incident it opened.
+	Fingerprint string `json:"fingerprint,omitempty"`
+	// AlertStartsAt is when the alerting rule started firing, if the sender
+	// said so. CreatedAt is when Attesta recorded the incident.
+	AlertStartsAt *time.Time `json:"alertStartsAt,omitempty"`
+	// AlertReported holds values the alert sender reported. They are the
+	// sender's claims, kept apart from Attesta's own SLO evaluation.
+	AlertReported  *AlertSignals `json:"alertReported,omitempty"`
+	CreatedAt      time.Time     `json:"createdAt"`
+	ResolvedAt     *time.Time    `json:"resolvedAt,omitempty"`
+	ResolutionNote string        `json:"resolutionNote,omitempty"`
+}
+
+type AlertSignals struct {
+	ErrorRatePct *float64 `json:"errorRatePct,omitempty"`
+	LatencyP95Ms *float64 `json:"latencyP95Ms,omitempty"`
 }
 
 type ReadinessCheck struct {
@@ -105,19 +119,47 @@ type ReadinessReport struct {
 	EvaluatedAt     time.Time        `json:"evaluatedAt"`
 }
 
+// Deployment gate values.
+const (
+	GateAllowed = "allowed"
+	GateBlocked = "blocked"
+	GateUnknown = "unknown"
+)
+
+// SLO data sources.
+const (
+	SLOSourcePrometheus = "prometheus"
+	SLOSourceNone       = "none"
+)
+
+// SLOStatus is an SLO evaluation. Measured values are pointers: a nil value
+// means it could not be measured, never zero. When any value the gate needs
+// is missing, DeploymentGate is "unknown" and rollouts are refused.
 type SLOStatus struct {
-	Service                 string    `json:"service"`
-	AvailabilityTarget      float64   `json:"availabilityTarget"`
-	AvailabilityCurrent     float64   `json:"availabilityCurrent"`
-	ErrorBudgetRemainingPct float64   `json:"errorBudgetRemainingPct"`
-	LatencyP95TargetMs      int       `json:"latencyP95TargetMs"`
-	LatencyP95CurrentMs     float64   `json:"latencyP95CurrentMs"`
-	ErrorRateThresholdPct   float64   `json:"errorRateThresholdPct"`
-	ErrorRateCurrentPct     float64   `json:"errorRateCurrentPct"`
-	BurnRate                float64   `json:"burnRate"`
-	DeploymentGate          string    `json:"deploymentGate"`
-	Reason                  string    `json:"reason"`
-	EvaluatedAt             time.Time `json:"evaluatedAt"`
+	Service    string `json:"service"`
+	DataSource string `json:"dataSource"`
+
+	AvailabilityTarget    float64 `json:"availabilityTarget"`
+	LatencyP95TargetMs    int     `json:"latencyP95TargetMs"`
+	ErrorRateThresholdPct float64 `json:"errorRateThresholdPct"`
+
+	// SignalWindow applies to the error rate and p95 latency, BurnRateWindow
+	// to the burn rate, and BudgetWindow to availability and the remaining
+	// error budget.
+	SignalWindow   string `json:"signalWindow,omitempty"`
+	BurnRateWindow string `json:"burnRateWindow,omitempty"`
+	BudgetWindow   string `json:"budgetWindow,omitempty"`
+
+	RequestRatePerSec       *float64 `json:"requestRatePerSec,omitempty"`
+	ErrorRateCurrentPct     *float64 `json:"errorRateCurrentPct,omitempty"`
+	LatencyP95CurrentMs     *float64 `json:"latencyP95CurrentMs,omitempty"`
+	BurnRate                *float64 `json:"burnRate,omitempty"`
+	AvailabilityCurrent     *float64 `json:"availabilityCurrent,omitempty"`
+	ErrorBudgetRemainingPct *float64 `json:"errorBudgetRemainingPct,omitempty"`
+
+	DeploymentGate string    `json:"deploymentGate"`
+	Reason         string    `json:"reason"`
+	EvaluatedAt    time.Time `json:"evaluatedAt"`
 }
 
 type IncidentEvent struct {

@@ -39,12 +39,13 @@ type healthGateRequest struct {
 }
 
 type incidentRequest struct {
-	Service    string  `json:"service"`
-	Severity   string  `json:"severity"`
-	AlertName  string  `json:"alertName"`
-	Title      string  `json:"title"`
-	ErrorRate  float64 `json:"errorRate"`
-	LatencyP95 float64 `json:"latencyP95Ms"`
+	Service   string `json:"service"`
+	Severity  string `json:"severity,omitempty"`
+	AlertName string `json:"alertName,omitempty"`
+	Title     string `json:"title,omitempty"`
+	// Values the alert reported. Sent only when the flag is given.
+	ErrorRate  *float64 `json:"errorRate,omitempty"`
+	LatencyP95 *float64 `json:"latencyP95Ms,omitempty"`
 }
 
 func main() {
@@ -315,14 +316,22 @@ func incidentCreate(args []string) error {
 	fs := flag.NewFlagSet("incident create", flag.ExitOnError)
 	req := incidentRequest{}
 	fs.StringVar(&req.Service, "service", "", "service name")
-	fs.StringVar(&req.Severity, "severity", "critical", "incident severity")
-	fs.StringVar(&req.AlertName, "alert", "HighErrorRate", "alert name")
-	fs.StringVar(&req.Title, "title", "High error rate during canary", "incident title")
-	fs.Float64Var(&req.ErrorRate, "error-rate", 8.2, "observed error rate percentage")
-	fs.Float64Var(&req.LatencyP95, "latency-p95-ms", 850, "observed p95 latency in milliseconds")
+	fs.StringVar(&req.Severity, "severity", "", "incident severity")
+	fs.StringVar(&req.AlertName, "alert", "", "alert name")
+	fs.StringVar(&req.Title, "title", "", "incident title (defaults to the alert name)")
+	errorRate := fs.Float64("error-rate", 0, "error rate percentage reported by the alert (optional)")
+	latency := fs.Float64("latency-p95-ms", 0, "p95 latency in milliseconds reported by the alert (optional)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "error-rate":
+			req.ErrorRate = errorRate
+		case "latency-p95-ms":
+			req.LatencyP95 = latency
+		}
+	})
 	if req.Service == "" && fs.NArg() > 0 {
 		req.Service = fs.Arg(0)
 	}

@@ -226,10 +226,12 @@ bad_canary_rolls_back_and_records_evidence() {
 
 prometheus_unavailable_fails_closed() {
   local output="$run_dir/prometheus-unavailable-slo.json"
-  log "proving Prometheus unavailable causes safe degraded fail-closed behavior"
+  local rollout="$run_dir/prometheus-unavailable-rollout.json"
+  log "proving an unreachable Prometheus yields an unknown SLO state and a refused rollout"
   api GET "/api/v1/services/$SERVICE_NAME/slos" "" "$output" 200
-  assert_contains "$output" '"deploymentGate"[[:space:]]*:[[:space:]]*"blocked"' "expected Prometheus outage to block deployment gate"
-  assert_contains "$output" 'Prometheus unavailable' "expected Prometheus outage reason"
+  assert_contains "$output" '"deploymentGate"[[:space:]]*:[[:space:]]*"unknown"' "expected Prometheus outage to make the gate unknown"
+  assert_contains "$output" 'Prometheus query failed' "expected Prometheus outage reason"
+  api POST "/api/v1/services/$SERVICE_NAME/rollouts" '{"version":"v2"}' "$rollout" 409
   record "prometheus-unavailable-fails-closed" "$output"
 }
 

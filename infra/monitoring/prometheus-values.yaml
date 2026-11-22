@@ -1,6 +1,8 @@
 prometheus:
   prometheusSpec:
-    retention: 6h
+    # Attesta computes the remaining error budget over 30 days, so keep at
+    # least that much history.
+    retention: 31d
     resources:
       requests:
         cpu: 100m

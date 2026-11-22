@@ -141,11 +141,15 @@ func TestSLOEvaluationFailsClosedWhenPrometheusUnavailable(t *testing.T) {
 	if slos.Code != http.StatusOK {
 		t.Fatalf("expected slos 200, got %d: %s", slos.Code, slos.Body.String())
 	}
-	if !bytes.Contains(slos.Body.Bytes(), []byte(`"deploymentGate":"blocked"`)) {
-		t.Fatalf("expected deployment gate to fail closed, got %s", slos.Body.String())
+	if !bytes.Contains(slos.Body.Bytes(), []byte(`"deploymentGate":"unknown"`)) {
+		t.Fatalf("expected deployment gate to be unknown, got %s", slos.Body.String())
 	}
-	if !bytes.Contains(slos.Body.Bytes(), []byte("Prometheus unavailable")) {
+	if !bytes.Contains(slos.Body.Bytes(), []byte("Prometheus query failed")) {
 		t.Fatalf("expected Prometheus outage reason, got %s", slos.Body.String())
+	}
+	rollout := authorizedRequest(server, http.MethodPost, "/api/v1/services/payments-api/rollouts", []byte(`{"version":"v2"}`))
+	if rollout.Code != http.StatusConflict {
+		t.Fatalf("expected rollout to be refused while SLO state is unknown, got %d: %s", rollout.Code, rollout.Body.String())
 	}
 }
 

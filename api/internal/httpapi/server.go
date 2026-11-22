@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -102,6 +103,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/incidents", s.listIncidents)
 	mux.HandleFunc("GET /api/v1/incidents/{id}", s.getIncident)
 	mux.HandleFunc("POST /api/v1/incidents/{id}/resolve", s.resolveIncident)
+	mux.HandleFunc("POST /api/v1/alerts/alertmanager", s.alertmanagerWebhook)
 	mux.HandleFunc("GET /api/v1/incidents/{id}/timeline", s.incidentTimeline)
 	mux.HandleFunc("GET /api/v1/incidents/{id}/postmortem", s.incidentPostmortem)
 	mux.HandleFunc("GET /api/v1/workflows", s.listWorkflows)
@@ -257,29 +259,21 @@ func (s *Server) serviceStatus(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	status := models.ServiceStatus{
+		Service:           service.Name,
+		Environment:       service.Environment,
+		SLO:               s.evaluateSLO(r.Context(), service),
+		RollbackOnFailure: service.RollbackOnFailure,
+	}
 	deployment, err := s.store.LatestDeployment(r.Context(), service.ID)
-	if err != nil && !errors.Is(err, catalog.ErrNotFound) {
+	switch {
+	case err == nil:
+		status.LatestDeployment = &deployment
+	case !errors.Is(err, catalog.ErrNotFound):
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-
-	metrics := reliability.Metrics{P99LatencyMs: 240, ErrorRate: 0.2, SuccessCount: 100}
-	decision := reliability.EvaluateCanary(reliability.DefaultSLO(service.SLOTarget), metrics)
-	last := deployment.StartedAt
-	if last.IsZero() {
-		last = service.CreatedAt
-	}
-	writeJSON(w, http.StatusOK, models.ServiceStatus{
-		Service:         service.Name,
-		Environment:     service.Environment,
-		Deployment:      deployment.Status,
-		SLO:             service.SLOTarget,
-		P99LatencyMs:    metrics.P99LatencyMs,
-		ErrorRate:       metrics.ErrorRate,
-		LastDeployment:  last,
-		HealthGate:      decision.Action,
-		RollbackAllowed: service.DeploymentStrategy == "canary",
-	})
+	writeJSON(w, http.StatusOK, status)
 }
 
 func (s *Server) readiness(w http.ResponseWriter, r *http.Request) {
@@ -365,19 +359,22 @@ func (s *Server) slos(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"slo": status, "workflow": run})
 }
 
+// evaluateSLO measures the service's SLOs. Without Prometheus, or when a
+// query fails, the result is an unknown gate with the reason; Attesta never
+// substitutes estimated values.
 func (s *Server) evaluateSLO(ctx context.Context, service models.Service) models.SLOStatus {
 	if s.prometheusURL == "" {
-		return sloengine.Evaluate(service, sloengine.DefaultSignals(service))
+		return sloengine.Unknown(service, models.SLOSourceNone,
+			"no Prometheus configured (ATTESTA_PROMETHEUS_URL is unset); SLO state unknown, deployment gate fails closed")
 	}
-	checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	signals, err := promclient.NewClient(s.prometheusURL).Signals(checkCtx, service)
-	status := sloengine.Evaluate(service, signals)
 	if err != nil {
-		status.DeploymentGate = "blocked"
-		status.Reason = fmt.Sprintf("Prometheus unavailable or query failed: %v; deployment gate fails closed", err)
+		return sloengine.Unknown(service, models.SLOSourcePrometheus,
+			fmt.Sprintf("Prometheus query failed: %v; SLO state unknown, deployment gate fails closed", err))
 	}
-	return status
+	return sloengine.Evaluate(service, signals)
 }
 
 func (s *Server) deployments(w http.ResponseWriter, r *http.Request) {
@@ -424,8 +421,8 @@ func (s *Server) startRollout(w http.ResponseWriter, r *http.Request) {
 				MaxAttempts: 1,
 				Run: func(context.Context) error {
 					gate = s.evaluateSLO(r.Context(), service)
-					if strings.EqualFold(gate.DeploymentGate, "blocked") {
-						return errors.New(gate.Reason)
+					if gate.DeploymentGate != models.GateAllowed {
+						return fmt.Errorf("deployment gate is %s: %s", gate.DeploymentGate, gate.Reason)
 					}
 					return nil
 				},
@@ -620,111 +617,6 @@ func (s *Server) healthGate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) createIncident(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
-	var req incidents.AlertRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
-		return
-	}
-	if req.Service == "" {
-		writeError(w, http.StatusBadRequest, "service is required")
-		return
-	}
-	service, err := s.store.GetServiceByName(r.Context(), strings.ToLower(strings.TrimSpace(req.Service)))
-	if errors.Is(err, catalog.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "service not found")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if req.Severity == "" {
-		req.Severity = "critical"
-	}
-	if req.AlertName == "" {
-		req.AlertName = "SLOViolation"
-	}
-	if req.Title == "" {
-		req.Title = req.AlertName
-	}
-	signals := sloengine.DefaultSignals(service)
-	if req.ErrorRate > 0 {
-		signals.ErrorRatePct = req.ErrorRate
-	}
-	if req.Latency > 0 {
-		signals.LatencyP95Ms = req.Latency
-	}
-	var sloStatus models.SLOStatus
-	var incident models.Incident
-	var events []models.IncidentEvent
-	var record models.IncidentRecord
-	run := s.workflows.Run(r.Context(), workflows.Spec{
-		Name:    "incident-enrichment",
-		Kind:    "attesta.incident.enrichment",
-		Service: service.Name,
-		Steps: []workflows.Step{
-			{
-				Name:        "evaluate-alert-slo-impact",
-				MaxAttempts: 1,
-				Run: func(context.Context) error {
-					if signals.ErrorRatePct > service.SLOErrorRate || signals.LatencyP95Ms > float64(service.SLOLatencyP95Ms) {
-						signals.AvailabilityPct = service.SLOTarget - 0.4
-						signals.BurnRate = 4.2
-					}
-					sloStatus = sloengine.Evaluate(service, signals)
-					return nil
-				},
-			},
-			{
-				Name:        "correlate-alert-with-service-owner",
-				MaxAttempts: 1,
-				Run: func(context.Context) error {
-					incident = models.Incident{
-						ID:        "inc-" + catalog.NewID(),
-						ServiceID: service.ID,
-						Service:   service.Name,
-						Severity:  strings.ToLower(req.Severity),
-						Title:     req.Title,
-						Status:    "active",
-						AlertName: req.AlertName,
-						CreatedAt: time.Now().UTC(),
-					}
-					return nil
-				},
-			},
-			{
-				Name:        "generate-rca-timeline",
-				MaxAttempts: 1,
-				Run: func(context.Context) error {
-					events = incidents.Timeline(incident, service, sloStatus)
-					record = models.IncidentRecord{
-						Incident: incident,
-						Service:  service,
-						Signals:  sloStatus,
-						Events:   events,
-					}
-					return nil
-				},
-			},
-			{
-				Name:        "persist-incident-record",
-				MaxAttempts: 1,
-				Run: func(ctx context.Context) error {
-					return s.store.SaveIncidentRecord(ctx, record)
-				},
-			},
-		},
-	})
-	if run.State != workflows.StateSucceeded {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": run.Error, "workflow": run})
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, map[string]any{"incident": record, "workflow": run})
-}
-
 func (s *Server) listIncidents(w http.ResponseWriter, r *http.Request) {
 	records, err := s.store.ListIncidentRecords(r.Context())
 	if err != nil {
@@ -740,46 +632,6 @@ func (s *Server) getIncident(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, record)
-}
-
-func (s *Server) resolveIncident(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	var record models.IncidentRecord
-	missing := false
-	run := s.workflows.Run(r.Context(), workflows.Spec{
-		Name: "incident-resolve",
-		Kind: "attesta.incident.resolve",
-		Steps: []workflows.Step{{
-			Name:        "mark-incident-resolved",
-			MaxAttempts: 1,
-			Run: func(ctx context.Context) error {
-				var err error
-				record, err = s.store.GetIncidentRecord(ctx, id)
-				if err != nil {
-					missing = errors.Is(err, catalog.ErrNotFound)
-					return err
-				}
-				now := time.Now().UTC()
-				record.Incident.Status = "resolved"
-				record.Incident.ResolvedAt = &now
-				record.Events = append(record.Events, models.IncidentEvent{
-					Timestamp:   now,
-					EventType:   "resolved",
-					Description: "incident resolved after rollback and SLO recovery checks",
-				})
-				return s.store.SaveIncidentRecord(ctx, record)
-			},
-		}},
-	})
-	if missing {
-		writeError(w, http.StatusNotFound, "incident not found")
-		return
-	}
-	if run.State != workflows.StateSucceeded {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": run.Error, "workflow": run})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"incident": record, "workflow": run})
 }
 
 func (s *Server) listWorkflows(w http.ResponseWriter, _ *http.Request) {
@@ -812,7 +664,7 @@ func (s *Server) incidentPostmortem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
-	_, _ = w.Write([]byte(incidents.Postmortem(record.Incident, record.Service, record.Signals, record.Events)))
+	_, _ = w.Write([]byte(incidents.Postmortem(record)))
 }
 
 func (s *Server) runbook(w http.ResponseWriter, r *http.Request) {
@@ -1057,10 +909,19 @@ func trimList(values []string) []string {
 	return trimmed
 }
 
+// writeJSON encodes before writing the status line, so a value that cannot
+// be encoded becomes a 500 instead of a success status with an empty body.
 func writeJSON(w http.ResponseWriter, status int, payload any) {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(payload); err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"internal server error: response could not be encoded"}` + "\n"))
+		return
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(payload)
+	_, _ = w.Write(buf.Bytes())
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {
@@ -1073,9 +934,17 @@ func (s *Server) auth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// Alertmanager's webhook http_config can only send an Authorization
+		// header, so a Bearer token is accepted as well as X-Attesta-Token.
+		presented := r.Header.Get("X-Attesta-Token")
+		if presented == "" {
+			if bearer, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
+				presented = bearer
+			}
+		}
 		// Hash both sides so the comparison runs in constant time regardless of
 		// the presented token's length.
-		got := sha256.Sum256([]byte(r.Header.Get("X-Attesta-Token")))
+		got := sha256.Sum256([]byte(presented))
 		want := sha256.Sum256([]byte(s.apiToken))
 		if subtle.ConstantTimeCompare(got[:], want[:]) != 1 {
 			writeError(w, http.StatusUnauthorized, "missing or invalid Attesta API token")

@@ -9,11 +9,11 @@ It keeps the useful Harbor-style golden path for service onboarding, but the pro
 - Registers services with owner, tier, pager, repository, runbook, dashboard, SLO, deployment strategy, and rollback policy metadata.
 - Generates production-ready service scaffolds with Kubernetes manifests, GitHub Actions, Kustomize overlays, Terraform, Argo CD, Grafana, Alertmanager, OpenTelemetry, Jaeger, SLO policy, rollout guard, and runbook files.
 - Scores services for production readiness.
-- Evaluates SLO/error-budget status and deployment eligibility from real Prometheus instant queries when `ATTESTA_PROMETHEUS_URL` is configured.
+- Evaluates SLOs from Prometheus: error rate and p95 latency over 5m, burn rate over 1h, availability and remaining error budget over 30d. Without Prometheus, or without data, the SLO state is `unknown` and rollouts are refused.
 - Gates canary rollouts with latency and error-rate health checks.
 - Reconciles `RolloutGuard` resources with a Kubernetes controller that updates status, emits Events, and, when rollback is opted in, restores the last healthy pod template of a rollout that exceeded its progress deadline.
 - Records automated rollback decisions through workflow-backed rollout steps.
-- Converts simulated Alertmanager signals into durable incidents with enriched SLO state, timeline, and postmortem draft.
+- Opens incidents from Alertmanager's webhook or a plain JSON call, records the SLO evaluation at that moment, and builds the timeline and postmortem draft only from recorded deployments, the alert and that evaluation.
 - Exposes workflow runs, steps, retry state, and audit-style events for onboarding, readiness, SLO checks, rollouts, rollback, and incidents.
 - Runs locally on a MacBook with Go, Docker, kind, kubectl, and optional Trivy.
 
@@ -170,6 +170,8 @@ generated/services/payments-api/
 - `POST /api/v1/services/{name}/rollouts/{id}/pause`
 - `POST /api/v1/services/{name}/rollouts/{id}/rollback`
 - `POST /api/v1/incidents`
+- `POST /api/v1/alerts/alertmanager`
+- `POST /api/v1/incidents/{id}/resolve`
 - `GET /api/v1/incidents`
 - `GET /api/v1/incidents/{id}`
 - `GET /api/v1/incidents/{id}/timeline`
@@ -187,15 +189,41 @@ Without `DATABASE_URL`, Attesta uses an in-memory store for fast laptop-local de
 
 PostgreSQL mode also persists incident records and workflow idempotency lookup state, so repeated onboarding operations can be recognized across API restarts.
 
-## Prometheus SLO Queries
+## SLO Evaluation
 
-Set `ATTESTA_PROMETHEUS_URL` to evaluate SLO state from Prometheus:
+Set `ATTESTA_PROMETHEUS_URL` to evaluate SLOs from Prometheus:
 
 ```bash
 ATTESTA_PROMETHEUS_URL=http://prometheus.monitoring.svc:9090 make run-api
 ```
 
-Attesta queries request rate, 5xx rate, and p95 latency from generated service metrics. If Prometheus is configured but unavailable or a query fails, the deployment gate fails closed as `blocked`.
+Attesta reads `http_requests_total` and `http_request_duration_seconds` for the service's `service` label:
+
+| Signal | Window |
+| --- | --- |
+| Error rate (5xx share) and p95 latency | 5m |
+| Burn rate | 1h |
+| Availability and remaining error budget | 30d |
+
+The deployment gate is `allowed`, `blocked` or `unknown`. It is `unknown`, and `POST /rollouts` returns 409, whenever a signal cannot be measured: no Prometheus configured, a failed query, no traffic, no series for the service, or a `NaN` result. Measured values are omitted from the response rather than reported as zero. Prometheus must retain at least 30 days for the budget to be computed.
+
+## Incidents
+
+`POST /api/v1/alerts/alertmanager` accepts Alertmanager's webhook payload (version 4). A firing alert with a `service` label opens an incident unless one is already active for its fingerprint; the matching resolved alert closes it at its `endsAt`. Alertmanager can authenticate with `http_config.authorization` (a Bearer token); `X-Attesta-Token` also works.
+
+```yaml
+receivers:
+  - name: attesta
+    webhook_configs:
+      - url: http://attesta-api.attesta-system.svc:8080/api/v1/alerts/alertmanager
+        http_config:
+          authorization:
+            credentials_file: /etc/alertmanager/attesta-token
+```
+
+`POST /api/v1/incidents` opens an incident from plain JSON. Error rate and latency in that body are stored as values the sender reported, separate from Attesta's own SLO evaluation.
+
+Timelines contain only recorded events: deployment records from the 2 hours before the alert, the alert, the incident opening and the SLO evaluation. When a recorded rollout started in that window, a correlation event names it as a rollback candidate and says it is not a confirmed cause. The postmortem draft marks what Attesta cannot know as TODO.
 
 ## Repository Layout
 

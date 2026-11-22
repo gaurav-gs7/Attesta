@@ -18,7 +18,7 @@ artifacts/failure-modes/<run-id>/
 
 - Bad canary rolls back: a health-gate request with high p99 latency returns a rollback decision and records a `rollback-triggered` deployment.
 - Low traffic waits for more samples: a high-latency request with too few samples returns `continue` instead of rolling back prematurely.
-- Prometheus unavailable fails closed: when `ATTESTA_PROMETHEUS_URL` is configured but request-rate, 5xx-rate, or p95-latency queries fail, SLO evaluation marks the deployment gate as `blocked`.
+- Prometheus unavailable fails closed: when `ATTESTA_PROMETHEUS_URL` is configured but a query fails, the SLO state is `unknown`, no values are reported, and `POST /rollouts` returns 409. The same applies when Prometheus answers with no data or `NaN`.
 - PostgreSQL unavailable fails predictably: API startup with an unreachable `DATABASE_URL` exits and records the catalog connection error.
 - Duplicate onboarding is idempotent: submitting the same service spec twice returns `idempotent: true` on the second request.
 - Invalid service metadata is rejected: unsupported language, invalid Kubernetes name, and invalid environment return policy findings.
