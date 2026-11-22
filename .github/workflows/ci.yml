@@ -2,44 +2,147 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: ["**"]
   pull_request:
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  GO_VERSION: "1.27.x"
+
 jobs:
-  verify:
+  test:
+    name: Build and test
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version-file: go.mod
-          cache: true
+          go-version: ${{ env.GO_VERSION }}
       - name: Check formatting
-        run: test -z "$(gofmt -l .)"
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then echo "gofmt needed:"; echo "$unformatted"; exit 1; fi
+      - name: Check go.mod and go.sum are tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
       - name: Vet
         run: go vet ./...
       - name: Test with race detector
-        run: go test -race ./...
-      - name: Build commands
+        run: go test -race -count=1 -coverprofile=coverage.out -covermode=atomic ./...
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out | tail -1
+      - name: Build binaries
         run: make build
 
-  manifests:
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-kubectl@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          version: v1.32.4
-      - name: Render CRDs
-        run: kubectl kustomize deploy/crds >/tmp/attesta-crds.yaml
-      - name: Render controller
-        run: kubectl kustomize deploy/controller >/tmp/attesta-controller.yaml
+          go-version: ${{ env.GO_VERSION }}
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.15.0
+          args: --max-issues-per-linter=0 --max-same-issues=0
+      - name: ShellCheck
+        run: shellcheck scripts/*.sh
+
+  vulncheck:
+    name: Vulnerability scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+  manifests:
+    name: Validate manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Install kustomize and kubeconform
+        run: |
+          go install sigs.k8s.io/kustomize/kustomize/v5@v5.8.3
+          go install github.com/yannh/kubeconform/cmd/kubeconform@v0.8.0
+      - name: Render and validate
+        run: |
+          kustomize build deploy/crds > crds.yaml
+          kustomize build deploy/controller > controller.yaml
+          kustomize build test/e2e > e2e.yaml
+          kubeconform -strict -summary -kubernetes-version 1.32.0 controller.yaml e2e.yaml
+          test "$(grep -c '^kind: CustomResourceDefinition' crds.yaml)" -eq 3
+      - name: Lint workflows
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          actionlint
+
+  images:
+    name: Build images
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        include:
+          - name: attesta-controller
+            dockerfile: controller/Dockerfile
+          - name: attesta-api
+            dockerfile: api/Dockerfile
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: false
+          load: true
+          tags: ${{ matrix.name }}:ci
+          build-args: VERSION=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+      - name: Image runs as non-root
+        run: |
+          user="$(docker image inspect --format '{{.Config.User}}' ${{ matrix.name }}:ci)"
+          echo "image user: $user"
+          test "$user" = "65532:65532"
+      - name: Controller reports its version
+        if: matrix.name == 'attesta-controller'
+        run: test "$(docker run --rm attesta-controller:ci --version)" = "${{ github.sha }}"
+
+  e2e:
+    name: End-to-end rollback on kind
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: [test]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
+        with:
+          cluster_name: attesta-e2e
+      - name: Build and load the controller image
+        run: |
+          docker build -f controller/Dockerfile --build-arg VERSION=e2e -t attesta-controller:e2e .
+          kind load docker-image attesta-controller:e2e --name attesta-e2e
+      - name: Run end-to-end test
+        run: bash scripts/e2e-rollback.sh

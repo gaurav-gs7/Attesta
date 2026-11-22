@@ -1,5 +1,7 @@
 # Attesta
 
+[![CI](https://github.com/gaurav-gs7/Attesta/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/gaurav-gs7/Attesta/actions/workflows/ci.yml)
+
 Attesta is a Kubernetes rollout guard and a small reliability API. The `attesta-controller` watches Deployments that have a `RolloutGuard`, records their last healthy pod template, and can restore it when Kubernetes declares a rollout stuck. The API gates rollouts on SLOs measured from Prometheus, opens incidents from Alertmanager, and generates a service scaffold with manifests, alerts and a runbook.
 
 Every value Attesta reports is either measured, recorded, or explicitly marked as unknown or simulated. Where it has no data it says `unknown` and fails closed.
@@ -136,6 +138,16 @@ Timelines contain only recorded events: deployment records from the 2 hours befo
 - The incident is a hand-written alert payload.
 
 `make demo-failures` runs failure scenarios against the API and writes evidence under `artifacts/failure-modes/`: invalid metadata rejected, duplicate onboarding, low-traffic hold, rollback request recorded, Prometheus unreachable (gate `unknown`, rollout refused), and PostgreSQL unreachable at startup. See [docs/failure-modes.md](docs/failure-modes.md).
+
+## Development
+
+```bash
+make test   # go test -race ./...
+make lint   # golangci-lint and shellcheck
+make e2e    # controller end-to-end test on a local kind cluster
+```
+
+CI runs on every push: formatting, `go mod tidy` drift, vet, race-enabled tests, golangci-lint, ShellCheck, govulncheck, manifest validation with kubeconform, actionlint, both container images (checked to run as non-root), and `scripts/e2e-rollback.sh` on kind. The end-to-end test deploys the controller, records a healthy revision, rolls out an image that cannot be pulled, and asserts exactly one rollback to the healthy template. It also checks that a paused Deployment is left alone and that the leader's metrics count the rollback.
 
 ## PostgreSQL Mode
 

@@ -1,4 +1,4 @@
-.PHONY: fmt test lint build docker-build run-api run-cli run-controller demo demo-full demo-failures validate-service compose-up compose-down clean
+.PHONY: fmt test lint build docker-build e2e run-api run-cli run-controller demo demo-full demo-failures validate-service compose-up compose-down clean
 
 fmt:
 	go fmt ./...
@@ -8,6 +8,7 @@ test:
 
 lint:
 	golangci-lint run ./...
+	shellcheck scripts/*.sh
 
 build:
 	mkdir -p bin
@@ -41,6 +42,16 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 docker-build:
 	docker build -f controller/Dockerfile --build-arg VERSION=$(VERSION) -t attesta-controller:$(VERSION) .
 	docker build -f api/Dockerfile --build-arg VERSION=$(VERSION) -t attesta-api:$(VERSION) .
+
+KIND_CLUSTER ?= attesta-e2e
+
+# Runs the controller end-to-end test on a throwaway kind cluster.
+e2e:
+	kind get clusters | grep -qx $(KIND_CLUSTER) || kind create cluster --name $(KIND_CLUSTER) --wait 120s
+	docker build -f controller/Dockerfile --build-arg VERSION=e2e -t attesta-controller:e2e .
+	kind load docker-image attesta-controller:e2e --name $(KIND_CLUSTER)
+	kubectl config use-context kind-$(KIND_CLUSTER)
+	bash scripts/e2e-rollback.sh
 
 compose-up:
 	docker compose up --build
