@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -247,6 +248,12 @@ func saveWorkflowRunTx(ctx context.Context, tx *sql.Tx, run models.WorkflowRun) 
 	`, run.ID, run.Name, run.Kind, run.State, run.Service, run.IdempotencyKey, run.Attempt,
 		run.MaxAttempts, run.StartedAt, nullableTime(run.CompletedAt), run.Error)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == activeKeyIndex {
+			// Another run holds the key: this run was abandoned and must not
+			// become a second active run for it.
+			return fmt.Errorf("idempotency key %q is held by another run: %w", run.IdempotencyKey, workflows.ErrAbandoned)
+		}
 		return err
 	}
 	if n, err := result.RowsAffected(); err != nil {
@@ -254,6 +261,11 @@ func saveWorkflowRunTx(ctx context.Context, tx *sql.Tx, run models.WorkflowRun) 
 	} else if n == 0 {
 		return workflows.ErrAbandoned
 	}
+	return writeWorkflowChildrenTx(ctx, tx, run)
+}
+
+// writeWorkflowChildrenTx replaces the run's steps and events.
+func writeWorkflowChildrenTx(ctx context.Context, tx *sql.Tx, run models.WorkflowRun) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM workflow_steps WHERE workflow_id = $1`, run.ID); err != nil {
 		return err
 	}
@@ -285,8 +297,12 @@ func saveWorkflowRunTx(ctx context.Context, tx *sql.Tx, run models.WorkflowRun) 
 
 // ClaimWorkflowRun implements the engine's idempotency contract: it releases
 // the key from a running run whose heartbeat is older than staleAfter, then
-// stores run unless another run for the key is running or succeeded, which it
+// inserts run unless another run for the key is running or succeeded, which it
 // returns instead.
+//
+// The insert and the check are one statement, arbitrated by the unique
+// partial index on active keys. A concurrent claim for the same key waits on
+// the index entry until the first one commits, then inserts nothing.
 func (s *PostgresStore) ClaimWorkflowRun(ctx context.Context, run models.WorkflowRun, staleAfter time.Duration) (_ models.WorkflowRun, _ bool, err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -297,30 +313,46 @@ func (s *PostgresStore) ClaimWorkflowRun(ctx context.Context, run models.Workflo
 			_ = tx.Rollback()
 		}
 	}()
-	// Serialise claims for one key across API replicas.
-	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext('attesta.workflow-key:' || $1))`, run.IdempotencyKey); err != nil {
-		return models.WorkflowRun{}, false, err
-	}
 	if err = abandonStaleRunsTx(ctx, tx, run.IdempotencyKey, staleAfter); err != nil {
 		return models.WorkflowRun{}, false, err
 	}
-	var holderID string
+	var insertedID string
 	err = tx.QueryRowContext(ctx, `
-		SELECT id FROM workflow_runs
-		WHERE idempotency_key = $1 AND state <> 'failed'
-		ORDER BY (state = 'succeeded') DESC, started_at DESC
-		LIMIT 1
-	`, run.IdempotencyKey).Scan(&holderID)
+		INSERT INTO workflow_runs (
+			id, name, kind, state, service, idempotency_key, attempt, max_attempts,
+			started_at, completed_at, error, heartbeat_at
+		)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now())
+		ON CONFLICT (idempotency_key) WHERE idempotency_key <> '' AND state <> 'failed' DO NOTHING
+		RETURNING id
+	`, run.ID, run.Name, run.Kind, run.State, run.Service, run.IdempotencyKey, run.Attempt,
+		run.MaxAttempts, run.StartedAt, nullableTime(run.CompletedAt), run.Error).Scan(&insertedID)
 	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		if err = saveWorkflowRunTx(ctx, tx, run); err != nil {
+	case err == nil:
+		if err = writeWorkflowChildrenTx(ctx, tx, run); err != nil {
 			return models.WorkflowRun{}, false, err
 		}
 		if err = tx.Commit(); err != nil {
 			return models.WorkflowRun{}, false, err
 		}
 		return run, true, nil
-	case err != nil:
+	case !errors.Is(err, sql.ErrNoRows):
+		return models.WorkflowRun{}, false, err
+	}
+	// The key is held. Read the holder in a new statement, which sees the
+	// committed winner.
+	var holderID string
+	err = tx.QueryRowContext(ctx, `
+		SELECT id FROM workflow_runs
+		WHERE idempotency_key = $1 AND state <> 'failed'
+	`, run.IdempotencyKey).Scan(&holderID)
+	if errors.Is(err, sql.ErrNoRows) {
+		// The holder failed after the insert gave way. Report it as failed so
+		// the engine claims again.
+		err = tx.Commit()
+		return models.WorkflowRun{IdempotencyKey: run.IdempotencyKey, State: workflows.StateFailed}, false, err
+	}
+	if err != nil {
 		return models.WorkflowRun{}, false, err
 	}
 	if err = tx.Commit(); err != nil {
@@ -623,7 +655,14 @@ func timePtr(t time.Time) *time.Time {
 	return &t
 }
 
+// activeKeyIndex enforces that at most one run per idempotency key is not
+// failed.
+const activeKeyIndex = "uq_workflow_runs_active_idempotency_key"
+
+// schemaSQL runs in one implicit transaction. The advisory lock keeps API
+// replicas that start together from migrating at the same time.
 const schemaSQL = `
+SELECT pg_advisory_xact_lock(7314162024);
 CREATE TABLE IF NOT EXISTS services (
     id UUID PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
@@ -752,9 +791,25 @@ CREATE INDEX IF NOT EXISTS idx_deployments_service_started
     ON deployments(service_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_service_started
     ON workflow_runs(service, started_at DESC);
-CREATE INDEX IF NOT EXISTS idx_workflow_runs_idempotency_key
+-- Earlier versions allowed several active runs per idempotency key. Keep one
+-- per key (a succeeded run first, then the newest) and retire the rest, so
+-- the unique index below can be built.
+UPDATE workflow_runs r
+SET state = 'failed',
+    error = CASE WHEN r.error = '' THEN 'superseded: duplicate run for the same idempotency key' ELSE r.error END,
+    completed_at = COALESCE(r.completed_at, now())
+WHERE r.idempotency_key <> ''
+  AND r.state <> 'failed'
+  AND r.id <> (
+    SELECT keep.id FROM workflow_runs keep
+    WHERE keep.idempotency_key = r.idempotency_key AND keep.state <> 'failed'
+    ORDER BY (keep.state = 'succeeded') DESC, keep.started_at DESC, keep.id
+    LIMIT 1
+  );
+DROP INDEX IF EXISTS idx_workflow_runs_idempotency_key;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_workflow_runs_active_idempotency_key
     ON workflow_runs(idempotency_key)
-    WHERE idempotency_key <> '';
+    WHERE idempotency_key <> '' AND state <> 'failed';
 
 CREATE TABLE IF NOT EXISTS incident_records (
     id TEXT PRIMARY KEY,
