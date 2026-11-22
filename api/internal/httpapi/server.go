@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,6 +43,15 @@ type Server struct {
 	metrics       *serverMetrics
 	workflows     *workflows.Engine
 	workflowOpts  []workflows.Option
+	logger        *slog.Logger
+}
+
+// WithLogger sets the logger for access logs, recovered panics and workflow
+// runs. Records written with a request's context carry its request_id.
+func WithLogger(l *slog.Logger) Option {
+	return func(s *Server) {
+		s.logger = l
+	}
 }
 
 type Option func(*Server)
@@ -85,7 +95,11 @@ func NewServer(store catalog.Store, generator *templates.Generator, opts ...Opti
 	for _, opt := range opts {
 		opt(server)
 	}
-	server.workflows = workflows.NewEngine(store, server.workflowOpts...)
+	if server.logger == nil {
+		server.logger = slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	}
+	server.logger = slog.New(requestIDHandler{server.logger.Handler()})
+	server.workflows = workflows.NewEngine(store, append([]workflows.Option{workflows.WithLogger(server.logger)}, server.workflowOpts...)...)
 	return server
 }
 
@@ -128,7 +142,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/incidents/{id}/postmortem", s.incidentPostmortem)
 	mux.HandleFunc("GET /api/v1/workflows", s.listWorkflows)
 	mux.HandleFunc("GET /api/v1/workflows/{id}", s.getWorkflow)
-	return s.logging(s.metricsMiddleware(s.auth(recoverer(mux))))
+	// The recoverer sits outside auth and inside logging and metrics, so a
+	// panic anywhere in a handler is logged and counted as the 500 it became.
+	return withRequestID(s.logging(s.metricsMiddleware(s.recoverer(s.auth(mux)))))
 }
 
 func (s *Server) live(w http.ResponseWriter, _ *http.Request) {
@@ -1047,12 +1063,11 @@ func (s *Server) auth(next http.Handler) http.Handler {
 }
 
 func (s *Server) logging(next http.Handler) http.Handler {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(recorder, r)
-		logger.Info("request",
+		s.logger.InfoContext(r.Context(), "request",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", recorder.status,
@@ -1062,12 +1077,29 @@ func (s *Server) logging(next http.Handler) http.Handler {
 	})
 }
 
-func recoverer(next http.Handler) http.Handler {
+// recoverer turns a handler panic into a 500 and logs the panic value and
+// stack with the request ID, which the response also carries so a caller can
+// quote it. http.ErrAbortHandler keeps its meaning: abort without logging.
+func (s *Server) recoverer(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
-			if err := recover(); err != nil {
-				writeError(w, http.StatusInternalServerError, "internal server error")
+			p := recover()
+			if p == nil {
+				return
 			}
+			if p == http.ErrAbortHandler {
+				panic(p)
+			}
+			s.logger.ErrorContext(r.Context(), "handler panicked",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"panic", fmt.Sprint(p),
+				"stack", string(debug.Stack()),
+			)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error":     "internal server error",
+				"requestId": RequestID(r.Context()),
+			})
 		}()
 		next.ServeHTTP(w, r)
 	})

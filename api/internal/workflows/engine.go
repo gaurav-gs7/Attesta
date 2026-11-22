@@ -314,7 +314,7 @@ func (e *Engine) runStep(ctx context.Context, runID string, step Step) (err erro
 	}
 	defer func() {
 		if p := recover(); p != nil {
-			e.logger.Error("workflow step panicked", "run", runID, "step", step.Name, "panic", fmt.Sprint(p), "stack", string(debug.Stack()))
+			e.logger.ErrorContext(ctx, "workflow step panicked", "run", runID, "step", step.Name, "panic", fmt.Sprint(p), "stack", string(debug.Stack()))
 			err = fmt.Errorf("panic in step %s: %v", step.Name, p)
 		}
 	}()
