@@ -9,9 +9,10 @@ rules:
   - apiGroups: ["attesta.io"]
     resources: ["rolloutguards/status"]
     verbs: ["get", "patch", "update"]
+  # update is needed only to restore a pod template when rollback is enabled.
   - apiGroups: ["apps"]
     resources: ["deployments"]
-    verbs: ["get", "list", "watch", "update", "patch"]
+    verbs: ["get", "list", "watch", "update"]
   - apiGroups: ["apps"]
     resources: ["replicasets"]
     verbs: ["get", "list", "watch"]
@@ -27,6 +28,31 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: attesta-controller
+subjects:
+  - kind: ServiceAccount
+    name: attesta-controller
+    namespace: attesta-system
+---
+# Leader election Lease, scoped to the controller's own namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: attesta-controller-leader-election
+  namespace: attesta-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: attesta-controller-leader-election
+  namespace: attesta-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: attesta-controller-leader-election
 subjects:
   - kind: ServiceAccount
     name: attesta-controller

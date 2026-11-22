@@ -107,10 +107,13 @@ func NewRolloutGuardControllerWithClients(kube kubernetes.Interface, dyn dynamic
 		dynamic:     dyn,
 		informer:    informer,
 		deployments: deployments,
-		queue:       workqueue.NewTypedRateLimitingQueue[string](workqueue.DefaultTypedControllerRateLimiter[string]()),
-		recorder:    recorder,
-		namespace:   opts.Namespace,
-		logger:      logger,
+		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.DefaultTypedControllerRateLimiter[string](),
+			workqueue.TypedRateLimitingQueueConfig[string]{Name: "rolloutguard"},
+		),
+		recorder:  recorder,
+		namespace: opts.Namespace,
+		logger:    logger,
 	}
 	_, _ = informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: c.enqueueObject,
@@ -162,13 +165,24 @@ func (c *RolloutGuardController) processNext(ctx context.Context) bool {
 	}
 	defer c.queue.Done(key)
 
-	if err := c.Reconcile(ctx, key); err != nil {
+	start := time.Now()
+	err := c.Reconcile(ctx, key)
+	reconcileDuration.Observe(time.Since(start).Seconds())
+	if err != nil {
+		reconcileTotal.WithLabelValues("error").Inc()
 		c.logger.Error("reconcile rollout guard", "key", key, "error", err)
 		c.queue.AddRateLimited(key)
 		return true
 	}
+	reconcileTotal.WithLabelValues("success").Inc()
 	c.queue.Forget(key)
 	return true
+}
+
+// HasSynced reports whether the guard and Deployment caches have synced. It
+// is false until Run has been called.
+func (c *RolloutGuardController) HasSynced() bool {
+	return c.informer.HasSynced() && c.deployments.HasSynced()
 }
 
 func (c *RolloutGuardController) enqueueObject(obj any) {
@@ -271,6 +285,9 @@ func (c *RolloutGuardController) finish(ctx context.Context, guard *unstructured
 			eventType = corev1.EventTypeWarning
 		}
 		c.recorder.Event(guard, eventType, status.Reason, status.Message)
+		if status.Phase != prev.Phase {
+			phaseTransitions.WithLabelValues(status.Phase).Inc()
+		}
 		c.logger.Info("rollout guard transition",
 			"namespace", guard.GetNamespace(),
 			"name", guard.GetName(),
@@ -314,6 +331,7 @@ func (c *RolloutGuardController) rollback(ctx context.Context, guard *unstructur
 		status.Reason = reasonNoHealthyRevision
 		status.Message = fmt.Sprintf("rollout of %s is blocked and no healthy revision has been recorded; not rolling back", deployment.Name)
 		status.SetCondition(ConditionRolledBack, metav1.ConditionFalse, reasonNoHealthyRevision, status.Message)
+		rollbackTotal.WithLabelValues("skipped_no_healthy_revision").Inc()
 		return nil
 	}
 
@@ -325,6 +343,7 @@ func (c *RolloutGuardController) rollback(ctx context.Context, guard *unstructur
 		status.Reason = reasonHealthyRevFailing
 		status.Message = fmt.Sprintf("deployment %s is already on the last healthy template (revision %s) and is still blocked; not rolling back again",
 			deployment.Name, current.Annotations[revisionAnnotation])
+		rollbackTotal.WithLabelValues("skipped_already_healthy").Inc()
 		return nil
 	}
 
@@ -340,6 +359,7 @@ func (c *RolloutGuardController) rollback(ctx context.Context, guard *unstructur
 		status.Reason = reasonHealthyRevisionGone
 		status.Message = fmt.Sprintf("healthy ReplicaSet with template hash %s no longer exists for deployment %s", status.HealthyTemplateHash, deployment.Name)
 		status.SetCondition(ConditionRolledBack, metav1.ConditionFalse, reasonHealthyRevisionGone, status.Message)
+		rollbackTotal.WithLabelValues("skipped_healthy_revision_gone").Inc()
 		return nil
 	}
 
@@ -369,6 +389,7 @@ func (c *RolloutGuardController) rollback(ctx context.Context, guard *unstructur
 		status.Reason = reasonRollbackFailed
 		status.Message = fmt.Sprintf("update deployment %s: %v", deployment.Name, err)
 		status.SetCondition(ConditionRolledBack, metav1.ConditionFalse, reasonRollbackFailed, status.Message)
+		rollbackTotal.WithLabelValues("failed").Inc()
 		return fmt.Errorf("roll back deployment %s/%s: %w", deployment.Namespace, deployment.Name, err)
 	}
 
@@ -378,6 +399,7 @@ func (c *RolloutGuardController) rollback(ctx context.Context, guard *unstructur
 	status.RollbackRevision = toRevision
 	status.RollbackTemplateHash = status.HealthyTemplateHash
 	status.SetCondition(ConditionRolledBack, metav1.ConditionTrue, reasonRollbackTriggered, status.Message)
+	rollbackTotal.WithLabelValues("triggered").Inc()
 	return nil
 }
 

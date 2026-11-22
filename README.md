@@ -115,7 +115,7 @@ This runs production failure scenarios and writes evidence under `artifacts/fail
 Attesta includes a controller/operator for `RolloutGuard` resources:
 
 ```bash
-go run ./controller/cmd/attesta-controller --kubeconfig "$HOME/.kube/config"
+go run ./controller/cmd/attesta-controller --kubeconfig "$HOME/.kube/config" --leader-elect=false
 ```
 
 In-cluster manifests live under:

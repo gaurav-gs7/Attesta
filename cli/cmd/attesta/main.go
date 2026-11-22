@@ -408,7 +408,7 @@ func call(method, path string, payload any) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	responseBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {

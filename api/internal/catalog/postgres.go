@@ -87,7 +87,7 @@ func (s *PostgresStore) ListServices(ctx context.Context) ([]models.Service, err
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var services []models.Service
 	for rows.Next() {
@@ -182,7 +182,7 @@ func (s *PostgresStore) ListDeployments(ctx context.Context, serviceID string) (
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var deployments []models.Deployment
 	for rows.Next() {
@@ -302,7 +302,7 @@ func (s *PostgresStore) ListWorkflowRuns(ctx context.Context) ([]models.Workflow
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var runs []models.WorkflowRun
 	for rows.Next() {
@@ -359,7 +359,7 @@ func (s *PostgresStore) loadWorkflowSteps(ctx context.Context, workflowID string
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var steps []models.WorkflowStep
 	for rows.Next() {
@@ -390,7 +390,7 @@ func (s *PostgresStore) loadWorkflowEvents(ctx context.Context, workflowID strin
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var events []models.WorkflowEvent
 	for rows.Next() {
@@ -460,7 +460,7 @@ func (s *PostgresStore) ListIncidentRecords(ctx context.Context) ([]models.Incid
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var records []models.IncidentRecord
 	for rows.Next() {

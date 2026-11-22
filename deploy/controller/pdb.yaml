@@ -1,0 +1,13 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: attesta-controller
+  namespace: attesta-system
+  labels:
+    app.kubernetes.io/name: attesta-controller
+    app.kubernetes.io/managed-by: attesta
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: attesta-controller

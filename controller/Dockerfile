@@ -1,12 +1,21 @@
-FROM golang:1.23-alpine AS build
+# syntax=docker/dockerfile:1
+FROM golang:1.27-bookworm AS build
 
+ARG VERSION=dev
 WORKDIR /src
-COPY go.mod go.sum* ./
+COPY go.mod go.sum ./
 RUN go mod download
-COPY . .
-RUN go build -trimpath -o /out/attesta-controller ./controller/cmd/attesta-controller
+COPY controller ./controller
+COPY internal ./internal
+RUN CGO_ENABLED=0 go build -trimpath \
+      -ldflags "-s -w -X main.version=${VERSION}" \
+      -o /out/attesta-controller ./controller/cmd/attesta-controller
 
-FROM alpine:3.20
+# Static, non-root runtime with no shell or package manager. UID 65532 matches
+# the pod's runAsNonRoot securityContext.
+FROM gcr.io/distroless/static-debian12:nonroot
 
-COPY --from=build /out/attesta-controller /usr/local/bin/attesta-controller
-ENTRYPOINT ["attesta-controller"]
+COPY --from=build /out/attesta-controller /attesta-controller
+USER 65532:65532
+EXPOSE 8080 8081
+ENTRYPOINT ["/attesta-controller"]

@@ -1,15 +1,24 @@
-FROM golang:1.23-alpine AS build
+# syntax=docker/dockerfile:1
+FROM golang:1.27-bookworm AS build
 
+ARG VERSION=dev
 WORKDIR /src
-COPY go.mod go.sum* ./
+COPY go.mod go.sum ./
 RUN go mod download
-COPY . .
-RUN go build -trimpath -o /out/attesta-api ./api/cmd/attesta-api
+COPY api ./api
+RUN CGO_ENABLED=0 go build -trimpath \
+      -ldflags "-s -w" \
+      -o /out/attesta-api ./api/cmd/attesta-api \
+ && mkdir -p /out/generated
 
-FROM alpine:3.20
+# Static, non-root runtime. /app/generated is pre-created and owned by the
+# runtime user so a fresh named volume mounted there inherits that ownership.
+FROM gcr.io/distroless/static-debian12:nonroot
 
 WORKDIR /app
 COPY --from=build /out/attesta-api /usr/local/bin/attesta-api
 COPY templates /app/templates
+COPY --from=build --chown=65532:65532 /out/generated /app/generated
+USER 65532:65532
 EXPOSE 8080
-ENTRYPOINT ["attesta-api"]
+ENTRYPOINT ["/usr/local/bin/attesta-api"]

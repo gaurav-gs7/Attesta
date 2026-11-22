@@ -94,9 +94,9 @@ func (c *Client) queryScalarResult(ctx context.Context, query string) (float64, 
 	if err != nil {
 		return 0, false, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return 0, false, fmt.Errorf("Prometheus returned %s", resp.Status)
+		return 0, false, fmt.Errorf("prometheus returned %s", resp.Status)
 	}
 	var payload struct {
 		Status string `json:"status"`

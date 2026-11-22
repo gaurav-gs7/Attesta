@@ -7,7 +7,9 @@ metadata:
     app.kubernetes.io/name: attesta-controller
     app.kubernetes.io/managed-by: attesta
 spec:
-  replicas: 1
+  # Two replicas with leader election: one reconciles, the other takes over
+  # within one lease duration if the leader's node goes away.
+  replicas: 2
   selector:
     matchLabels:
       app.kubernetes.io/name: attesta-controller
@@ -18,22 +20,56 @@ spec:
         app.kubernetes.io/managed-by: attesta
     spec:
       serviceAccountName: attesta-controller
+      terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: attesta-controller
       containers:
         - name: controller
-          image: ghcr.io/example/attesta-controller:latest
+          # Resolved by the images entry in kustomization.yaml.
+          image: attesta-controller
           imagePullPolicy: IfNotPresent
           args:
             - --resync=30s
+            - --leader-elect=true
+            - --metrics-addr=:8080
+            - --health-addr=:8081
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: health
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 10
           resources:
             requests:
               cpu: 50m
               memory: 64Mi
             limits:
-              cpu: 250m
               memory: 256Mi
           securityContext:
             allowPrivilegeEscalation: false

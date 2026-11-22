@@ -1,0 +1,17 @@
+# Exposes /metrics for Prometheus. Point a ServiceMonitor or scrape config at
+# port "metrics".
+apiVersion: v1
+kind: Service
+metadata:
+  name: attesta-controller-metrics
+  namespace: attesta-system
+  labels:
+    app.kubernetes.io/name: attesta-controller
+    app.kubernetes.io/managed-by: attesta
+spec:
+  selector:
+    app.kubernetes.io/name: attesta-controller
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics

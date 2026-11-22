@@ -35,7 +35,7 @@ If an Argo CD Application with `selfHeal: true` manages the same Deployment, Arg
 ## Run Locally
 
 ```bash
-go run ./controller/cmd/attesta-controller --kubeconfig "$HOME/.kube/config" --resync=30s
+go run ./controller/cmd/attesta-controller --kubeconfig "$HOME/.kube/config" --leader-elect=false
 ```
 
 ## Deploy To A Cluster
@@ -45,11 +45,38 @@ kubectl apply -k deploy/crds
 kubectl apply -k deploy/controller
 ```
 
-The deployment expects an image named `ghcr.io/example/attesta-controller:latest`. Build and publish your own image with:
+`deploy/controller` runs two replicas with leader election (a Lease named `attesta-controller` in `attesta-system`), so one replica reconciles and the other takes over if it goes away. Pods run as UID 65532 from a distroless image with a read-only root filesystem.
+
+Images are published to `ghcr.io/gaurav-gs7/attesta-controller` by `.github/workflows/release.yml`: `main` on every push to main, and a version tag for every `v*` git tag. The kustomization defaults to `main`; pin a version or digest for anything that matters:
 
 ```bash
-docker build -f controller/Dockerfile -t ghcr.io/example/attesta-controller:latest .
+cd deploy/controller
+kustomize edit set image attesta-controller=ghcr.io/gaurav-gs7/attesta-controller:v0.2.0
 ```
+
+To build your own image:
+
+```bash
+docker build -f controller/Dockerfile --build-arg VERSION=$(git describe --tags --always) -t attesta-controller:dev .
+```
+
+## Operating The Controller
+
+| Endpoint | Port | Purpose |
+| --- | --- | --- |
+| `/healthz` | 8081 | Liveness. |
+| `/readyz` | 8081 | Readiness. A standby replica reports ready; the leader reports ready once its caches have synced. |
+| `/metrics` | 8080 | Prometheus metrics, exposed by the `attesta-controller-metrics` Service. |
+
+Metrics:
+
+- `attesta_rolloutguard_reconcile_total{result}` and `attesta_rolloutguard_reconcile_duration_seconds`
+- `attesta_rolloutguard_rollback_total{outcome}`: `triggered`, `failed`, or the reason a rollback was skipped
+- `attesta_rolloutguard_phase_transitions_total{phase}`
+- client-go workqueue metrics (`workqueue_depth`, `workqueue_retries_total`, ...) for the `rolloutguard` queue, under the same names controller-runtime uses
+- Go runtime and process metrics
+
+Useful flags: `--namespace` to watch one namespace, `--workers`, `--resync`, `--leader-elect=false` for a single local process, and `--version`.
 
 ## Status Contract
 

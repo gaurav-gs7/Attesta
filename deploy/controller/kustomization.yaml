@@ -6,3 +6,12 @@ resources:
   - serviceaccount.yaml
   - rbac.yaml
   - deployment.yaml
+  - service.yaml
+  - pdb.yaml
+# Pin a release before deploying anywhere that matters, for example:
+#   kustomize edit set image attesta-controller=ghcr.io/gaurav-gs7/attesta-controller:v0.2.0
+# or by digest. Images are published by .github/workflows/release.yml.
+images:
+  - name: attesta-controller
+    newName: ghcr.io/gaurav-gs7/attesta-controller
+    newTag: main

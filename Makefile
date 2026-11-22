@@ -1,10 +1,13 @@
-.PHONY: fmt test build run-api run-cli run-controller demo demo-full demo-failures validate-service compose-up compose-down clean
+.PHONY: fmt test lint build docker-build run-api run-cli run-controller demo demo-full demo-failures validate-service compose-up compose-down clean
 
 fmt:
 	go fmt ./...
 
 test:
-	go test ./...
+	go test -race ./...
+
+lint:
+	golangci-lint run ./...
 
 build:
 	mkdir -p bin
@@ -19,7 +22,7 @@ run-cli:
 	ATTESTA_API_TOKEN=local-dev-token go run ./cli/cmd/attesta
 
 run-controller:
-	go run ./controller/cmd/attesta-controller
+	go run ./controller/cmd/attesta-controller --leader-elect=false
 
 demo:
 	bash scripts/demo-local.sh
@@ -32,6 +35,12 @@ demo-failures:
 
 validate-service:
 	bash scripts/validate-service-scaffold.sh generated/services/payments-api
+
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+
+docker-build:
+	docker build -f controller/Dockerfile --build-arg VERSION=$(VERSION) -t attesta-controller:$(VERSION) .
+	docker build -f api/Dockerfile --build-arg VERSION=$(VERSION) -t attesta-api:$(VERSION) .
 
 compose-up:
 	docker compose up --build
