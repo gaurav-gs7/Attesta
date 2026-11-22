@@ -103,7 +103,7 @@ func Timeline(incident models.Incident, deployments []models.Deployment, sloStat
 			EventType:   EventDeployment,
 			Description: fmt.Sprintf("deployment record %s: status %s, strategy %s", d.Version, d.Status, d.Strategy),
 		})
-		if d.Status == "rollout-started" && (lastRollout == nil || d.StartedAt.After(lastRollout.StartedAt)) {
+		if d.RolloutID != "" && (lastRollout == nil || d.StartedAt.After(lastRollout.StartedAt)) {
 			lastRollout = &deployments[i]
 		}
 	}

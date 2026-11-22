@@ -16,6 +16,7 @@ import (
 
 	"github.com/gaurav-gs7/attesta/api/internal/models"
 	"github.com/gaurav-gs7/attesta/api/internal/page"
+	"github.com/gaurav-gs7/attesta/api/internal/rollouts"
 	"github.com/gaurav-gs7/attesta/api/internal/workflows"
 )
 
@@ -150,36 +151,57 @@ func (s *PostgresStore) RecordDeployment(ctx context.Context, deployment models.
 	if deployment.StartedAt.IsZero() {
 		deployment.StartedAt = nowUTC()
 	}
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO deployments (
-			id, service_id, version, environment, status, strategy, started_at, completed_at
-		)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-	`, deployment.ID, deployment.ServiceID, deployment.Version, deployment.Environment,
-		deployment.Status, deployment.Strategy, deployment.StartedAt, nullableTime(deployment.CompletedAt))
-	if err != nil {
+	if _, err := insertDeployment(ctx, s.db, deployment); err != nil {
 		return models.Deployment{}, err
 	}
 	return deployment, nil
 }
 
-func (s *PostgresStore) LatestDeployment(ctx context.Context, serviceID string) (models.Deployment, error) {
-	var deployment models.Deployment
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+func insertDeployment(ctx context.Context, db execer, d models.Deployment) (sql.Result, error) {
+	return db.ExecContext(ctx, `
+		INSERT INTO deployments (
+			id, service_id, rollout_id, version, image, environment, status, strategy, started_at, completed_at
+		)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+	`, d.ID, d.ServiceID, nullableString(d.RolloutID), d.Version, d.Image, d.Environment,
+		d.Status, d.Strategy, d.StartedAt, nullableTime(d.CompletedAt))
+}
+
+func nullableString(s string) sql.NullString { return sql.NullString{String: s, Valid: s != ""} }
+
+// deploymentColumns and scanDeployment read a deployments row.
+const deploymentColumns = `id, service_id, coalesce(rollout_id::text, ''), version, image, environment, status, strategy, started_at, completed_at`
+
+// historyOnly excludes rows written by versions that used the deployments
+// table as an event log for pauses and rollback requests. They are kept, but
+// they are not deployments.
+const historyOnly = `NOT (rollout_id IS NULL AND status IN ('rollout-paused', 'rollback-requested'))`
+
+func scanDeployment(scanner interface{ Scan(...any) error }) (models.Deployment, error) {
+	var d models.Deployment
 	var completed sql.NullTime
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id, service_id, version, environment, status, strategy, started_at, completed_at
+	err := scanner.Scan(&d.ID, &d.ServiceID, &d.RolloutID, &d.Version, &d.Image, &d.Environment,
+		&d.Status, &d.Strategy, &d.StartedAt, &completed)
+	if completed.Valid {
+		d.CompletedAt = &completed.Time
+	}
+	return d, err
+}
+
+func (s *PostgresStore) LatestDeployment(ctx context.Context, serviceID string) (models.Deployment, error) {
+	deployment, err := scanDeployment(s.db.QueryRowContext(ctx, `
+		SELECT `+deploymentColumns+`
 		FROM deployments
-		WHERE service_id = $1
-		ORDER BY started_at DESC
+		WHERE service_id = $1 AND `+historyOnly+`
+		ORDER BY started_at DESC, id::text DESC
 		LIMIT 1
-	`, serviceID).Scan(&deployment.ID, &deployment.ServiceID, &deployment.Version,
-		&deployment.Environment, &deployment.Status, &deployment.Strategy,
-		&deployment.StartedAt, &completed)
+	`, serviceID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return models.Deployment{}, ErrNotFound
-	}
-	if completed.Valid {
-		deployment.CompletedAt = &completed.Time
 	}
 	return deployment, err
 }
@@ -187,9 +209,9 @@ func (s *PostgresStore) LatestDeployment(ctx context.Context, serviceID string) 
 func (s *PostgresStore) ListDeployments(ctx context.Context, serviceID string, req page.Request) ([]models.Deployment, string, error) {
 	after, afterID, since := keysetArgs(req)
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, service_id, version, environment, status, strategy, started_at, completed_at
+		SELECT `+deploymentColumns+`
 		FROM deployments
-		WHERE service_id = $1
+		WHERE service_id = $1 AND `+historyOnly+`
 		  AND ($2::timestamptz IS NULL OR (started_at, id::text) < ($2, $3))
 		  AND ($4::timestamptz IS NULL OR started_at >= $4)
 		ORDER BY started_at DESC, id::text DESC
@@ -202,15 +224,9 @@ func (s *PostgresStore) ListDeployments(ctx context.Context, serviceID string, r
 
 	var deployments []models.Deployment
 	for rows.Next() {
-		var deployment models.Deployment
-		var completed sql.NullTime
-		if err := rows.Scan(&deployment.ID, &deployment.ServiceID, &deployment.Version,
-			&deployment.Environment, &deployment.Status, &deployment.Strategy,
-			&deployment.StartedAt, &completed); err != nil {
+		deployment, err := scanDeployment(rows)
+		if err != nil {
 			return nil, "", err
-		}
-		if completed.Valid {
-			deployment.CompletedAt = &completed.Time
 		}
 		deployments = append(deployments, deployment)
 	}
@@ -219,6 +235,117 @@ func (s *PostgresStore) ListDeployments(ctx context.Context, serviceID string, r
 	}
 	deployments, next := trimPage(deployments, req, func(d models.Deployment) (time.Time, string) { return d.StartedAt, d.ID })
 	return deployments, next, nil
+}
+
+// CreateRollout inserts the rollout and its deployment record in one
+// transaction. The unique index on active rollouts per service turns a
+// second concurrent start into ErrConflict.
+func (s *PostgresStore) CreateRollout(ctx context.Context, rollout models.Rollout, deployment models.Deployment) (_ models.Rollout, err error) {
+	if rollout.ID == "" {
+		rollout.ID = NewID()
+	}
+	if deployment.ID == "" {
+		deployment.ID = NewID()
+	}
+	rollout.DeploymentID, deployment.RolloutID = deployment.ID, rollout.ID
+	events, err := json.Marshal(rollout.Events)
+	if err != nil {
+		return models.Rollout{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return models.Rollout{}, err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err = insertDeployment(ctx, tx, deployment); err != nil {
+		return models.Rollout{}, err
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO rollouts (id, service_id, deployment_id, version, image, git_sha, state, created_at, updated_at, events)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+	`, rollout.ID, rollout.ServiceID, rollout.DeploymentID, rollout.Version, rollout.Image, rollout.GitSHA,
+		rollout.State, rollout.CreatedAt, rollout.UpdatedAt, events)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "uq_rollouts_active_per_service" {
+			err = fmt.Errorf("%w: service already has an active rollout", ErrConflict)
+		}
+		return models.Rollout{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return models.Rollout{}, err
+	}
+	return rollout, nil
+}
+
+const rolloutColumns = `r.id, r.service_id, s.name, r.deployment_id, r.version, r.image, r.git_sha, r.state, r.created_at, r.updated_at, r.events`
+
+func scanRollout(scanner interface{ Scan(...any) error }) (models.Rollout, error) {
+	var r models.Rollout
+	var events []byte
+	if err := scanner.Scan(&r.ID, &r.ServiceID, &r.Service, &r.DeploymentID, &r.Version, &r.Image, &r.GitSHA,
+		&r.State, &r.CreatedAt, &r.UpdatedAt, &events); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return models.Rollout{}, ErrNotFound
+		}
+		return models.Rollout{}, err
+	}
+	if err := json.Unmarshal(events, &r.Events); err != nil {
+		return models.Rollout{}, err
+	}
+	return r, nil
+}
+
+func (s *PostgresStore) GetRollout(ctx context.Context, serviceID, id string) (models.Rollout, error) {
+	return scanRollout(s.db.QueryRowContext(ctx, `
+		SELECT `+rolloutColumns+`
+		FROM rollouts r JOIN services s ON s.id = r.service_id
+		WHERE r.service_id = $1 AND r.id::text = $2
+	`, serviceID, id))
+}
+
+func (s *PostgresStore) LatestRollout(ctx context.Context, serviceID string) (models.Rollout, error) {
+	return scanRollout(s.db.QueryRowContext(ctx, `
+		SELECT `+rolloutColumns+`
+		FROM rollouts r JOIN services s ON s.id = r.service_id
+		WHERE r.service_id = $1
+		ORDER BY r.created_at DESC, r.id::text DESC
+		LIMIT 1
+	`, serviceID))
+}
+
+// UpdateRollout writes the transition only if the stored state is still
+// fromState, and sets the deployment record's status in the same statement.
+func (s *PostgresStore) UpdateRollout(ctx context.Context, rollout models.Rollout, fromState string) error {
+	events, err := json.Marshal(rollout.Events)
+	if err != nil {
+		return err
+	}
+	var updated int
+	err = s.db.QueryRowContext(ctx, `
+		WITH r AS (
+			UPDATE rollouts SET state = $3, updated_at = $4, events = $5
+			WHERE id = $1 AND state = $2
+			RETURNING deployment_id
+		), d AS (
+			UPDATE deployments SET status = $6,
+				completed_at = CASE WHEN $7 THEN coalesce(completed_at, $4) ELSE completed_at END
+			WHERE id = (SELECT deployment_id FROM r)
+		)
+		SELECT count(*) FROM r
+	`, rollout.ID, fromState, rollout.State, rollout.UpdatedAt, events,
+		rollouts.DeploymentStatus(rollout.State), !rollouts.Active(rollout.State)).Scan(&updated)
+	if err != nil {
+		return err
+	}
+	if updated == 0 {
+		return fmt.Errorf("%w: rollout %s is no longer %s", ErrConflict, rollout.ID, fromState)
+	}
+	return nil
 }
 
 // keysetArgs returns the cursor and Since bounds of req as nullable query
@@ -797,6 +924,29 @@ CREATE TABLE IF NOT EXISTS deployments (
     started_at TIMESTAMPTZ NOT NULL,
     completed_at TIMESTAMPTZ
 );
+
+-- Deployment history: one row per rollout (and the initial scaffold). The
+-- rollout carries the state machine; its row carries the current status.
+ALTER TABLE deployments ADD COLUMN IF NOT EXISTS rollout_id UUID;
+ALTER TABLE deployments ADD COLUMN IF NOT EXISTS image TEXT NOT NULL DEFAULT '';
+
+CREATE TABLE IF NOT EXISTS rollouts (
+    id UUID PRIMARY KEY,
+    service_id UUID NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+    deployment_id UUID NOT NULL REFERENCES deployments(id) ON DELETE CASCADE,
+    version TEXT NOT NULL,
+    image TEXT NOT NULL,
+    git_sha TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    events JSONB NOT NULL DEFAULT '[]'
+);
+-- At most one active (started or paused) rollout per service.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_rollouts_active_per_service
+    ON rollouts(service_id) WHERE state IN ('started', 'paused');
+CREATE INDEX IF NOT EXISTS idx_rollouts_service_created
+    ON rollouts(service_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS incidents (
     id UUID PRIMARY KEY,

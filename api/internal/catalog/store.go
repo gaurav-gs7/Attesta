@@ -23,6 +23,17 @@ type Store interface {
 	GetServiceByName(context.Context, string) (models.Service, error)
 	RecordDeployment(context.Context, models.Deployment) (models.Deployment, error)
 	LatestDeployment(context.Context, string) (models.Deployment, error)
+	// CreateRollout stores a new rollout and its deployment record together.
+	// It returns ErrConflict if the service already has an active rollout.
+	CreateRollout(ctx context.Context, rollout models.Rollout, deployment models.Deployment) (models.Rollout, error)
+	// GetRollout returns a service's rollout by ID, or ErrNotFound.
+	GetRollout(ctx context.Context, serviceID, id string) (models.Rollout, error)
+	// LatestRollout returns a service's most recent rollout, or ErrNotFound.
+	LatestRollout(ctx context.Context, serviceID string) (models.Rollout, error)
+	// UpdateRollout writes a transition of rollout, made from fromState, and
+	// the matching status on its deployment record. It returns ErrConflict if
+	// the stored rollout is no longer in fromState.
+	UpdateRollout(ctx context.Context, rollout models.Rollout, fromState string) error
 	// ListDeployments returns one page of a service's deployments, newest
 	// first, and the cursor of the next page ("" at the end).
 	ListDeployments(context.Context, string, page.Request) ([]models.Deployment, string, error)

@@ -112,9 +112,21 @@ Timelines contain only recorded events: deployment records from the 2 hours befo
 
 ## Health Gate And Rollback Requests
 
-`POST /api/v1/services/{name}/health-gate` evaluates the `p99LatencyMs`, `errorRate` and `successCount` in the request body against fixed thresholds (300ms, 1%, at least 50 successes). The response marks its input as `caller-supplied`. When the decision is `rollback` and the service has `rollbackOnFailure: true`, Attesta records a `rollback-requested` deployment entry; with `rollbackOnFailure: false` the decision is `hold` and nothing is recorded.
+`POST /api/v1/services/{name}/health-gate` evaluates the `p99LatencyMs`, `errorRate` and `successCount` in the request body against fixed thresholds (300ms, 1%, at least 50 successes). The response marks its input as `caller-supplied`. When the decision is `rollback`, the service has `rollbackOnFailure: true` and a rollout is in flight, Attesta moves that rollout to `rollback-requested`; with no rollout in flight, or with `rollbackOnFailure: false` (decision `hold`), nothing is recorded.
 
-`POST /api/v1/services/{name}/rollback` records a rollback request. Neither endpoint changes the cluster.
+`POST /api/v1/services/{name}/rollback` requests a rollback of the service's most recent rollout. Neither endpoint changes the cluster.
+
+### Rollouts
+
+`POST /api/v1/services/{name}/rollouts` takes `{"version": "v2", "image": "ghcr.io/acme/app:v2", "gitSha": "0123abc"}`; version and image are required and validated, unknown fields are rejected, and the body is size-limited. It answers 202 with the rollout if the SLO gate allows it, 409 if the gate is not `allowed` or another rollout is active, and 500 if the store fails. A rollout moves through a state machine:
+
+```
+started --pause--> paused --resume--> started
+started --complete--> completed
+started | paused | completed --rollback--> rollback-requested
+```
+
+`POST .../rollouts/{id}/pause`, `/resume`, `/complete` and `/rollback` take an optional `{"reason": "..."}`, answer 404 for an unknown rollout and 409 for a transition the state does not allow. Each transition is recorded on the rollout. A service has at most one active (started or paused) rollout. Its deployment history has one entry per rollout, carrying the version, image and current status, so pauses and rollback requests never appear as deployments.
 
 ## Readiness Score
 
@@ -168,8 +180,8 @@ Without `DATABASE_URL`, Attesta keeps everything in memory. With it, the service
 | `GET /api/v1/services/{name}/readiness`, `POST .../check`, `GET .../score` | Metadata readiness score |
 | `GET /api/v1/services/{name}/slos`, `GET .../error-budget` | SLO evaluation |
 | `GET /api/v1/services/{name}/deployments` | Deployment records |
-| `POST /api/v1/services/{name}/rollouts` | Record a rollout start if the SLO gate allows it |
-| `GET /api/v1/services/{name}/rollouts/{id}`, `POST .../pause`, `POST .../rollback` | Rollout records and requests |
+| `POST /api/v1/services/{name}/rollouts` | Start a rollout if the SLO gate allows it |
+| `GET /api/v1/services/{name}/rollouts/{id\|latest}`, `POST .../pause`, `.../resume`, `.../complete`, `.../rollback` | Rollout state and transitions |
 | `POST /api/v1/services/{name}/health-gate` | Evaluate caller-supplied canary metrics |
 | `POST /api/v1/services/{name}/rollback` | Record a rollback request |
 | `GET /api/v1/services/{name}/runbook` | Runbook rendered from the service record |

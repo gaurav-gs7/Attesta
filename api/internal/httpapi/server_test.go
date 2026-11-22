@@ -90,37 +90,6 @@ func TestCreateServiceIdempotencySurvivesEngineRestart(t *testing.T) {
 	}
 }
 
-func TestHealthGateRecordsRollbackDeployment(t *testing.T) {
-	server := testServer(t, WithAPIToken("secret"))
-	createBody := []byte(`{
-		"name":"payments-api",
-		"team":"platform",
-		"owner":"gaurav",
-		"language":"go",
-		"environment":"staging",
-		"slo":"99.9",
-		"deploymentStrategy":"canary"
-	}`)
-	created := authorizedRequest(server, http.MethodPost, "/api/v1/services", createBody)
-	if created.Code != http.StatusCreated {
-		t.Fatalf("expected create 201, got %d: %s", created.Code, created.Body.String())
-	}
-
-	healthBody := []byte(`{"p99LatencyMs":450,"errorRate":0.2,"successCount":100}`)
-	health := authorizedRequest(server, http.MethodPost, "/api/v1/services/payments-api/health-gate", healthBody)
-	if health.Code != http.StatusAccepted {
-		t.Fatalf("expected failed health gate 202, got %d: %s", health.Code, health.Body.String())
-	}
-
-	deployments := authorizedRequest(server, http.MethodGet, "/api/v1/services/payments-api/deployments", nil)
-	if deployments.Code != http.StatusOK {
-		t.Fatalf("expected deployments 200, got %d: %s", deployments.Code, deployments.Body.String())
-	}
-	if !bytes.Contains(deployments.Body.Bytes(), []byte("rollback-requested")) {
-		t.Fatalf("expected rollback deployment, got %s", deployments.Body.String())
-	}
-}
-
 func TestSLOEvaluationFailsClosedWhenPrometheusUnavailable(t *testing.T) {
 	server := testServer(t, WithAPIToken("secret"), WithPrometheusURL("http://127.0.0.1:1"))
 	createBody := []byte(`{
@@ -147,7 +116,7 @@ func TestSLOEvaluationFailsClosedWhenPrometheusUnavailable(t *testing.T) {
 	if !bytes.Contains(slos.Body.Bytes(), []byte("Prometheus query failed")) {
 		t.Fatalf("expected Prometheus outage reason, got %s", slos.Body.String())
 	}
-	rollout := authorizedRequest(server, http.MethodPost, "/api/v1/services/payments-api/rollouts", []byte(`{"version":"v2"}`))
+	rollout := authorizedRequest(server, http.MethodPost, "/api/v1/services/payments-api/rollouts", []byte(`{"version":"v2","image":"ghcr.io/acme/payments-api:v2"}`))
 	if rollout.Code != http.StatusConflict {
 		t.Fatalf("expected rollout to be refused while SLO state is unknown, got %d: %s", rollout.Code, rollout.Body.String())
 	}

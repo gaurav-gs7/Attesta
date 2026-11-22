@@ -77,7 +77,7 @@ func onboard(t *testing.T, server *Server) {
 }
 
 func startRollout(server *Server) *httptest.ResponseRecorder {
-	return authorizedRequest(server, http.MethodPost, "/api/v1/services/payments-api/rollouts", []byte(`{"version":"v2"}`))
+	return authorizedRequest(server, http.MethodPost, "/api/v1/services/payments-api/rollouts", []byte(`{"version":"v2","image":"ghcr.io/acme/payments-api:v2"}`))
 }
 
 // Audit T-4: without Prometheus there is no data, so nothing is reported and

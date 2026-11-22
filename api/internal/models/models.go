@@ -53,15 +53,46 @@ type CreateServiceRequest struct {
 	RollbackOnFailure *bool `json:"rollbackOnFailure"`
 }
 
+// Deployment is one entry of a service's deployment history: the initial
+// scaffold, or one per rollout. Pauses and rollback requests are rollout
+// events, not deployments; a rollout's deployment row carries its current
+// status.
 type Deployment struct {
 	ID          string     `json:"id"`
 	ServiceID   string     `json:"serviceId"`
+	RolloutID   string     `json:"rolloutId,omitempty"`
 	Version     string     `json:"version"`
+	Image       string     `json:"image,omitempty"`
 	Environment string     `json:"environment"`
 	Status      string     `json:"status"`
 	Strategy    string     `json:"strategy"`
 	StartedAt   time.Time  `json:"startedAt"`
 	CompletedAt *time.Time `json:"completedAt,omitempty"`
+}
+
+// Rollout is a release of one version of a service, recorded by Attesta. It
+// moves through a state machine (see package rollouts); Attesta records the
+// transitions and leaves acting on them to deployment tooling.
+type Rollout struct {
+	ID           string         `json:"id"`
+	ServiceID    string         `json:"serviceId"`
+	Service      string         `json:"service"`
+	DeploymentID string         `json:"deploymentId"`
+	Version      string         `json:"version"`
+	Image        string         `json:"image"`
+	GitSHA       string         `json:"gitSha,omitempty"`
+	State        string         `json:"state"`
+	CreatedAt    time.Time      `json:"createdAt"`
+	UpdatedAt    time.Time      `json:"updatedAt"`
+	Events       []RolloutEvent `json:"events"`
+}
+
+// RolloutEvent is one state transition of a rollout.
+type RolloutEvent struct {
+	At     time.Time `json:"at"`
+	From   string    `json:"from,omitempty"`
+	To     string    `json:"to"`
+	Reason string    `json:"reason,omitempty"`
 }
 
 // ServiceStatus is the current state of a service. Every value is either read

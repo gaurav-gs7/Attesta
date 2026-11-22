@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,6 +25,7 @@ import (
 	promclient "github.com/gaurav-gs7/attesta/api/internal/prometheus"
 	"github.com/gaurav-gs7/attesta/api/internal/readiness"
 	"github.com/gaurav-gs7/attesta/api/internal/reliability"
+	"github.com/gaurav-gs7/attesta/api/internal/rollouts"
 	"github.com/gaurav-gs7/attesta/api/internal/security"
 	sloengine "github.com/gaurav-gs7/attesta/api/internal/slo"
 	"github.com/gaurav-gs7/attesta/api/internal/templates"
@@ -110,10 +112,12 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/services/{name}/deployments", s.deployments)
 	mux.HandleFunc("POST /api/v1/services/{name}/rollouts", s.startRollout)
 	mux.HandleFunc("GET /api/v1/services/{name}/rollouts/{id}", s.getRollout)
-	mux.HandleFunc("POST /api/v1/services/{name}/rollouts/{id}/pause", s.pauseRollout)
-	mux.HandleFunc("POST /api/v1/services/{name}/rollouts/{id}/rollback", s.rollback)
+	mux.HandleFunc("POST /api/v1/services/{name}/rollouts/{id}/pause", s.rolloutAction(rollouts.ActionPause))
+	mux.HandleFunc("POST /api/v1/services/{name}/rollouts/{id}/resume", s.rolloutAction(rollouts.ActionResume))
+	mux.HandleFunc("POST /api/v1/services/{name}/rollouts/{id}/complete", s.rolloutAction(rollouts.ActionComplete))
+	mux.HandleFunc("POST /api/v1/services/{name}/rollouts/{id}/rollback", s.rolloutAction(rollouts.ActionRollback))
 	mux.HandleFunc("POST /api/v1/services/{name}/health-gate", s.healthGate)
-	mux.HandleFunc("POST /api/v1/services/{name}/rollback", s.rollback)
+	mux.HandleFunc("POST /api/v1/services/{name}/rollback", s.serviceRollback)
 	mux.HandleFunc("GET /api/v1/services/{name}/runbook", s.runbook)
 	mux.HandleFunc("POST /api/v1/incidents", s.createIncident)
 	mux.HandleFunc("GET /api/v1/incidents", s.listIncidents)
@@ -377,68 +381,111 @@ func (s *Server) deployments(w http.ResponseWriter, r *http.Request) {
 	}, next))
 }
 
+var errGateClosed = errors.New("deployment gate is closed")
+
 func (s *Server) startRollout(w http.ResponseWriter, r *http.Request) {
 	service, ok := s.loadService(w, r)
 	if !ok {
 		return
 	}
-	var req struct {
-		Version string `json:"version"`
-		Image   string `json:"image"`
-		GitSHA  string `json:"gitSha"`
+	var req rollouts.StartRequest
+	if !s.decodeStrict(w, r, &req) {
+		return
 	}
-	if r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&req)
-	}
-	if req.Version == "" {
-		req.Version = "rollout-" + time.Now().UTC().Format("20060102150405")
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	var gate models.SLOStatus
-	var deployment models.Deployment
+	var rollout models.Rollout
+	var stepErr error
 	run := s.workflows.Run(r.Context(), workflows.Spec{
 		Name:    "rollout-start",
 		Kind:    "attesta.rollout.start",
 		Service: service.Name,
 		Steps: []workflows.Step{
 			{
-				Name:        "evaluate-slo-deployment-gate",
-				MaxAttempts: 1,
+				Name: "evaluate-slo-deployment-gate",
 				Run: func(ctx context.Context) error {
 					gate = s.evaluateSLO(ctx, service)
 					if gate.DeploymentGate != models.GateAllowed {
-						return fmt.Errorf("deployment gate is %s: %s", gate.DeploymentGate, gate.Reason)
+						stepErr = fmt.Errorf("%w: gate is %s: %s", errGateClosed, gate.DeploymentGate, gate.Reason)
+						return stepErr
 					}
 					return nil
 				},
 			},
 			{
-				Name:        "record-rollout-start",
-				MaxAttempts: 1,
+				Name: "record-rollout",
 				Run: func(ctx context.Context) error {
+					now := time.Now().UTC()
 					var err error
-					deployment, err = s.store.RecordDeployment(ctx, models.Deployment{
-						ServiceID:   service.ID,
-						Version:     req.Version,
-						Environment: service.Environment,
-						Status:      "rollout-started",
-						Strategy:    service.DeploymentStrategy,
-						StartedAt:   time.Now().UTC(),
+					rollout, err = s.store.CreateRollout(ctx, models.Rollout{
+						ServiceID: service.ID, Service: service.Name,
+						Version: req.Version, Image: req.Image, GitSHA: req.GitSHA,
+						State: rollouts.StateStarted, CreatedAt: now, UpdatedAt: now,
+						Events: []models.RolloutEvent{{At: now, To: rollouts.StateStarted, Reason: "deployment gate allowed"}},
+					}, models.Deployment{
+						ServiceID: service.ID, Version: req.Version, Image: req.Image,
+						Environment: service.Environment, Status: rollouts.DeploymentStatus(rollouts.StateStarted),
+						Strategy: service.DeploymentStrategy, StartedAt: now,
 					})
+					stepErr = err
 					return err
 				},
 			},
 		},
 	})
-	if run.State != workflows.StateSucceeded {
-		writeJSON(w, http.StatusConflict, map[string]any{"service": service.Name, "gate": gate, "workflow": run})
-		return
+	switch {
+	case run.State == workflows.StateSucceeded:
+		writeJSON(w, http.StatusAccepted, map[string]any{"service": service.Name, "rollout": rollout, "gate": gate, "workflow": run})
+	case errors.Is(stepErr, errGateClosed):
+		writeJSON(w, http.StatusConflict, map[string]any{"error": stepErr.Error(), "service": service.Name, "gate": gate, "workflow": run})
+	case errors.Is(stepErr, catalog.ErrConflict):
+		writeJSON(w, http.StatusConflict, map[string]any{"error": stepErr.Error() + "; pause, complete or roll it back first", "service": service.Name, "workflow": run})
+	default:
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": run.Error, "workflow": run})
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{
-		"service":  service.Name,
-		"rollout":  deployment,
-		"gate":     gate,
-		"workflow": run,
-	})
+}
+
+// decodeStrict reads a bounded JSON body that must contain only known
+// fields. It answers 400 itself on failure.
+func (s *Server) decodeStrict(w http.ResponseWriter, r *http.Request, dst any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return false
+	}
+	return true
+}
+
+var rolloutIDRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// loadRollout finds the rollout named by the {id} path value ("latest" when
+// allowLatest). It answers 404 or 500 itself.
+func (s *Server) loadRollout(w http.ResponseWriter, r *http.Request, service models.Service, allowLatest bool) (models.Rollout, bool) {
+	id := r.PathValue("id")
+	var rollout models.Rollout
+	var err error
+	switch {
+	case allowLatest && id == "latest":
+		rollout, err = s.store.LatestRollout(r.Context(), service.ID)
+	case rolloutIDRE.MatchString(id):
+		rollout, err = s.store.GetRollout(r.Context(), service.ID, id)
+	default:
+		err = catalog.ErrNotFound
+	}
+	if errors.Is(err, catalog.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "rollout not found")
+		return models.Rollout{}, false
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return models.Rollout{}, false
+	}
+	return rollout, true
 }
 
 func (s *Server) getRollout(w http.ResponseWriter, r *http.Request) {
@@ -446,92 +493,91 @@ func (s *Server) getRollout(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	deployments, err := s.allDeployments(r.Context(), service.ID, time.Time{})
+	rollout, ok := s.loadRollout(w, r, service, true)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"service": service.Name, "rollout": rollout})
+}
+
+// rolloutAction handles POST .../rollouts/{id}/{pause,resume,complete,rollback}.
+func (s *Server) rolloutAction(action string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		service, ok := s.loadService(w, r)
+		if !ok {
+			return
+		}
+		reason, ok := s.actionReason(w, r)
+		if !ok {
+			return
+		}
+		rollout, ok := s.loadRollout(w, r, service, false)
+		if !ok {
+			return
+		}
+		s.transition(w, r, service, rollout, action, reason)
+	}
+}
+
+// serviceRollback handles POST /services/{name}/rollback: it requests a
+// rollback of the service's most recent rollout.
+func (s *Server) serviceRollback(w http.ResponseWriter, r *http.Request) {
+	service, ok := s.loadService(w, r)
+	if !ok {
+		return
+	}
+	reason, ok := s.actionReason(w, r)
+	if !ok {
+		return
+	}
+	rollout, err := s.store.LatestRollout(r.Context(), service.ID)
+	if errors.Is(err, catalog.ErrNotFound) {
+		writeError(w, http.StatusConflict, "service has no recorded rollout to roll back")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	id := r.PathValue("id")
-	for _, deployment := range deployments {
-		if deployment.ID == id || deployment.Version == id || id == "latest" {
-			writeJSON(w, http.StatusOK, map[string]any{"service": service.Name, "rollout": deployment})
-			return
+	s.transition(w, r, service, rollout, rollouts.ActionRollback, reason)
+}
+
+// actionReason reads an optional {"reason": "..."} body.
+func (s *Server) actionReason(w http.ResponseWriter, r *http.Request) (string, bool) {
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if r.ContentLength != 0 {
+		if !s.decodeStrict(w, r, &body) {
+			return "", false
 		}
 	}
-	writeError(w, http.StatusNotFound, "rollout not found")
+	if len(body.Reason) > 500 {
+		writeError(w, http.StatusBadRequest, "reason must be at most 500 characters")
+		return "", false
+	}
+	return strings.TrimSpace(body.Reason), true
 }
 
-func (s *Server) pauseRollout(w http.ResponseWriter, r *http.Request) {
-	service, ok := s.loadService(w, r)
-	if !ok {
+func (s *Server) transition(w http.ResponseWriter, r *http.Request, service models.Service, rollout models.Rollout, action, reason string) {
+	from := rollout.State
+	if err := rollouts.Apply(&rollout, action, reason, time.Now().UTC()); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "rollout": rollout})
 		return
 	}
-	var deployment models.Deployment
-	run := s.workflows.Run(r.Context(), workflows.Spec{
-		Name:    "rollout-pause",
-		Kind:    "attesta.rollout.pause",
-		Service: service.Name,
-		Steps: []workflows.Step{{
-			Name:        "record-rollout-pause",
-			MaxAttempts: 1,
-			Run: func(ctx context.Context) error {
-				var err error
-				deployment, err = s.store.RecordDeployment(ctx, models.Deployment{
-					ServiceID:   service.ID,
-					Version:     "pause-" + r.PathValue("id"),
-					Environment: service.Environment,
-					Status:      "rollout-paused",
-					Strategy:    service.DeploymentStrategy,
-					StartedAt:   time.Now().UTC(),
-				})
-				return err
-			},
-		}},
-	})
-	if run.State != workflows.StateSucceeded {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": run.Error, "workflow": run})
+	if err := s.store.UpdateRollout(r.Context(), rollout, from); err != nil {
+		if errors.Is(err, catalog.ErrConflict) {
+			writeError(w, http.StatusConflict, err.Error()+"; reload it and retry")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"service": service.Name, "rollout": deployment, "workflow": run})
-}
-
-func (s *Server) rollback(w http.ResponseWriter, r *http.Request) {
-	service, ok := s.loadService(w, r)
-	if !ok {
-		return
+	body := map[string]any{"service": service.Name, "rollout": rollout}
+	if action == rollouts.ActionRollback {
+		body["note"] = "Attesta recorded a rollback request. It did not change the cluster; your deployment tooling must act on it."
 	}
-	var deployment models.Deployment
-	run := s.workflows.Run(r.Context(), workflows.Spec{
-		Name:    "rollout-rollback",
-		Kind:    "attesta.rollout.rollback",
-		Service: service.Name,
-		Steps: []workflows.Step{{
-			Name:        "record-rollback-intent",
-			MaxAttempts: 1,
-			Run: func(ctx context.Context) error {
-				var err error
-				deployment, err = s.store.RecordDeployment(ctx, models.Deployment{
-					ServiceID:   service.ID,
-					Version:     "rollback-request-" + time.Now().UTC().Format("20060102150405"),
-					Environment: service.Environment,
-					Status:      "rollback-requested",
-					Strategy:    service.DeploymentStrategy,
-					StartedAt:   time.Now().UTC(),
-				})
-				return err
-			},
-		}},
-	})
-	if run.State != workflows.StateSucceeded {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": run.Error, "workflow": run})
-		return
-	}
-	writeJSON(w, http.StatusAccepted, map[string]any{
-		"service":    service.Name,
-		"deployment": deployment,
-		"workflow":   run,
-		"note":       "Attesta recorded a rollback request. It did not change the cluster; your deployment tooling must act on it.",
-	})
+	writeJSON(w, http.StatusOK, body)
 }
 
 func (s *Server) healthGate(w http.ResponseWriter, r *http.Request) {
@@ -547,7 +593,7 @@ func (s *Server) healthGate(w http.ResponseWriter, r *http.Request) {
 	}
 	var decision reliability.Decision
 	status := http.StatusOK
-	var rollback *models.Deployment
+	var rolledBack *models.Rollout
 	run := s.workflows.Run(r.Context(), workflows.Spec{
 		Name:    "rollout-health-gate",
 		Kind:    "attesta.rollout.health-gate",
@@ -566,24 +612,26 @@ func (s *Server) healthGate(w http.ResponseWriter, r *http.Request) {
 				},
 			},
 			{
-				Name:        "record-rollback-when-policy-breaches",
-				MaxAttempts: 1,
+				Name: "request-rollback-of-active-rollout",
 				Run: func(ctx context.Context) error {
 					if decision.Healthy || decision.Action != "rollback" {
 						return nil
 					}
-					deployment, err := s.store.RecordDeployment(ctx, models.Deployment{
-						ServiceID:   service.ID,
-						Version:     "healthgate-rollback-request-" + time.Now().UTC().Format("20060102150405"),
-						Environment: service.Environment,
-						Status:      "rollback-requested",
-						Strategy:    service.DeploymentStrategy,
-						StartedAt:   time.Now().UTC(),
-					})
+					active, err := s.store.LatestRollout(ctx, service.ID)
+					if errors.Is(err, catalog.ErrNotFound) || (err == nil && !rollouts.Active(active.State)) {
+						return nil // nothing in flight to roll back
+					}
 					if err != nil {
 						return err
 					}
-					rollback = &deployment
+					from := active.State
+					if err := rollouts.Apply(&active, rollouts.ActionRollback, "health gate: "+decision.Reason, time.Now().UTC()); err != nil {
+						return err
+					}
+					if err := s.store.UpdateRollout(ctx, active, from); err != nil {
+						return err
+					}
+					rolledBack = &active
 					return nil
 				},
 			},
@@ -593,18 +641,20 @@ func (s *Server) healthGate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": run.Error, "workflow": run})
 		return
 	}
-	if rollback != nil {
+	if rolledBack != nil {
 		status = http.StatusAccepted
 	}
 	writeJSON(w, status, map[string]any{
 		"service": service.Name,
 		// The gate judges the numbers in the request body. Attesta does not
 		// measure the canary itself on this endpoint.
-		"inputSource":        "caller-supplied",
-		"metrics":            metrics,
-		"decision":           decision,
-		"rollbackDeployment": rollback,
-		"workflow":           run,
+		"inputSource": "caller-supplied",
+		"metrics":     metrics,
+		"decision":    decision,
+		// The active rollout marked rollback-requested, if the gate breached
+		// and one was in flight.
+		"rollout":  rolledBack,
+		"workflow": run,
 	})
 }
 
