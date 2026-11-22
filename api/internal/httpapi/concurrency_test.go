@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/gaurav-gs7/attesta/api/internal/workflows"
+
+	"github.com/gaurav-gs7/attesta/api/internal/page"
 )
 
 // Audit W-2, as reproduced on PostgreSQL: 20 identical onboarding requests
@@ -41,7 +43,7 @@ func TestConcurrentIdenticalOnboardingRunsOnce(t *testing.T) {
 				t.Fatalf("status codes = %v, want one 201 and %d 200s", count, requests-1)
 			}
 
-			runs, err := store.ListWorkflowRuns(context.Background())
+			runs, _, err := store.ListWorkflowRuns(context.Background(), page.Request{Limit: page.MaxLimit})
 			if err != nil {
 				t.Fatal(err)
 			}

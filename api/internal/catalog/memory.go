@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/gaurav-gs7/attesta/api/internal/models"
+	"github.com/gaurav-gs7/attesta/api/internal/page"
 	"github.com/gaurav-gs7/attesta/api/internal/workflows"
 )
 
@@ -95,15 +97,16 @@ func (s *MemoryStore) LatestDeployment(_ context.Context, serviceID string) (mod
 	return deployments[len(deployments)-1], nil
 }
 
-func (s *MemoryStore) ListDeployments(_ context.Context, serviceID string) ([]models.Deployment, error) {
+func (s *MemoryStore) ListDeployments(_ context.Context, serviceID string, req page.Request) ([]models.Deployment, string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	deployments := append([]models.Deployment(nil), s.deployments[serviceID]...)
 	sort.Slice(deployments, func(i, j int) bool {
-		return deployments[i].StartedAt.After(deployments[j].StartedAt)
+		return page.Less(deployments[i].StartedAt, deployments[i].ID, deployments[j].StartedAt, deployments[j].ID)
 	})
-	return deployments, nil
+	out, next := page.Slice(deployments, req, func(d models.Deployment) (time.Time, string) { return d.StartedAt, d.ID })
+	return out, next, nil
 }
 
 func (s *MemoryStore) SaveIncidentRecord(_ context.Context, record models.IncidentRecord) error {
@@ -123,7 +126,7 @@ func (s *MemoryStore) GetIncidentRecord(_ context.Context, id string) (models.In
 	return record, nil
 }
 
-func (s *MemoryStore) ListIncidentRecords(_ context.Context) ([]models.IncidentRecord, error) {
+func (s *MemoryStore) ListIncidentRecords(_ context.Context, req page.Request) ([]models.IncidentRecord, string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	records := make([]models.IncidentRecord, 0, len(s.incidents))
@@ -131,7 +134,29 @@ func (s *MemoryStore) ListIncidentRecords(_ context.Context) ([]models.IncidentR
 		records = append(records, record)
 	}
 	sort.Slice(records, func(i, j int) bool {
-		return records[i].Incident.CreatedAt.After(records[j].Incident.CreatedAt)
+		a, b := records[i].Incident, records[j].Incident
+		return page.Less(a.CreatedAt, a.ID, b.CreatedAt, b.ID)
 	})
-	return records, nil
+	out, next := page.Slice(records, req, func(r models.IncidentRecord) (time.Time, string) {
+		return r.Incident.CreatedAt, r.Incident.ID
+	})
+	return out, next, nil
+}
+
+func (s *MemoryStore) FindActiveIncident(_ context.Context, service, fingerprint string) (models.IncidentRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var found *models.IncidentRecord
+	for _, record := range s.incidents {
+		inc := record.Incident
+		if inc.Service == service && inc.Fingerprint == fingerprint && inc.Status == "active" &&
+			(found == nil || inc.CreatedAt.After(found.Incident.CreatedAt)) {
+			r := record
+			found = &r
+		}
+	}
+	if found == nil {
+		return models.IncidentRecord{}, ErrNotFound
+	}
+	return *found, nil
 }

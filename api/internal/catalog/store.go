@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gaurav-gs7/attesta/api/internal/models"
+	"github.com/gaurav-gs7/attesta/api/internal/page"
 	"github.com/gaurav-gs7/attesta/api/internal/workflows"
 )
 
@@ -22,11 +23,16 @@ type Store interface {
 	GetServiceByName(context.Context, string) (models.Service, error)
 	RecordDeployment(context.Context, models.Deployment) (models.Deployment, error)
 	LatestDeployment(context.Context, string) (models.Deployment, error)
-	ListDeployments(context.Context, string) ([]models.Deployment, error)
+	// ListDeployments returns one page of a service's deployments, newest
+	// first, and the cursor of the next page ("" at the end).
+	ListDeployments(context.Context, string, page.Request) ([]models.Deployment, string, error)
 	workflows.Store
 	SaveIncidentRecord(context.Context, models.IncidentRecord) error
 	GetIncidentRecord(context.Context, string) (models.IncidentRecord, error)
-	ListIncidentRecords(context.Context) ([]models.IncidentRecord, error)
+	ListIncidentRecords(context.Context, page.Request) ([]models.IncidentRecord, string, error)
+	// FindActiveIncident returns the active incident of a service with the
+	// given alert fingerprint, or ErrNotFound.
+	FindActiveIncident(ctx context.Context, service, fingerprint string) (models.IncidentRecord, error)
 }
 
 func Open(ctx context.Context, databaseURL string) (Store, func(), error) {

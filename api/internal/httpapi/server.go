@@ -20,6 +20,7 @@ import (
 	"github.com/gaurav-gs7/attesta/api/internal/catalog"
 	"github.com/gaurav-gs7/attesta/api/internal/incidents"
 	"github.com/gaurav-gs7/attesta/api/internal/models"
+	"github.com/gaurav-gs7/attesta/api/internal/page"
 	promclient "github.com/gaurav-gs7/attesta/api/internal/prometheus"
 	"github.com/gaurav-gs7/attesta/api/internal/readiness"
 	"github.com/gaurav-gs7/attesta/api/internal/reliability"
@@ -197,7 +198,7 @@ func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
 						// The service already existed, for example because an
 						// earlier run failed after creating it. Record the
 						// initial deployment only if that run did not.
-						existing, err := s.store.ListDeployments(ctx, created.ID)
+						existing, _, err := s.store.ListDeployments(ctx, created.ID, page.Request{Limit: 1})
 						if err != nil || len(existing) > 0 {
 							return err
 						}
@@ -361,15 +362,19 @@ func (s *Server) deployments(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	deployments, err := s.store.ListDeployments(r.Context(), service.ID)
+	req, ok := pageRequest(w, r)
+	if !ok {
+		return
+	}
+	deployments, next, err := s.store.ListDeployments(r.Context(), service.ID, req)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, pageBody(map[string]any{
 		"service":     service.Name,
-		"deployments": deployments,
-	})
+		"deployments": nonNil(deployments),
+	}, next))
 }
 
 func (s *Server) startRollout(w http.ResponseWriter, r *http.Request) {
@@ -441,7 +446,7 @@ func (s *Server) getRollout(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	deployments, err := s.store.ListDeployments(r.Context(), service.ID)
+	deployments, err := s.allDeployments(r.Context(), service.ID, time.Time{})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -604,12 +609,16 @@ func (s *Server) healthGate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listIncidents(w http.ResponseWriter, r *http.Request) {
-	records, err := s.store.ListIncidentRecords(r.Context())
+	req, ok := pageRequest(w, r)
+	if !ok {
+		return
+	}
+	records, next, err := s.store.ListIncidentRecords(r.Context(), req)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"incidents": records})
+	writeJSON(w, http.StatusOK, pageBody(map[string]any{"incidents": nonNil(records)}, next))
 }
 
 func (s *Server) getIncident(w http.ResponseWriter, r *http.Request) {
@@ -621,12 +630,42 @@ func (s *Server) getIncident(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listWorkflows(w http.ResponseWriter, r *http.Request) {
-	runs, err := s.workflows.List(r.Context())
+	req, ok := pageRequest(w, r)
+	if !ok {
+		return
+	}
+	runs, next, err := s.workflows.List(r.Context(), req)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"workflows": runs})
+	writeJSON(w, http.StatusOK, pageBody(map[string]any{"workflows": runs}, next))
+}
+
+// pageRequest reads ?limit= and ?cursor=; it answers 400 itself if they are
+// malformed.
+func pageRequest(w http.ResponseWriter, r *http.Request) (page.Request, bool) {
+	req, err := page.Parse(r.URL.Query().Get("limit"), r.URL.Query().Get("cursor"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return page.Request{}, false
+	}
+	return req, true
+}
+
+// pageBody adds nextCursor to a list response when there is another page.
+func pageBody(body map[string]any, next string) map[string]any {
+	if next != "" {
+		body["nextCursor"] = next
+	}
+	return body
+}
+
+func nonNil[T any](items []T) []T {
+	if items == nil {
+		return []T{}
+	}
+	return items
 }
 
 func (s *Server) getWorkflow(w http.ResponseWriter, r *http.Request) {

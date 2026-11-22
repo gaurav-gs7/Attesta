@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/gaurav-gs7/attesta/api/internal/page"
 	"github.com/gaurav-gs7/attesta/api/internal/workflows"
 )
 
@@ -88,5 +89,65 @@ func TestWorkflowPersistenceRoundTrips(t *testing.T) {
 				t.Fatalf("%s: step %d = %+v, want %+v", tc.name, i, stored.Steps[i], run.Steps[i])
 			}
 		}
+	}
+}
+
+// Audit W-6: listing loaded each run with three queries of its own (303
+// statements for 100 runs). A page now costs three, whatever its size, and
+// walking the pages returns every run once, complete.
+func TestListWorkflowRunsIsBatchedAndPaginated(t *testing.T) {
+	dsn := emptyDatabase(t)
+	counter := &statementCounter{}
+	store, err := newPostgresStore(context.Background(), dsn, counter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	engine := workflows.NewEngine(store)
+	ok := func(name string) workflows.Step {
+		return workflows.Step{Name: name, Run: func(context.Context) error { return nil }}
+	}
+	const total = 250
+	for i := 0; i < total; i++ {
+		engine.Run(context.Background(), workflows.Spec{Name: "n", Kind: "test", Steps: []workflows.Step{ok("a"), ok("b")}})
+	}
+
+	counter.reset()
+	first, next, err := store.ListWorkflowRuns(context.Background(), page.Request{Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := counter.reset(); n != 3 {
+		t.Fatalf("listing 100 runs took %d statements, want 3", n)
+	}
+	if len(first) != 100 || next == "" {
+		t.Fatalf("first page: %d runs, next %q", len(first), next)
+	}
+
+	seen := map[string]bool{}
+	req := page.Request{Limit: 100}
+	for {
+		runs, next, err := store.ListWorkflowRuns(context.Background(), req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, run := range runs {
+			if seen[run.ID] {
+				t.Fatalf("run %s on two pages", run.ID)
+			}
+			seen[run.ID] = true
+			if len(run.Steps) != 2 || len(run.Events) != 6 || run.Steps[1].Name != "b" {
+				t.Fatalf("run %s loaded incompletely: %d steps, %d events", run.ID, len(run.Steps), len(run.Events))
+			}
+		}
+		if next == "" {
+			break
+		}
+		if req, err = page.Parse("100", next); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(seen) != total {
+		t.Fatalf("walked %d runs, want %d", len(seen), total)
 	}
 }

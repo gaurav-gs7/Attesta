@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/gaurav-gs7/attesta/api/internal/models"
+
+	"github.com/gaurav-gs7/attesta/api/internal/page"
 )
 
 func okStep(name string) Step {
@@ -318,7 +320,7 @@ func TestMemoryStoreIsBounded(t *testing.T) {
 	for i := 0; i < 1000; i++ {
 		engine.Run(context.Background(), Spec{Name: "n", Kind: "test", Steps: []Step{okStep("s")}})
 	}
-	runs, _ := store.ListWorkflowRuns(context.Background())
+	runs, _, _ := store.ListWorkflowRuns(context.Background(), page.Request{Limit: page.MaxLimit})
 	if len(runs) > 100 {
 		t.Fatalf("store holds %d runs, retention is 100", len(runs))
 	}

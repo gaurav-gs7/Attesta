@@ -178,6 +178,8 @@ Without `DATABASE_URL`, Attesta keeps everything in memory. With it, the service
 | `GET /api/v1/incidents/{id}`, `.../timeline`, `.../postmortem`, `POST .../resolve` | Incident record, timeline, draft, resolve |
 | `GET /api/v1/workflows`, `GET /api/v1/workflows/{id}` | Workflow runs |
 
+The deployment, incident and workflow lists are paginated newest first: pass `?limit=` (1 to 200, default 50) and, for the next page, the `nextCursor` value from the previous response as `?cursor=`. `nextCursor` is absent on the last page. A store error is reported as `500`, never answered from a cache.
+
 ## Repository Layout
 
 ```text

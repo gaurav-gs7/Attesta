@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/gaurav-gs7/attesta/api/internal/models"
+	"github.com/gaurav-gs7/attesta/api/internal/page"
 	"github.com/gaurav-gs7/attesta/api/internal/workflows"
 )
 
@@ -183,16 +184,19 @@ func (s *PostgresStore) LatestDeployment(ctx context.Context, serviceID string) 
 	return deployment, err
 }
 
-func (s *PostgresStore) ListDeployments(ctx context.Context, serviceID string) ([]models.Deployment, error) {
+func (s *PostgresStore) ListDeployments(ctx context.Context, serviceID string, req page.Request) ([]models.Deployment, string, error) {
+	after, afterID, since := keysetArgs(req)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, service_id, version, environment, status, strategy, started_at, completed_at
 		FROM deployments
 		WHERE service_id = $1
-		ORDER BY started_at DESC
-		LIMIT 50
-	`, serviceID)
+		  AND ($2::timestamptz IS NULL OR (started_at, id::text) < ($2, $3))
+		  AND ($4::timestamptz IS NULL OR started_at >= $4)
+		ORDER BY started_at DESC, id::text DESC
+		LIMIT $5
+	`, serviceID, after, afterID, since, req.Size()+1)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -203,14 +207,42 @@ func (s *PostgresStore) ListDeployments(ctx context.Context, serviceID string) (
 		if err := rows.Scan(&deployment.ID, &deployment.ServiceID, &deployment.Version,
 			&deployment.Environment, &deployment.Status, &deployment.Strategy,
 			&deployment.StartedAt, &completed); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		if completed.Valid {
 			deployment.CompletedAt = &completed.Time
 		}
 		deployments = append(deployments, deployment)
 	}
-	return deployments, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	deployments, next := trimPage(deployments, req, func(d models.Deployment) (time.Time, string) { return d.StartedAt, d.ID })
+	return deployments, next, nil
+}
+
+// keysetArgs returns the cursor and Since bounds of req as nullable query
+// parameters.
+func keysetArgs(req page.Request) (after sql.NullTime, afterID string, since sql.NullTime) {
+	if !req.After.IsZero() {
+		after = sql.NullTime{Time: req.After.Time, Valid: true}
+		afterID = req.After.ID
+	}
+	if !req.Since.IsZero() {
+		since = sql.NullTime{Time: req.Since, Valid: true}
+	}
+	return after, afterID, since
+}
+
+// trimPage drops the extra row fetched to detect a next page and returns the
+// next cursor.
+func trimPage[T any](items []T, req page.Request, key func(T) (time.Time, string)) ([]T, string) {
+	if len(items) <= req.Size() {
+		return items, ""
+	}
+	items = items[:req.Size()]
+	t, id := key(items[len(items)-1])
+	return items, page.Cursor{Time: t, ID: id}.Encode()
 }
 
 // Workflow runs are written with one statement per save. The run row is
@@ -444,81 +476,95 @@ func (s *PostgresStore) GetWorkflowRunByIdempotencyKey(ctx context.Context, key 
 	return s.loadWorkflowRun(ctx, id)
 }
 
-func (s *PostgresStore) ListWorkflowRuns(ctx context.Context) ([]models.WorkflowRun, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id
+// ListWorkflowRuns returns one page of runs with their steps and events in
+// three queries, whatever the page size.
+func (s *PostgresStore) ListWorkflowRuns(ctx context.Context, req page.Request) ([]models.WorkflowRun, string, error) {
+	after, afterID, since := keysetArgs(req)
+	runs, err := s.loadWorkflowRuns(ctx, `
+		SELECT id, name, kind, state, service, idempotency_key, attempt, max_attempts,
+		       started_at, completed_at, error
 		FROM workflow_runs
-		ORDER BY started_at DESC
-		LIMIT 100
-	`)
+		WHERE ($1::timestamptz IS NULL OR (started_at, id) < ($1, $2))
+		  AND ($3::timestamptz IS NULL OR started_at >= $3)
+		ORDER BY started_at DESC, id DESC
+		LIMIT $4
+	`, after, afterID, since, req.Size()+1)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	defer func() { _ = rows.Close() }()
-
-	var runs []models.WorkflowRun
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		run, err := s.loadWorkflowRun(ctx, id)
-		if err != nil {
-			return nil, err
-		}
-		runs = append(runs, run)
-	}
-	return runs, rows.Err()
+	runs, next := trimPage(runs, req, func(r models.WorkflowRun) (time.Time, string) { return r.StartedAt, r.ID })
+	return runs, next, nil
 }
 
 func (s *PostgresStore) loadWorkflowRun(ctx context.Context, id string) (models.WorkflowRun, error) {
-	var run models.WorkflowRun
-	var completed sql.NullTime
-	err := s.db.QueryRowContext(ctx, `
+	runs, err := s.loadWorkflowRuns(ctx, `
 		SELECT id, name, kind, state, service, idempotency_key, attempt, max_attempts,
 		       started_at, completed_at, error
 		FROM workflow_runs
 		WHERE id = $1
-	`, id).Scan(&run.ID, &run.Name, &run.Kind, &run.State, &run.Service, &run.IdempotencyKey,
-		&run.Attempt, &run.MaxAttempts, &run.StartedAt, &completed, &run.Error)
+	`, id)
 	if err != nil {
 		return models.WorkflowRun{}, err
 	}
-	if completed.Valid {
-		run.CompletedAt = &completed.Time
+	if len(runs) == 0 {
+		return models.WorkflowRun{}, sql.ErrNoRows
 	}
-
-	steps, err := s.loadWorkflowSteps(ctx, id)
-	if err != nil {
-		return models.WorkflowRun{}, err
-	}
-	events, err := s.loadWorkflowEvents(ctx, id)
-	if err != nil {
-		return models.WorkflowRun{}, err
-	}
-	run.Steps = steps
-	run.Events = events
-	return run, nil
+	return runs[0], nil
 }
 
-func (s *PostgresStore) loadWorkflowSteps(ctx context.Context, workflowID string) ([]models.WorkflowStep, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT name, state, attempt, max_attempts, started_at, completed_at, error
-		FROM workflow_steps
-		WHERE workflow_id = $1
-		ORDER BY position ASC
-	`, workflowID)
+// loadWorkflowRuns runs a query selecting run rows, then loads the steps and
+// events of all of them with one query each.
+func (s *PostgresStore) loadWorkflowRuns(ctx context.Context, query string, args ...any) ([]models.WorkflowRun, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-
-	var steps []models.WorkflowStep
+	var runs []models.WorkflowRun
+	index := map[string]int{}
 	for rows.Next() {
+		var run models.WorkflowRun
+		var completed sql.NullTime
+		if err := rows.Scan(&run.ID, &run.Name, &run.Kind, &run.State, &run.Service, &run.IdempotencyKey,
+			&run.Attempt, &run.MaxAttempts, &run.StartedAt, &completed, &run.Error); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		if completed.Valid {
+			run.CompletedAt = &completed.Time
+		}
+		index[run.ID] = len(runs)
+		runs = append(runs, run)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(runs) == 0 {
+		return runs, nil
+	}
+	ids := make([]string, len(runs))
+	for i, run := range runs {
+		ids[i] = run.ID
+	}
+
+	stepRows, err := s.db.QueryContext(ctx, `
+		SELECT workflow_id, name, state, attempt, max_attempts, started_at, completed_at, error
+		FROM workflow_steps
+		WHERE workflow_id = ANY($1)
+		ORDER BY workflow_id, position ASC
+	`, ids)
+	if err != nil {
+		return nil, err
+	}
+	for stepRows.Next() {
+		var workflowID string
 		var step models.WorkflowStep
 		var started, completed sql.NullTime
-		if err := rows.Scan(&step.Name, &step.State, &step.Attempt, &step.MaxAttempts,
+		if err := stepRows.Scan(&workflowID, &step.Name, &step.State, &step.Attempt, &step.MaxAttempts,
 			&started, &completed, &step.Error); err != nil {
+			_ = stepRows.Close()
 			return nil, err
 		}
 		if started.Valid {
@@ -527,32 +573,39 @@ func (s *PostgresStore) loadWorkflowSteps(ctx context.Context, workflowID string
 		if completed.Valid {
 			step.CompletedAt = timePtr(completed.Time)
 		}
-		steps = append(steps, step)
+		i := index[workflowID]
+		runs[i].Steps = append(runs[i].Steps, step)
 	}
-	return steps, rows.Err()
-}
+	if err := stepRows.Close(); err != nil {
+		return nil, err
+	}
+	if err := stepRows.Err(); err != nil {
+		return nil, err
+	}
 
-func (s *PostgresStore) loadWorkflowEvents(ctx context.Context, workflowID string) ([]models.WorkflowEvent, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT timestamp, event_type, message
+	eventRows, err := s.db.QueryContext(ctx, `
+		SELECT workflow_id, timestamp, event_type, message
 		FROM workflow_events
-		WHERE workflow_id = $1
-		ORDER BY seq ASC NULLS FIRST, timestamp ASC
-	`, workflowID)
+		WHERE workflow_id = ANY($1)
+		ORDER BY workflow_id, seq ASC NULLS FIRST, timestamp ASC
+	`, ids)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-
-	var events []models.WorkflowEvent
-	for rows.Next() {
+	for eventRows.Next() {
+		var workflowID string
 		var event models.WorkflowEvent
-		if err := rows.Scan(&event.Timestamp, &event.Type, &event.Message); err != nil {
+		if err := eventRows.Scan(&workflowID, &event.Timestamp, &event.Type, &event.Message); err != nil {
+			_ = eventRows.Close()
 			return nil, err
 		}
-		events = append(events, event)
+		i := index[workflowID]
+		runs[i].Events = append(runs[i].Events, event)
 	}
-	return events, rows.Err()
+	if err := eventRows.Close(); err != nil {
+		return nil, err
+	}
+	return runs, eventRows.Err()
 }
 
 func (s *PostgresStore) SaveIncidentRecord(ctx context.Context, record models.IncidentRecord) error {
@@ -602,27 +655,66 @@ func (s *PostgresStore) GetIncidentRecord(ctx context.Context, id string) (model
 	return record, err
 }
 
-func (s *PostgresStore) ListIncidentRecords(ctx context.Context) ([]models.IncidentRecord, error) {
+func (s *PostgresStore) ListIncidentRecords(ctx context.Context, req page.Request) ([]models.IncidentRecord, string, error) {
+	after, afterID, since := keysetArgs(req)
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT incident, service, signals, events
+		SELECT incident, service, signals, events, created_at
 		FROM incident_records
-		ORDER BY created_at DESC
-		LIMIT 100
-	`)
+		WHERE ($1::timestamptz IS NULL OR (created_at, id) < ($1, $2))
+		  AND ($3::timestamptz IS NULL OR created_at >= $3)
+		ORDER BY created_at DESC, id DESC
+		LIMIT $4
+	`, after, afterID, since, req.Size()+1)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer func() { _ = rows.Close() }()
 
-	var records []models.IncidentRecord
-	for rows.Next() {
-		record, err := scanIncidentRecord(rows)
-		if err != nil {
-			return nil, err
-		}
-		records = append(records, record)
+	// The cursor uses the stored created_at, which PostgreSQL rounds to
+	// microseconds, not the nanosecond time inside the incident JSON.
+	type row struct {
+		record  models.IncidentRecord
+		created time.Time
 	}
-	return records, rows.Err()
+	var page []row
+	for rows.Next() {
+		var r row
+		var incidentJSON, serviceJSON, signalsJSON, eventsJSON []byte
+		if err := rows.Scan(&incidentJSON, &serviceJSON, &signalsJSON, &eventsJSON, &r.created); err != nil {
+			return nil, "", err
+		}
+		record, err := decodeIncidentRecord(incidentJSON, serviceJSON, signalsJSON, eventsJSON)
+		if err != nil {
+			return nil, "", err
+		}
+		r.record = record
+		page = append(page, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	page, next := trimPage(page, req, func(r row) (time.Time, string) { return r.created, r.record.Incident.ID })
+	records := make([]models.IncidentRecord, len(page))
+	for i, r := range page {
+		records[i] = r.record
+	}
+	return records, next, nil
+}
+
+func (s *PostgresStore) FindActiveIncident(ctx context.Context, service, fingerprint string) (models.IncidentRecord, error) {
+	record, err := s.loadIncidentRecord(ctx, `
+		SELECT incident, service, signals, events
+		FROM incident_records
+		WHERE service_name = $1
+		  AND incident->>'fingerprint' = $2
+		  AND incident->>'status' = 'active'
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, service, fingerprint)
+	if errors.Is(err, sql.ErrNoRows) {
+		return models.IncidentRecord{}, ErrNotFound
+	}
+	return record, err
 }
 
 type incidentScanner interface {
@@ -634,11 +726,15 @@ func (s *PostgresStore) loadIncidentRecord(ctx context.Context, query string, ar
 }
 
 func scanIncidentRecord(scanner incidentScanner) (models.IncidentRecord, error) {
-	var record models.IncidentRecord
 	var incidentJSON, serviceJSON, signalsJSON, eventsJSON []byte
 	if err := scanner.Scan(&incidentJSON, &serviceJSON, &signalsJSON, &eventsJSON); err != nil {
 		return models.IncidentRecord{}, err
 	}
+	return decodeIncidentRecord(incidentJSON, serviceJSON, signalsJSON, eventsJSON)
+}
+
+func decodeIncidentRecord(incidentJSON, serviceJSON, signalsJSON, eventsJSON []byte) (models.IncidentRecord, error) {
+	var record models.IncidentRecord
 	if err := json.Unmarshal(incidentJSON, &record.Incident); err != nil {
 		return models.IncidentRecord{}, err
 	}

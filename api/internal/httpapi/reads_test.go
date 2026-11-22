@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"testing"
+
+	"github.com/gaurav-gs7/attesta/api/internal/page"
 )
 
 // Audit W-5: GET readiness, score and slos each created a workflow run, so
@@ -16,7 +18,7 @@ func TestReadsDoNotCreateWorkflowRuns(t *testing.T) {
 			if code := authorizedRequest(server, http.MethodPost, "/api/v1/services", onboardingBody).Code; code != http.StatusCreated {
 				t.Fatalf("onboard: %d", code)
 			}
-			before, err := store.ListWorkflowRuns(context.Background())
+			before, _, err := store.ListWorkflowRuns(context.Background(), page.Request{Limit: page.MaxLimit})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -28,7 +30,7 @@ func TestReadsDoNotCreateWorkflowRuns(t *testing.T) {
 					}
 				}
 			}
-			after, err := store.ListWorkflowRuns(context.Background())
+			after, _, err := store.ListWorkflowRuns(context.Background(), page.Request{Limit: page.MaxLimit})
 			if err != nil {
 				t.Fatal(err)
 			}

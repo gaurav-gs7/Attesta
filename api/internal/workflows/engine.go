@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gaurav-gs7/attesta/api/internal/models"
+	"github.com/gaurav-gs7/attesta/api/internal/page"
 )
 
 const (
@@ -64,7 +65,9 @@ type Store interface {
 	AbandonStaleWorkflowRuns(ctx context.Context, staleAfter time.Duration) (int, error)
 	GetWorkflowRun(context.Context, string) (models.WorkflowRun, error)
 	GetWorkflowRunByIdempotencyKey(context.Context, string) (models.WorkflowRun, error)
-	ListWorkflowRuns(context.Context) ([]models.WorkflowRun, error)
+	// ListWorkflowRuns returns one page of runs, newest first, and the cursor
+	// of the next page ("" at the end).
+	ListWorkflowRuns(context.Context, page.Request) ([]models.WorkflowRun, string, error)
 }
 
 // Outcome says what a keyed Run did.
@@ -401,12 +404,14 @@ func (e *Engine) GetByIdempotencyKey(key string) (models.WorkflowRun, bool) {
 	return run, err == nil
 }
 
-func (e *Engine) List(ctx context.Context) ([]models.WorkflowRun, error) {
-	runs, err := e.store.ListWorkflowRuns(ctx)
+// List returns one page of runs, newest first, and the next cursor. A store
+// error is returned, never hidden behind stale data.
+func (e *Engine) List(ctx context.Context, req page.Request) ([]models.WorkflowRun, string, error) {
+	runs, next, err := e.store.ListWorkflowRuns(ctx, req)
 	if runs == nil && err == nil {
 		runs = []models.WorkflowRun{}
 	}
-	return runs, err
+	return runs, next, err
 }
 
 func newID() string {

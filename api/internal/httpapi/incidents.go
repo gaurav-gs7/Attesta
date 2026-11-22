@@ -12,6 +12,7 @@ import (
 	"github.com/gaurav-gs7/attesta/api/internal/catalog"
 	"github.com/gaurav-gs7/attesta/api/internal/incidents"
 	"github.com/gaurav-gs7/attesta/api/internal/models"
+	"github.com/gaurav-gs7/attesta/api/internal/page"
 	"github.com/gaurav-gs7/attesta/api/internal/workflows"
 )
 
@@ -110,8 +111,13 @@ func (s *Server) openIncident(ctx context.Context, service models.Service, in in
 			{
 				Name: "load-recent-deployment-records",
 				Run: func(ctx context.Context) error {
+					// Every record in the correlation window, however many.
+					anchor := incident.CreatedAt
+					if incident.AlertStartsAt != nil && !incident.AlertStartsAt.IsZero() {
+						anchor = *incident.AlertStartsAt
+					}
 					var err error
-					deployments, err = s.store.ListDeployments(ctx, service.ID)
+					deployments, err = s.allDeployments(ctx, service.ID, anchor.Add(-incidents.CorrelationWindow))
 					return err
 				},
 			},
@@ -305,18 +311,36 @@ func (s *Server) handleAlert(ctx context.Context, alert incidents.AlertmanagerAl
 	return result
 }
 
-// findActiveIncident scans the most recent incident records (the store
-// returns up to 100) for an active incident with this fingerprint.
+// findActiveIncident returns the active incident for this fingerprint, or
+// nil. It used to scan only the 100 most recent records.
 func (s *Server) findActiveIncident(ctx context.Context, service, fingerprint string) (*models.IncidentRecord, error) {
-	records, err := s.store.ListIncidentRecords(ctx)
+	record, err := s.store.FindActiveIncident(ctx, service, fingerprint)
+	if errors.Is(err, catalog.ErrNotFound) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
-	for i := range records {
-		inc := records[i].Incident
-		if inc.Service == service && inc.Fingerprint == fingerprint && inc.Status == "active" {
-			return &records[i], nil
+	return &record, nil
+}
+
+// allDeployments returns every deployment record of a service since a time,
+// following the store's pages.
+func (s *Server) allDeployments(ctx context.Context, serviceID string, since time.Time) ([]models.Deployment, error) {
+	var all []models.Deployment
+	req := page.Request{Limit: page.MaxLimit, Since: since}
+	for {
+		batch, next, err := s.store.ListDeployments(ctx, serviceID, req)
+		if err != nil {
+			return nil, err
 		}
+		all = append(all, batch...)
+		if next == "" {
+			return all, nil
+		}
+		if req, err = page.Parse("", next); err != nil {
+			return nil, err
+		}
+		req.Limit, req.Since = page.MaxLimit, since
 	}
-	return nil, nil
 }

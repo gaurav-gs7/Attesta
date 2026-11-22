@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gaurav-gs7/attesta/api/internal/models"
+	"github.com/gaurav-gs7/attesta/api/internal/page"
 )
 
 // ErrNotFound is returned by MemoryStore for unknown runs.
@@ -155,15 +156,19 @@ func (s *MemoryStore) GetWorkflowRunByIdempotencyKey(_ context.Context, key stri
 	return clone(*latest), nil
 }
 
-func (s *MemoryStore) ListWorkflowRuns(_ context.Context) ([]models.WorkflowRun, error) {
+func (s *MemoryStore) ListWorkflowRuns(_ context.Context, req page.Request) ([]models.WorkflowRun, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	runs := make([]models.WorkflowRun, 0, len(s.runs))
 	for _, run := range s.runs {
-		runs = append(runs, clone(run))
+		runs = append(runs, run)
 	}
-	sort.Slice(runs, func(i, j int) bool { return runs[i].StartedAt.After(runs[j].StartedAt) })
-	return runs, nil
+	sort.Slice(runs, func(i, j int) bool { return page.Less(runs[i].StartedAt, runs[i].ID, runs[j].StartedAt, runs[j].ID) })
+	out, next := page.Slice(runs, req, func(r models.WorkflowRun) (time.Time, string) { return r.StartedAt, r.ID })
+	for i := range out {
+		out[i] = clone(out[i])
+	}
+	return out, next, nil
 }
 
 // holderLocked returns the run that holds key: the one run for it that is
