@@ -309,3 +309,20 @@ type fakeClock struct {
 
 func (c *fakeClock) Now() time.Time          { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
 func (c *fakeClock) Advance(d time.Duration) { c.mu.Lock(); c.t = c.t.Add(d); c.mu.Unlock() }
+
+// Audit W-5: the in-process store kept every run forever.
+func TestMemoryStoreIsBounded(t *testing.T) {
+	store := NewMemoryStore()
+	store.retention = 100
+	engine := NewEngine(store)
+	for i := 0; i < 1000; i++ {
+		engine.Run(context.Background(), Spec{Name: "n", Kind: "test", Steps: []Step{okStep("s")}})
+	}
+	runs, _ := store.ListWorkflowRuns(context.Background())
+	if len(runs) > 100 {
+		t.Fatalf("store holds %d runs, retention is 100", len(runs))
+	}
+	if runs[0].StartedAt.Before(runs[len(runs)-1].StartedAt) {
+		t.Fatal("pruning dropped new runs instead of old ones")
+	}
+}

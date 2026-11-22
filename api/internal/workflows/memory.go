@@ -14,13 +14,19 @@ import (
 // ErrNotFound is returned by MemoryStore for unknown runs.
 var ErrNotFound = errors.New("workflow run not found")
 
+// DefaultMemoryRetention is how many runs MemoryStore keeps.
+const DefaultMemoryRetention = 1000
+
 // MemoryStore is an in-process Store with the same idempotency contract as
-// the PostgreSQL store. It does not survive a restart.
+// the PostgreSQL store. It does not survive a restart, and it keeps at most
+// a fixed number of runs, dropping the oldest finished ones, so memory stays
+// bounded.
 type MemoryStore struct {
 	mu        sync.Mutex
 	runs      map[string]models.WorkflowRun
 	heartbeat map[string]time.Time
 	now       func() time.Time
+	retention int
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -28,6 +34,31 @@ func NewMemoryStore() *MemoryStore {
 		runs:      make(map[string]models.WorkflowRun),
 		heartbeat: make(map[string]time.Time),
 		now:       time.Now,
+		retention: DefaultMemoryRetention,
+	}
+}
+
+// pruneLocked drops the oldest finished runs once the store holds more than
+// its retention, down to 90% of it so pruning is not paid on every save.
+// Running runs are never dropped: they hold their idempotency keys. A
+// dropped succeeded run no longer replays; an identical request runs again.
+func (s *MemoryStore) pruneLocked() {
+	if len(s.runs) <= s.retention {
+		return
+	}
+	finished := make([]models.WorkflowRun, 0, len(s.runs))
+	for _, run := range s.runs {
+		if run.State != StateRunning {
+			finished = append(finished, run)
+		}
+	}
+	sort.Slice(finished, func(i, j int) bool { return finished[i].StartedAt.Before(finished[j].StartedAt) })
+	for _, run := range finished {
+		if len(s.runs) <= s.retention*9/10 {
+			return
+		}
+		delete(s.runs, run.ID)
+		delete(s.heartbeat, run.ID)
 	}
 }
 
@@ -89,6 +120,9 @@ func (s *MemoryStore) SaveWorkflowRun(_ context.Context, run models.WorkflowRun)
 	}
 	s.runs[run.ID] = clone(run)
 	s.heartbeat[run.ID] = s.now()
+	if run.State != StateRunning {
+		s.pruneLocked()
+	}
 	return nil
 }
 

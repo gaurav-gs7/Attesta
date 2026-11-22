@@ -305,30 +305,15 @@ func (s *Server) serviceStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, status)
 }
 
+// readiness, score and slos are reads: they compute from the stored service
+// and live metrics and record nothing. They used to create a workflow run per
+// request, so 500 GETs wrote 500 runs.
 func (s *Server) readiness(w http.ResponseWriter, r *http.Request) {
 	service, ok := s.loadService(w, r)
 	if !ok {
 		return
 	}
-	var report models.ReadinessReport
-	run := s.workflows.Run(r.Context(), workflows.Spec{
-		Name:    "production-readiness-check",
-		Kind:    "attesta.readiness.check",
-		Service: service.Name,
-		Steps: []workflows.Step{{
-			Name:        "evaluate-service-production-readiness",
-			MaxAttempts: 1,
-			Run: func(context.Context) error {
-				report = readiness.Evaluate(service)
-				return nil
-			},
-		}},
-	})
-	if run.State != workflows.StateSucceeded {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": run.Error, "workflow": run})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"report": report, "workflow": run})
+	writeJSON(w, http.StatusOK, map[string]any{"report": readiness.Evaluate(service)})
 }
 
 func (s *Server) score(w http.ResponseWriter, r *http.Request) {
@@ -336,29 +321,12 @@ func (s *Server) score(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var report models.ReadinessReport
-	run := s.workflows.Run(r.Context(), workflows.Spec{
-		Name:    "production-readiness-score",
-		Kind:    "attesta.readiness.score",
-		Service: service.Name,
-		Steps: []workflows.Step{{
-			Name: "calculate-score",
-			Run: func(context.Context) error {
-				report = readiness.Evaluate(service)
-				return nil
-			},
-		}},
-	})
-	if run.State != workflows.StateSucceeded {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": run.Error, "workflow": run})
-		return
-	}
+	report := readiness.Evaluate(service)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"service":  service.Name,
-		"tier":     service.Tier,
-		"score":    report.Score,
-		"failed":   report.Failed,
-		"workflow": run,
+		"service": service.Name,
+		"tier":    service.Tier,
+		"score":   report.Score,
+		"failed":  report.Failed,
 	})
 }
 
@@ -367,25 +335,7 @@ func (s *Server) slos(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var status models.SLOStatus
-	run := s.workflows.Run(r.Context(), workflows.Spec{
-		Name:    "slo-error-budget-evaluation",
-		Kind:    "attesta.slo.evaluate",
-		Service: service.Name,
-		Steps: []workflows.Step{{
-			Name:        "evaluate-sli-signals-and-error-budget",
-			MaxAttempts: 1,
-			Run: func(ctx context.Context) error {
-				status = s.evaluateSLO(ctx, service)
-				return nil
-			},
-		}},
-	})
-	if run.State != workflows.StateSucceeded {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": run.Error, "workflow": run})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"slo": status, "workflow": run})
+	writeJSON(w, http.StatusOK, map[string]any{"slo": s.evaluateSLO(r.Context(), service)})
 }
 
 // evaluateSLO measures the service's SLOs. Without Prometheus, or when a

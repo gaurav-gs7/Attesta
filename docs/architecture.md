@@ -82,4 +82,6 @@ The runner does not resume a crashed run from its last step; the next request re
 
 ## Data
 
-With PostgreSQL, Attesta stores the service catalog, deployment records, workflow runs with their steps and events, and incident records. Without it, everything is kept in memory and lost on restart.
+With PostgreSQL, Attesta stores the service catalog, deployment records, workflow runs with their steps and events, and incident records. Without it, everything is kept in memory and lost on restart; the in-memory workflow store keeps the newest 1,000 runs and drops the oldest finished ones beyond that.
+
+Only operations that change something create workflow runs: onboarding, rollouts, pauses, rollback requests, health gates and incidents. Reads (readiness, score, SLOs and error budget, status) compute their answer and write nothing.
