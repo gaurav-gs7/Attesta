@@ -43,7 +43,7 @@ func TestEngineRunsStepsInOrder(t *testing.T) {
 }
 
 func TestEngineRetriesAndFails(t *testing.T) {
-	engine := NewEngine(nil)
+	engine := NewEngine(nil, WithBackoff(Backoff{}))
 	attempts := 0
 	run := engine.Run(context.Background(), Spec{
 		Name: "failure-workflow",
@@ -53,7 +53,7 @@ func TestEngineRetriesAndFails(t *testing.T) {
 			MaxAttempts: 2,
 			Run: func(context.Context) error {
 				attempts++
-				return errors.New("nope")
+				return Transient(errors.New("nope"))
 			},
 		}},
 	})

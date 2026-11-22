@@ -70,7 +70,7 @@ A run executes on its own context, not the request's. A client that disconnects 
 
 Each save of a run is one SQL statement: the run row is upserted, steps are updated in place and only new events are inserted, through data-modifying CTEs over arrays, with step and event IDs derived from the run. A run is saved when it starts, when each step attempt starts (carrying the previous step's result) and when it ends. A one-step run costs 3 statements and onboarding 6, down from 34 and 101 when every save deleted and re-inserted all steps and events in a transaction.
 
-The runner does not resume a crashed run from its last step; the next request re-runs it from the start. Retries within a run are immediate, without backoff. Persistence failures fail the request rather than being reported as success.
+The runner does not resume a crashed run from its last step; the next request re-runs it from the start. A step is retried, up to its attempt limit, only when its error is transient: marked with `workflows.Transient`, a network timeout, or a refused, reset or cut connection. Anything else, such as a validation error or a conflict, fails the step at once and records the attempts left unused. Retries wait with exponential backoff and full jitter (100 ms doubling to at most 5 s), and stop when the run's context ends. Persistence failures fail the request rather than being reported as success.
 
 ## CRDs
 

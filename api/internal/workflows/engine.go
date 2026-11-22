@@ -92,6 +92,9 @@ type Engine struct {
 	pollInterval time.Duration
 	runTimeout   time.Duration
 	logger       *slog.Logger
+	backoff      Backoff
+	retryable    func(error) bool
+	sleep        func(context.Context, time.Duration) bool
 }
 
 type Option func(*Engine)
@@ -126,6 +129,9 @@ func NewEngine(store Store, opts ...Option) *Engine {
 		pollInterval: 100 * time.Millisecond,
 		runTimeout:   2 * time.Minute,
 		logger:       slog.Default(),
+		backoff:      DefaultBackoff,
+		retryable:    IsRetryable,
+		sleep:        sleep,
 	}
 	for _, opt := range opts {
 		opt(e)
@@ -257,11 +263,27 @@ func (e *Engine) execute(ctx context.Context, spec Spec, run models.WorkflowRun)
 			run.Steps[i].CompletedAt = &done
 			if err == nil {
 				run.Steps[i].State = StateSucceeded
+				run.Steps[i].Error = ""
 				run.Events = append(run.Events, models.WorkflowEvent{Timestamp: done, Type: "step-succeeded", Message: step.Name})
 				break
 			}
 			run.Steps[i].Error = err.Error()
 			run.Events = append(run.Events, models.WorkflowEvent{Timestamp: done, Type: "step-failed", Message: fmt.Sprintf("%s: %v", step.Name, err)})
+			if attempt == maxAttempts {
+				break
+			}
+			if !e.retryable(err) {
+				run.Events = append(run.Events, models.WorkflowEvent{Timestamp: done, Type: "step-not-retried",
+					Message: fmt.Sprintf("%s: error is permanent; %d attempts left unused", step.Name, maxAttempts-attempt)})
+				break
+			}
+			delay := e.backoff.Delay(attempt)
+			run.Events = append(run.Events, models.WorkflowEvent{Timestamp: done, Type: "step-retry-scheduled",
+				Message: fmt.Sprintf("%s: attempt %d of %d in %s", step.Name, attempt+1, maxAttempts, delay.Round(time.Millisecond))})
+			if !e.sleep(ctx, delay) {
+				err = fmt.Errorf("%s: retry abandoned: %w (last error: %v)", step.Name, context.Cause(ctx), err)
+				break
+			}
 		}
 		if err != nil {
 			done := time.Now().UTC()
