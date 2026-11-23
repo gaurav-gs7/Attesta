@@ -72,7 +72,7 @@ func New(baseURL string, opts Options) (*Client, error) {
 			pool = x509.NewCertPool()
 		}
 		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("Prometheus CA file %s holds no PEM certificates", opts.CAFile)
+			return nil, fmt.Errorf("no PEM certificates in Prometheus CA file %s", opts.CAFile)
 		}
 		transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	}
