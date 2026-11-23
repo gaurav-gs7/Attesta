@@ -10,6 +10,7 @@ import (
 	"text/template"
 
 	"github.com/gaurav-gs7/attesta/api/internal/models"
+	"github.com/gaurav-gs7/attesta/api/internal/slo"
 )
 
 type Generator struct {
@@ -27,6 +28,9 @@ type data struct {
 	Service        models.Service
 	ServiceTitle   string
 	PrometheusName string
+	// BurnWindows are the windows of the multi-window burn-rate rules, the
+	// same ones the API's deployment gate uses.
+	BurnWindows []string
 	ImageName      string
 	ContainerPort  int
 }
@@ -50,6 +54,7 @@ func (g *Generator) Generate(service models.Service) (Result, error) {
 		Service:        service,
 		ServiceTitle:   title(service.Name),
 		PrometheusName: prometheusName(service.Name),
+		BurnWindows:    burnWindowNames(),
 		ImageName:      "ghcr.io/example/" + service.Name,
 		ContainerPort:  8080,
 	}
@@ -172,4 +177,12 @@ func title(name string) string {
 
 func prometheusName(name string) string {
 	return strings.NewReplacer("-", "_", ".", "_").Replace(name)
+}
+
+func burnWindowNames() []string {
+	names := make([]string, len(slo.BurnWindows))
+	for i, w := range slo.BurnWindows {
+		names[i] = w.Name
+	}
+	return names
 }

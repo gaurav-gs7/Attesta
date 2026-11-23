@@ -22,7 +22,14 @@ const (
 // Gate thresholds.
 const (
 	MinBudgetRemainingPct = 10.0
-	MaxBurnRate           = 2.0
+	// FastBurnRate and SlowBurnRate are the multi-window, multi-burn-rate
+	// thresholds from the Google SRE workbook. The fast pair (1h and 5m) at
+	// 14.4x spends 2% of a 30-day budget in an hour; the slow pair (6h and
+	// 30m) at 6x spends 5% in six hours. A pair blocks only when both of its
+	// windows are over: the long window shows the burn is significant, the
+	// short one that it is still happening.
+	FastBurnRate = 14.4
+	SlowBurnRate = 6.0
 	// MinRequests is the fewest requests a window must hold for its error
 	// rate, latency or budget to be judged. Below it a single request decides
 	// the answer, so the signal counts as not measured and the gate is
@@ -32,9 +39,18 @@ const (
 
 // Window lengths in seconds, for turning a request rate into a count.
 const (
-	SignalWindowSeconds   = 5 * 60
-	BurnRateWindowSeconds = 60 * 60
+	SignalWindowSeconds = 5 * 60
 )
+
+// BurnWindow is one window of the multi-window burn-rate checks.
+type BurnWindow struct {
+	Name    string
+	Seconds float64
+}
+
+// BurnWindows are the windows the burn rate is measured over: the short and
+// long window of the fast and the slow pair.
+var BurnWindows = []BurnWindow{{"5m", 5 * 60}, {"30m", 30 * 60}, {"1h", 60 * 60}, {"6h", 6 * 60 * 60}}
 
 // EnoughRequests reports whether a window with this many requests can be
 // judged.
@@ -43,10 +59,11 @@ func EnoughRequests(count float64) bool { return count >= MinRequests }
 // Signals are measured values. A nil field was not measurable (no data, no
 // traffic, or a NaN result) and makes the gate unknown.
 type Signals struct {
-	RequestRatePerSec       *float64
-	ErrorRatePct            *float64
-	LatencyP95Ms            *float64
-	BurnRate                *float64
+	RequestRatePerSec *float64
+	ErrorRatePct      *float64
+	LatencyP95Ms      *float64
+	// BurnRates is the burn rate over each of BurnWindows, by name.
+	BurnRates               map[string]*float64
 	AvailabilityPct         *float64
 	ErrorBudgetRemainingPct *float64
 	// Missing explains each nil field, for example "no requests in the last 5m".
@@ -70,7 +87,8 @@ func Evaluate(service models.Service, signals Signals) models.SLOStatus {
 	status.RequestRatePerSec = signals.RequestRatePerSec
 	status.ErrorRateCurrentPct = signals.ErrorRatePct
 	status.LatencyP95CurrentMs = signals.LatencyP95Ms
-	status.BurnRate = signals.BurnRate
+	status.BurnRate = signals.BurnRates["1h"]
+	status.BurnRates = signals.BurnRates
 	status.AvailabilityCurrent = signals.AvailabilityPct
 	status.ErrorBudgetRemainingPct = signals.ErrorBudgetRemainingPct
 
@@ -82,7 +100,9 @@ func Evaluate(service models.Service, signals Signals) models.SLOStatus {
 	}
 	need(signals.ErrorRatePct, "error rate")
 	need(signals.LatencyP95Ms, "p95 latency")
-	need(signals.BurnRate, "burn rate")
+	for _, w := range BurnWindows {
+		need(signals.BurnRates[w.Name], "burn rate "+w.Name)
+	}
 	need(signals.ErrorBudgetRemainingPct, "error budget")
 	if len(missing) > 0 {
 		status.DeploymentGate = models.GateUnknown
@@ -100,14 +120,23 @@ func Evaluate(service models.Service, signals Signals) models.SLOStatus {
 	case *signals.ErrorRatePct > status.ErrorRateThresholdPct:
 		status.DeploymentGate = models.GateBlocked
 		status.Reason = fmt.Sprintf("error rate %.2f%% over %s exceeds the %.2f%% threshold", *signals.ErrorRatePct, SignalWindow, status.ErrorRateThresholdPct)
-	case *signals.BurnRate >= MaxBurnRate:
+	case burning(signals, "1h", "5m", FastBurnRate):
 		status.DeploymentGate = models.GateBlocked
-		status.Reason = fmt.Sprintf("burn rate %.2fx over %s is at or above %.1fx", *signals.BurnRate, BurnRateWindow, MaxBurnRate)
+		status.Reason = fmt.Sprintf("fast burn: burn rate %.1fx over 1h and %.1fx over 5m are both at or above %.1fx",
+			*signals.BurnRates["1h"], *signals.BurnRates["5m"], FastBurnRate)
+	case burning(signals, "6h", "30m", SlowBurnRate):
+		status.DeploymentGate = models.GateBlocked
+		status.Reason = fmt.Sprintf("slow burn: burn rate %.1fx over 6h and %.1fx over 30m are both at or above %.1fx",
+			*signals.BurnRates["6h"], *signals.BurnRates["30m"], SlowBurnRate)
 	default:
 		status.DeploymentGate = models.GateAllowed
 		status.Reason = fmt.Sprintf("measured SLOs are within targets and %.1f%% of the %s error budget remains", *signals.ErrorBudgetRemainingPct, BudgetWindow)
 	}
 	return status
+}
+
+func burning(s Signals, long, short string, threshold float64) bool {
+	return *s.BurnRates[long] >= threshold && *s.BurnRates[short] >= threshold
 }
 
 func base(service models.Service, source string) models.SLOStatus {

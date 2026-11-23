@@ -30,8 +30,12 @@ func prometheusStub(t *testing.T, values map[string]string) string {
 			key = "p95"
 		case strings.Contains(q, "[5m]"):
 			key = map[bool]string{true: "err5m", false: "total5m"}[errs]
+		case strings.Contains(q, "[30m]"):
+			key = map[bool]string{true: "err30m", false: "total30m"}[errs]
 		case strings.Contains(q, "[1h]"):
 			key = map[bool]string{true: "err1h", false: "total1h"}[errs]
+		case strings.Contains(q, "[6h]"):
+			key = map[bool]string{true: "err6h", false: "total6h"}[errs]
 		case strings.Contains(q, "[30d]"):
 			key = map[bool]string{true: "err30d", false: "total30d"}[errs]
 		}
@@ -50,7 +54,9 @@ func prometheusStub(t *testing.T, values map[string]string) string {
 func healthyPrometheus() map[string]string {
 	return map[string]string{
 		"total5m": "50", "err5m": "0.05", "p95": "120",
+		"total30m": "50", "err30m": "0.01",
 		"total1h": "50", "err1h": "0.01",
+		"total6h": "50", "err6h": "0.01",
 		"total30d": "1000000", "err30d": "200",
 	}
 }

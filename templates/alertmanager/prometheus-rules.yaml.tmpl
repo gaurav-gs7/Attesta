@@ -8,22 +8,55 @@ metadata:
     attesta.dev/team: {{ .Service.Team }}
 spec:
   groups:
-    - name: {{ .Service.Name }}.burnrate
+    # Error ratio over each window of the multi-window burn-rate alerts.
+    # Burn rate = error ratio / (1 - SLO target); the error budget here is
+    # {{ .Service.SLOTarget }}% over 30 days.
+    - name: {{ .Service.Name }}.error-ratio
       rules:
-        - alert: {{ .PrometheusName }}_fast_burn_rate
+{{- range $window := .BurnWindows }}
+        - record: attesta:http_error_ratio:rate{{ $window }}
           expr: |
-            (
-              sum(rate(http_requests_total{service="{{ .Service.Name }}",status=~"5.."}[5m]))
-              /
-              sum(rate(http_requests_total{service="{{ .Service.Name }}"}[5m]))
-            ) > (14 * (1 - {{ .Service.SLOTarget }} / 100))
-          for: 5m
+            sum(rate(http_requests_total{service="{{ $.Service.Name }}",status=~"5.."}[{{ $window }}]))
+            /
+            sum(rate(http_requests_total{service="{{ $.Service.Name }}"}[{{ $window }}]))
+          labels:
+            service: {{ $.Service.Name }}
+{{- end }}
+    # Multi-window, multi-burn-rate alerts (Google SRE workbook, chapter 5).
+    # Each fires only when both its long and short window are over: the long
+    # window shows the burn is significant, the short one that it is still
+    # happening, so an alert clears soon after the burn stops.
+    - name: {{ .Service.Name }}.burn-rate
+      rules:
+        # 14.4x for 1h spends 2% of the 30-day budget.
+        - alert: {{ .PrometheusName }}_fast_burn
+          expr: |
+            attesta:http_error_ratio:rate1h{service="{{ .Service.Name }}"} > (14.4 * (1 - {{ .Service.SLOTarget }} / 100))
+            and
+            attesta:http_error_ratio:rate5m{service="{{ .Service.Name }}"} > (14.4 * (1 - {{ .Service.SLOTarget }} / 100))
+          for: 2m
           labels:
             severity: page
             team: {{ .Service.Team }}
             service: {{ .Service.Name }}
           annotations:
-            summary: "{{ .Service.Name }} is burning error budget quickly"
+            summary: "{{ .Service.Name }} is burning its error budget at 14.4x or more (1h and 5m)"
+{{- if .Service.RunbookURL }}
+            runbook_url: "{{ .Service.RunbookURL }}"
+{{- end }}
+        # 6x for 6h spends 5% of the 30-day budget.
+        - alert: {{ .PrometheusName }}_slow_burn
+          expr: |
+            attesta:http_error_ratio:rate6h{service="{{ .Service.Name }}"} > (6 * (1 - {{ .Service.SLOTarget }} / 100))
+            and
+            attesta:http_error_ratio:rate30m{service="{{ .Service.Name }}"} > (6 * (1 - {{ .Service.SLOTarget }} / 100))
+          for: 15m
+          labels:
+            severity: ticket
+            team: {{ .Service.Team }}
+            service: {{ .Service.Name }}
+          annotations:
+            summary: "{{ .Service.Name }} is burning its error budget at 6x or more (6h and 30m)"
 {{- if .Service.RunbookURL }}
             runbook_url: "{{ .Service.RunbookURL }}"
 {{- end }}

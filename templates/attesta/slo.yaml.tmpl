@@ -5,19 +5,31 @@ metadata:
   namespace: {{ .Service.Namespace }}
 spec:
   serviceRef: {{ .Service.Name }}
+  # The availability objective and its error budget are measured over this
+  # window. Prometheus must keep at least this much history.
   window: 30d
   objectives:
     - name: availability
       target: {{ printf "%.2f" .Service.SLOTarget }}
       unit: percent
+      # Measured over the whole window, from counts, not from a recent rate.
       prometheusQuery: |
-        sum(rate(http_requests_total{service="{{ .Service.Name }}",status!~"5.."}[5m]))
-        /
-        sum(rate(http_requests_total{service="{{ .Service.Name }}"}[5m]))
+        100 * (1 -
+          sum(increase(http_requests_total{service="{{ .Service.Name }}",status=~"5.."}[30d]))
+          /
+          sum(increase(http_requests_total{service="{{ .Service.Name }}"}[30d]))
+        )
     - name: latency-p95
       target: {{ .Service.SLOLatencyP95Ms }}
       unit: ms
+      # A latency percentile is judged on recent traffic, not the window.
+      evaluationWindow: 5m
       prometheusQuery: |
         histogram_quantile(0.95,
           sum(rate(http_request_duration_seconds_bucket{service="{{ .Service.Name }}"}[5m])) by (le)
         ) * 1000
+  # Burn-rate alerting pairs (long window, short window, threshold), as in
+  # the generated PrometheusRule and the API's deployment gate.
+  burnRateAlerts:
+    - {longWindow: 1h, shortWindow: 5m, burnRate: 14.4, severity: page}
+    - {longWindow: 6h, shortWindow: 30m, burnRate: 6, severity: ticket}

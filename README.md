@@ -11,7 +11,7 @@ Every value Attesta reports is either measured, recorded, or explicitly marked a
 | Area | What is real | What is not (yet) |
 | --- | --- | --- |
 | Rollout guard controller | Watches Deployments, writes status and Events, and restores the last healthy template when Kubernetes reports `ProgressDeadlineExceeded` or when the new revision fails `consecutiveFailures` metric checks in a row (error rate, p95 latency, availability from Prometheus, scoped to that revision). Inconclusive data never decides. Rolls back only Deployments that name the guard in `attesta.io/rollback-guards`, and never fights a GitOps tool that re-applies the bad version. Leader election, metrics, probes. | No traffic shifting, so no true canary: `spec.steps` is not used. |
-| SLO gate | Error rate, p95, burn rate and 30-day error budget from Prometheus. Unknown data blocks `POST /rollouts`. | Single burn-rate window (1h); no multi-window alerting logic in the gate. |
+| SLO gate | Error rate, p95, multi-window burn rates (1h+5m, 6h+30m) and the 30-day error budget from Prometheus. Unknown data blocks `POST /rollouts`. | Thresholds are global constants, not per service. |
 | Health gate | Applies thresholds to the metrics in the request. | It does not measure anything: inputs are caller-supplied, and thresholds are fixed at 300ms p99 and 1%. |
 | Rollback endpoints | Record a rollback request. | They do not change the cluster. Your deployment tooling, or the controller, must act. |
 | Incidents | Alertmanager webhook (v4) with fingerprint dedupe and resolve; timeline from recorded events only. | Root cause is never inferred; the postmortem draft leaves it as TODO. |
@@ -86,10 +86,12 @@ Attesta reads `http_requests_total` and `http_request_duration_seconds` for the 
 | Signal | Window |
 | --- | --- |
 | Error rate (5xx share) and p95 latency | 5m |
-| Burn rate | 1h |
-| Availability and remaining error budget | 30d |
+| Burn rate | 5m, 30m, 1h and 6h |
+| Availability and remaining error budget | 30d, from request counts |
 
-The deployment gate is `allowed`, `blocked` or `unknown`. It is `unknown`, and `POST /rollouts` returns 409, whenever a signal cannot be measured: no Prometheus configured, a failed query, no series for the service, a `NaN` result, or fewer than 20 requests in a signal's window (5m for error rate and p95, 1h for burn rate, 30d for the budget), where one request would decide the answer. Measured values are omitted from the response rather than reported as zero. Prometheus must retain at least 30 days for the budget to be computed.
+The gate blocks when the error budget remaining is under 10%, when p95 or the error rate is over the service's objective, or when a burn-rate pair is over its threshold on both windows: 14.4x over 1h and 5m (2% of the budget in an hour), or 6x over 6h and 30m (5% in six hours). Requiring both windows means a burn that has already stopped does not block a fix. The generated `PrometheusRule` records the error ratio over the same four windows and alerts on the same pairs.
+
+The deployment gate is `allowed`, `blocked` or `unknown`. It is `unknown`, and `POST /rollouts` returns 409, whenever a signal cannot be measured: no Prometheus configured, a failed query, no series for the service, a `NaN` result, or fewer than 20 requests in a signal's window (5m for error rate and p95, each burn-rate window, 30d for the budget), where one request would decide the answer. Measured values are omitted from the response rather than reported as zero. Prometheus must retain at least 30 days for the budget to be computed.
 
 ## Incidents
 

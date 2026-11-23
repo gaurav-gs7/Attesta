@@ -322,3 +322,47 @@ func TestGeneratedDeploymentConsentsOnlyWhenRollbackIsOn(t *testing.T) {
 		}
 	}
 }
+
+// Audit S-6: burn-rate alerting used one 5-minute window. The generated
+// rules record the error ratio over each window and alert on the two
+// multi-window pairs.
+func TestGeneratedBurnRateRulesAreMultiWindow(t *testing.T) {
+	raw := read(t, generate(t, testService("go")), "observability/prometheus-rules.yaml")
+	var rule struct {
+		Spec struct {
+			Groups []struct {
+				Rules []struct {
+					Record string `json:"record"`
+					Alert  string `json:"alert"`
+					Expr   string `json:"expr"`
+				} `json:"rules"`
+			} `json:"groups"`
+		} `json:"spec"`
+	}
+	if err := yaml.Unmarshal([]byte(raw), &rule); err != nil {
+		t.Fatalf("prometheus-rules.yaml does not parse: %v\n%s", err, raw)
+	}
+	records, alerts := map[string]bool{}, map[string]string{}
+	for _, g := range rule.Spec.Groups {
+		for _, r := range g.Rules {
+			if r.Record != "" {
+				records[r.Record] = true
+			}
+			if r.Alert != "" {
+				alerts[r.Alert] = r.Expr
+			}
+		}
+	}
+	for _, w := range []string{"5m", "30m", "1h", "6h"} {
+		if !records["attesta:http_error_ratio:rate"+w] {
+			t.Errorf("no recording rule for the %s error ratio", w)
+		}
+	}
+	fast, slow := alerts["payments_api_fast_burn"], alerts["payments_api_slow_burn"]
+	if !strings.Contains(fast, "rate1h") || !strings.Contains(fast, "rate5m") || !strings.Contains(fast, "14.4 * (1 - 99.9 / 100)") {
+		t.Errorf("fast burn alert is not the 1h+5m pair at 14.4x: %q", fast)
+	}
+	if !strings.Contains(slow, "rate6h") || !strings.Contains(slow, "rate30m") || !strings.Contains(slow, "6 * (1 - 99.9 / 100)") {
+		t.Errorf("slow burn alert is not the 6h+30m pair at 6x: %q", slow)
+	}
+}

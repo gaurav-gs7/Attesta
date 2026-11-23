@@ -39,6 +39,14 @@ func classify(query string) string {
 		return "err5m"
 	case strings.Contains(query, "[5m]"):
 		return "total5m"
+	case strings.Contains(query, "[30m]") && errs:
+		return "err30m"
+	case strings.Contains(query, "[30m]"):
+		return "total30m"
+	case strings.Contains(query, "[6h]") && errs:
+		return "err6h"
+	case strings.Contains(query, "[6h]"):
+		return "total6h"
 	case strings.Contains(query, "[1h]") && errs:
 		return "err1h"
 	case strings.Contains(query, "[1h]"):
@@ -54,8 +62,10 @@ func classify(query string) string {
 func full() map[string]string {
 	return map[string]string{
 		"total5m": "100", "err5m": "2",
-		"p95":     "250",
+		"p95":      "250",
+		"total30m": "100", "err30m": "0.05",
 		"total1h": "100", "err1h": "0.05",
+		"total6h": "100", "err6h": "0.05",
 		"total30d": "1000000", "err30d": "400",
 	}
 }
@@ -78,7 +88,12 @@ func TestSignalsComputesEachSignalOverItsWindow(t *testing.T) {
 	approx(t, "request rate", signals.RequestRatePerSec, 100)
 	approx(t, "error rate (5m)", signals.ErrorRatePct, 2)
 	approx(t, "p95", signals.LatencyP95Ms, 250)
-	approx(t, "burn rate (1h)", signals.BurnRate, 0.5) // 0.05% errors / 0.1% allowed
+	approx(t, "burn rate (1h)", signals.BurnRates["1h"], 0.5) // 0.05% errors / 0.1% allowed
+	for _, w := range []string{"5m", "30m", "6h"} {
+		if signals.BurnRates[w] == nil {
+			t.Fatalf("burn rate %s not measured", w)
+		}
+	}
 	approx(t, "availability (30d)", signals.AvailabilityPct, 99.96)
 	approx(t, "budget remaining (30d)", signals.ErrorBudgetRemainingPct, 60) // 0.04% of 0.1% spent
 	if len(signals.Missing) != 0 {
@@ -105,11 +120,11 @@ func TestSignalsWithNoDataAreNotMeasured(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if signals.ErrorRatePct != nil || signals.LatencyP95Ms != nil || signals.BurnRate != nil ||
+	if signals.ErrorRatePct != nil || signals.LatencyP95Ms != nil || signals.BurnRates["1h"] != nil ||
 		signals.AvailabilityPct != nil || signals.ErrorBudgetRemainingPct != nil {
 		t.Fatalf("no data must leave every signal unmeasured, got %+v", signals)
 	}
-	if len(signals.Missing) != 4 {
+	if len(signals.Missing) != 7 { // error rate, p95, four burn windows, budget
 		t.Fatalf("expected a reason for each missing signal, got %v", signals.Missing)
 	}
 }
@@ -203,7 +218,7 @@ func TestSignalsBelowMinimumVolumeAreNotMeasured(t *testing.T) {
 	if signals.ErrorRatePct != nil || signals.LatencyP95Ms != nil || signals.ErrorBudgetRemainingPct != nil {
 		t.Fatalf("low-volume windows were judged: %+v", signals)
 	}
-	if signals.RequestRatePerSec == nil || signals.BurnRate == nil {
+	if signals.RequestRatePerSec == nil || signals.BurnRates["1h"] == nil {
 		t.Fatalf("the request rate and the 1h burn rate (180 requests) are measurable: %+v", signals)
 	}
 	if got := strings.Join(signals.Missing, "; "); !strings.Contains(got, "fewer than 20") {

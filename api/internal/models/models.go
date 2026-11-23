@@ -185,12 +185,16 @@ type SLOStatus struct {
 	BurnRateWindow string `json:"burnRateWindow,omitempty"`
 	BudgetWindow   string `json:"budgetWindow,omitempty"`
 
-	RequestRatePerSec       *float64 `json:"requestRatePerSec,omitempty"`
-	ErrorRateCurrentPct     *float64 `json:"errorRateCurrentPct,omitempty"`
-	LatencyP95CurrentMs     *float64 `json:"latencyP95CurrentMs,omitempty"`
-	BurnRate                *float64 `json:"burnRate,omitempty"`
-	AvailabilityCurrent     *float64 `json:"availabilityCurrent,omitempty"`
-	ErrorBudgetRemainingPct *float64 `json:"errorBudgetRemainingPct,omitempty"`
+	RequestRatePerSec   *float64 `json:"requestRatePerSec,omitempty"`
+	ErrorRateCurrentPct *float64 `json:"errorRateCurrentPct,omitempty"`
+	LatencyP95CurrentMs *float64 `json:"latencyP95CurrentMs,omitempty"`
+	BurnRate            *float64 `json:"burnRate,omitempty"`
+	// BurnRates holds the burn rate over each window of the multi-window
+	// checks, keyed by window ("5m", "30m", "1h", "6h"). BurnRate is the 1h
+	// value.
+	BurnRates               map[string]*float64 `json:"burnRates,omitempty"`
+	AvailabilityCurrent     *float64            `json:"availabilityCurrent,omitempty"`
+	ErrorBudgetRemainingPct *float64            `json:"errorBudgetRemainingPct,omitempty"`
 
 	DeploymentGate string    `json:"deploymentGate"`
 	Reason         string    `json:"reason"`

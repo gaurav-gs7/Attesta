@@ -92,26 +92,30 @@ func (c *Client) Signals(ctx context.Context, service models.Service) (slo.Signa
 
 	allowedBadPct := 100 - service.SLOTarget
 	if allowedBadPct <= 0 {
-		out.Missing = append(out.Missing, "burn rate: an SLO target of 100% leaves no error budget", "error budget: an SLO target of 100% leaves no error budget")
+		out.Missing = append(out.Missing, "burn rate 5m: an SLO target of 100% leaves no error budget", "error budget: an SLO target of 100% leaves no error budget")
 		return out, nil
 	}
 
-	// Burn rate over the burn-rate window.
-	total1h, ok, err := rate(sel, slo.BurnRateWindow)
-	if err != nil {
-		return slo.Signals{}, fmt.Errorf("query burn-rate request rate: %w", err)
-	}
-	if !ok || !slo.EnoughRequests(total1h*slo.BurnRateWindowSeconds) {
-		out.Missing = append(out.Missing, fmt.Sprintf("burn rate: fewer than %d requests in the last %s", slo.MinRequests, slo.BurnRateWindow))
-	} else {
-		errs1h, found, err := rate(errSel, slo.BurnRateWindow)
+	// Burn rate over each window of the multi-window checks, each with its
+	// own volume floor.
+	out.BurnRates = map[string]*float64{}
+	for _, w := range slo.BurnWindows {
+		totalW, ok, err := rate(sel, w.Name)
 		if err != nil {
-			return slo.Signals{}, fmt.Errorf("query burn-rate error rate: %w", err)
+			return slo.Signals{}, fmt.Errorf("query %s request rate: %w", w.Name, err)
+		}
+		if !ok || !slo.EnoughRequests(totalW*w.Seconds) {
+			out.Missing = append(out.Missing, fmt.Sprintf("burn rate %s: fewer than %d requests in the last %s", w.Name, slo.MinRequests, w.Name))
+			continue
+		}
+		errsW, found, err := rate(errSel, w.Name)
+		if err != nil {
+			return slo.Signals{}, fmt.Errorf("query %s error rate: %w", w.Name, err)
 		}
 		if !found {
-			errs1h = 0
+			errsW = 0
 		}
-		out.BurnRate = ptr((errs1h / total1h * 100) / allowedBadPct)
+		out.BurnRates[w.Name] = ptr((errsW / totalW * 100) / allowedBadPct)
 	}
 
 	// Availability and remaining error budget over the budget window.

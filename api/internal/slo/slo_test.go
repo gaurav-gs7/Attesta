@@ -16,7 +16,7 @@ func healthy() Signals {
 		RequestRatePerSec:       f(25),
 		ErrorRatePct:            f(0.2),
 		LatencyP95Ms:            f(180),
-		BurnRate:                f(0.5),
+		BurnRates:               map[string]*float64{"5m": f(0.5), "30m": f(0.5), "1h": f(0.5), "6h": f(0.5)},
 		AvailabilityPct:         f(99.95),
 		ErrorBudgetRemainingPct: f(60),
 	}
@@ -33,7 +33,11 @@ func TestEvaluateGate(t *testing.T) {
 		{"budget below 10%", func(s *Signals) { s.ErrorBudgetRemainingPct = f(4) }, models.GateBlocked, "error budget"},
 		{"p95 over target", func(s *Signals) { s.LatencyP95Ms = f(450) }, models.GateBlocked, "p95 latency"},
 		{"error rate over threshold", func(s *Signals) { s.ErrorRatePct = f(2.5) }, models.GateBlocked, "error rate"},
-		{"burn rate at limit", func(s *Signals) { s.BurnRate = f(2) }, models.GateBlocked, "burn rate"},
+		{"fast burn on both windows", func(s *Signals) { s.BurnRates["1h"], s.BurnRates["5m"] = f(15), f(20) }, models.GateBlocked, "fast burn"},
+		{"fast burn already over (5m recovered)", func(s *Signals) { s.BurnRates["1h"], s.BurnRates["5m"] = f(15), f(0.2) }, models.GateAllowed, "within targets"},
+		{"slow burn on both windows", func(s *Signals) { s.BurnRates["6h"], s.BurnRates["30m"] = f(7), f(6) }, models.GateBlocked, "slow burn"},
+		{"slow burn only on the short window", func(s *Signals) { s.BurnRates["6h"], s.BurnRates["30m"] = f(1), f(9) }, models.GateAllowed, "within targets"},
+		{"6h burn not measured", func(s *Signals) { delete(s.BurnRates, "6h") }, models.GateUnknown, "burn rate 6h not measured"},
 		{"latency not measured", func(s *Signals) { s.LatencyP95Ms = nil }, models.GateUnknown, "p95 latency not measured"},
 		{"budget not measured", func(s *Signals) { s.ErrorBudgetRemainingPct = nil }, models.GateUnknown, "error budget not measured"},
 		{"explicit missing reason kept", func(s *Signals) {
