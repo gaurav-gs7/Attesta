@@ -132,6 +132,9 @@ type Incident struct {
 	// OpenedBy and ResolvedBy are the callers who opened and resolved it.
 	OpenedBy   string `json:"openedBy,omitempty"`
 	ResolvedBy string `json:"resolvedBy,omitempty"`
+	// Version counts the incident's stored updates. An update must carry
+	// the version it read, so two concurrent updates cannot both apply.
+	Version int `json:"version"`
 }
 
 type AlertSignals struct {

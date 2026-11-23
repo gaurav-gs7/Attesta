@@ -196,11 +196,58 @@ func (s *MemoryStore) ListDeployments(_ context.Context, serviceID string, req p
 	return out, next, nil
 }
 
-func (s *MemoryStore) SaveIncidentRecord(_ context.Context, record models.IncidentRecord) error {
+func (s *MemoryStore) activeDuplicate(record models.IncidentRecord) bool {
+	in := record.Incident
+	if in.Status != "active" || in.Fingerprint == "" {
+		return false
+	}
+	for id, other := range s.incidents {
+		o := other.Incident
+		if id != in.ID && o.ServiceID == in.ServiceID && o.Fingerprint == in.Fingerprint && o.Status == "active" {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneIncident(r models.IncidentRecord) models.IncidentRecord {
+	r.Events = append([]models.IncidentEvent(nil), r.Events...)
+	return r
+}
+
+func (s *MemoryStore) CreateIncident(_ context.Context, record models.IncidentRecord) (models.IncidentRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.incidents[record.Incident.ID] = record
-	return nil
+	if _, exists := s.incidents[record.Incident.ID]; exists || s.activeDuplicate(record) {
+		return models.IncidentRecord{}, fmt.Errorf("%w: %s already has an active incident for this alert", ErrConflict, record.Service.Name)
+	}
+	record.Incident.Version = 1
+	s.incidents[record.Incident.ID] = cloneIncident(record)
+	return record, nil
+}
+
+func (s *MemoryStore) UpdateIncident(_ context.Context, record models.IncidentRecord) (models.IncidentRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	stored, ok := s.incidents[record.Incident.ID]
+	if !ok {
+		return models.IncidentRecord{}, ErrNotFound
+	}
+	if stored.Incident.Version != record.Incident.Version {
+		return models.IncidentRecord{}, fmt.Errorf("%w: incident %s is at version %d, not %d", ErrConflict, record.Incident.ID, stored.Incident.Version, record.Incident.Version)
+	}
+	if s.activeDuplicate(record) {
+		return models.IncidentRecord{}, fmt.Errorf("%w: %s already has an active incident for this alert", ErrConflict, record.Service.Name)
+	}
+	// Events are append-only, as in PostgreSQL.
+	events := append([]models.IncidentEvent(nil), stored.Events...)
+	if len(record.Events) > len(events) {
+		events = append(events, record.Events[len(events):]...)
+	}
+	record.Events = events
+	record.Incident.Version++
+	s.incidents[record.Incident.ID] = cloneIncident(record)
+	return record, nil
 }
 
 func (s *MemoryStore) GetIncidentRecord(_ context.Context, id string) (models.IncidentRecord, error) {
@@ -210,7 +257,7 @@ func (s *MemoryStore) GetIncidentRecord(_ context.Context, id string) (models.In
 	if !ok {
 		return models.IncidentRecord{}, ErrNotFound
 	}
-	return record, nil
+	return cloneIncident(record), nil
 }
 
 func (s *MemoryStore) ListIncidentRecords(_ context.Context, req page.Request) ([]models.IncidentRecord, string, error) {
@@ -218,7 +265,7 @@ func (s *MemoryStore) ListIncidentRecords(_ context.Context, req page.Request) (
 	defer s.mu.RUnlock()
 	records := make([]models.IncidentRecord, 0, len(s.incidents))
 	for _, record := range s.incidents {
-		records = append(records, record)
+		records = append(records, cloneIncident(record))
 	}
 	sort.Slice(records, func(i, j int) bool {
 		a, b := records[i].Incident, records[j].Incident
@@ -238,7 +285,7 @@ func (s *MemoryStore) FindActiveIncident(_ context.Context, service, fingerprint
 		inc := record.Incident
 		if inc.Service == service && inc.Fingerprint == fingerprint && inc.Status == "active" &&
 			(found == nil || inc.CreatedAt.After(found.Incident.CreatedAt)) {
-			r := record
+			r := cloneIncident(record)
 			found = &r
 		}
 	}

@@ -138,7 +138,12 @@ func (s *Server) openIncident(ctx context.Context, service models.Service, in in
 			{
 				Name: "persist-incident-record",
 				Run: func(ctx context.Context) error {
-					return s.store.SaveIncidentRecord(ctx, record)
+					stored, err := s.store.CreateIncident(ctx, record)
+					if errors.Is(err, catalog.ErrConflict) {
+						return workflows.WithCode(err, workflows.CodeConflict)
+					}
+					record = stored
+					return err
 				},
 			},
 		},
@@ -176,15 +181,24 @@ func (s *Server) resolveIncident(w http.ResponseWriter, r *http.Request) {
 	if n := strings.TrimSpace(req.Note); n != "" {
 		note += " Note: " + n
 	}
-	record, run := s.resolve(r.Context(), record, time.Now().UTC(), note)
+	record, run, already := s.resolve(r.Context(), record, time.Now().UTC(), note)
 	if run.State != workflows.StateSucceeded {
 		writeRunFailure(w, r, run)
+		return
+	}
+	if already {
+		writeJSON(w, http.StatusOK, map[string]any{"incident": record, "alreadyResolved": true, "workflow": run})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"incident": record, "workflow": run})
 }
 
-func (s *Server) resolve(ctx context.Context, record models.IncidentRecord, at time.Time, note string) (models.IncidentRecord, models.WorkflowRun) {
+// resolve marks the incident resolved if it is still at the version read.
+// If another request changed it in between and it is now resolved, the
+// stored record is returned with already set; any other change is a
+// conflict.
+func (s *Server) resolve(ctx context.Context, record models.IncidentRecord, at time.Time, note string) (models.IncidentRecord, models.WorkflowRun, bool) {
+	already := false
 	run := s.workflows.Run(ctx, workflows.Spec{
 		Name:    "incident-resolve",
 		Kind:    "attesta.incident.resolve",
@@ -192,20 +206,34 @@ func (s *Server) resolve(ctx context.Context, record models.IncidentRecord, at t
 		Steps: []workflows.Step{{
 			Name: "mark-incident-resolved",
 			Run: func(ctx context.Context) error {
-				record.Incident.Status = "resolved"
-				record.Incident.ResolvedAt = &at
-				record.Incident.ResolutionNote = note
-				record.Incident.ResolvedBy = auth.Actor(ctx)
-				record.Events = append(record.Events, models.IncidentEvent{
+				next := record
+				next.Events = append(append([]models.IncidentEvent(nil), record.Events...), models.IncidentEvent{
 					Timestamp:   at,
 					EventType:   incidents.EventResolved,
 					Description: note,
 				})
-				return s.store.SaveIncidentRecord(ctx, record)
+				next.Incident.Status = "resolved"
+				next.Incident.ResolvedAt = &at
+				next.Incident.ResolutionNote = note
+				next.Incident.ResolvedBy = auth.Actor(ctx)
+				stored, err := s.store.UpdateIncident(ctx, next)
+				if errors.Is(err, catalog.ErrConflict) {
+					current, getErr := s.store.GetIncidentRecord(ctx, record.Incident.ID)
+					if getErr == nil && current.Incident.Status == "resolved" {
+						record, already = current, true
+						return nil
+					}
+					return workflows.WithCode(fmt.Errorf("%w; reload the incident and retry", err), workflows.CodeConflict)
+				}
+				if err != nil {
+					return err
+				}
+				record = stored
+				return nil
 			},
 		}},
 	})
-	return record, run
+	return record, run, already
 }
 
 type alertResult struct {
@@ -288,6 +316,13 @@ func (s *Server) handleAlert(ctx context.Context, alert incidents.AlertmanagerAl
 			in.alertStartsAt = &startsAt
 		}
 		record, run := s.openIncident(ctx, service, in)
+		if run.ErrorCode == workflows.CodeConflict {
+			// A concurrent notification for the same alert opened it first.
+			if active, err := s.findActiveIncident(ctx, service.Name, result.Fingerprint); err == nil && active != nil {
+				result.Action, result.IncidentID = "duplicate", active.Incident.ID
+				return result
+			}
+		}
 		if run.State != workflows.StateSucceeded {
 			result.Action, result.Reason = "failed", run.Error
 			return result
@@ -302,7 +337,7 @@ func (s *Server) handleAlert(ctx context.Context, alert incidents.AlertmanagerAl
 		if !alert.EndsAt.IsZero() {
 			at = alert.EndsAt.UTC()
 		}
-		_, run := s.resolve(ctx, *active, at, fmt.Sprintf("Alertmanager reported %s as resolved.", active.Incident.AlertName))
+		_, run, _ := s.resolve(ctx, *active, at, fmt.Sprintf("Alertmanager reported %s as resolved.", active.Incident.AlertName))
 		if run.State != workflows.StateSucceeded {
 			result.Action, result.Reason = "failed", run.Error
 			return result

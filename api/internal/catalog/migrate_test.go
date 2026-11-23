@@ -158,7 +158,8 @@ func TestSchemaHasNoUnusedTables(t *testing.T) {
 			t.Errorf("table %s is not referenced by the store", table)
 		}
 	}
-	for _, dropped := range []string{"incidents", "slo_snapshots", "rollout_events", "incident_events", "readiness_checks"} {
+	// incidents and incident_events were re-created, in use, by D-5.
+	for _, dropped := range []string{"slo_snapshots", "rollout_events", "readiness_checks", "incident_records"} {
 		for _, table := range tables {
 			if table == dropped {
 				t.Errorf("unused table %s still exists", dropped)

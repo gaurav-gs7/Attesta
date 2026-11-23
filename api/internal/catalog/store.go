@@ -40,7 +40,15 @@ type Store interface {
 	// first, and the cursor of the next page ("" at the end).
 	ListDeployments(context.Context, string, page.Request) ([]models.Deployment, string, error)
 	workflows.Store
-	SaveIncidentRecord(context.Context, models.IncidentRecord) error
+	// CreateIncident stores a new incident at version 1. A second active
+	// incident for the same service and non-empty alert fingerprint is
+	// ErrConflict.
+	CreateIncident(context.Context, models.IncidentRecord) (models.IncidentRecord, error)
+	// UpdateIncident stores record if the stored incident is still at
+	// record.Incident.Version, appends events beyond those stored, and
+	// returns the record at the next version. ErrConflict if the incident
+	// changed since it was read, ErrNotFound if it does not exist.
+	UpdateIncident(context.Context, models.IncidentRecord) (models.IncidentRecord, error)
 	GetIncidentRecord(context.Context, string) (models.IncidentRecord, error)
 	ListIncidentRecords(context.Context, page.Request) ([]models.IncidentRecord, string, error)
 	// FindActiveIncident returns the active incident of a service with the

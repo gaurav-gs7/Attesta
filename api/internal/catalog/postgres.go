@@ -809,146 +809,288 @@ func (s *PostgresStore) loadWorkflowRuns(ctx context.Context, query string, args
 	return runs, eventRows.Err()
 }
 
-func (s *PostgresStore) SaveIncidentRecord(ctx context.Context, record models.IncidentRecord) error {
-	incidentJSON, err := json.Marshal(record.Incident)
-	if err != nil {
-		return err
+// incidentColumns selects an incident joined with its service, in the order
+// scanIncident reads them.
+const incidentColumns = `
+	i.id, i.service_id, s.name, i.severity, i.title, i.status, i.alert_name, i.source,
+	i.fingerprint, i.alert_starts_at, i.reported_error_rate_pct, i.reported_latency_p95_ms,
+	i.created_at, i.resolved_at, i.resolution_note, i.opened_by, i.resolved_by, i.signals, i.version,
+	s.id, s.name, s.team, s.owner, s.tier, s.language, s.repo_url, s.repository, s.pager,
+	s.runbook_url, s.dashboard_url, s.dependencies, s.namespace, s.environment,
+	s.slo_target, s.slo_latency_p95_ms, s.slo_error_rate, s.deployment_strategy,
+	s.rollback_on_failure, s.created_at, s.updated_at`
+
+func scanIncident(scanner interface{ Scan(...any) error }) (models.IncidentRecord, error) {
+	var (
+		r                   models.IncidentRecord
+		in                  = &r.Incident
+		svc                 = &r.Service
+		alertStarts, solved sql.NullTime
+		errRate, p95        sql.NullFloat64
+		signals             []byte
+		deps                []string
+	)
+	if err := scanner.Scan(&in.ID, &in.ServiceID, &in.Service, &in.Severity, &in.Title, &in.Status,
+		&in.AlertName, &in.Source, &in.Fingerprint, &alertStarts, &errRate, &p95,
+		&in.CreatedAt, &solved, &in.ResolutionNote, &in.OpenedBy, &in.ResolvedBy, &signals, &in.Version,
+		&svc.ID, &svc.Name, &svc.Team, &svc.Owner, &svc.Tier, &svc.Language, &svc.RepoURL, &svc.Repository,
+		&svc.Pager, &svc.RunbookURL, &svc.DashboardURL, arrayScanner(&deps), &svc.Namespace, &svc.Environment,
+		&svc.SLOTarget, &svc.SLOLatencyP95Ms, &svc.SLOErrorRate, &svc.DeploymentStrategy,
+		&svc.RollbackOnFailure, &svc.CreatedAt, &svc.UpdatedAt); err != nil {
+		return models.IncidentRecord{}, err
 	}
-	serviceJSON, err := json.Marshal(record.Service)
-	if err != nil {
-		return err
+	svc.Dependencies = nonEmpty(deps)
+	if alertStarts.Valid {
+		in.AlertStartsAt = &alertStarts.Time
 	}
-	signalsJSON, err := json.Marshal(record.Signals)
-	if err != nil {
-		return err
+	if solved.Valid {
+		in.ResolvedAt = &solved.Time
 	}
-	eventsJSON, err := json.Marshal(record.Events)
-	if err != nil {
-		return err
+	if errRate.Valid || p95.Valid {
+		in.AlertReported = &models.AlertSignals{}
+		if errRate.Valid {
+			in.AlertReported.ErrorRatePct = &errRate.Float64
+		}
+		if p95.Valid {
+			in.AlertReported.LatencyP95Ms = &p95.Float64
+		}
 	}
+	if err := json.Unmarshal(signals, &r.Signals); err != nil {
+		return models.IncidentRecord{}, fmt.Errorf("incident %s signals: %w", in.ID, err)
+	}
+	return r, nil
+}
+
+// incidentArgs are $1..$17 of the incident insert; the update omits
+// created_at ($12).
+func incidentArgs(r models.IncidentRecord) ([]any, error) {
+	in := r.Incident
+	signals, err := json.Marshal(r.Signals)
+	if err != nil {
+		return nil, err
+	}
+	var errRate, p95 *float64
+	if in.AlertReported != nil {
+		errRate, p95 = in.AlertReported.ErrorRatePct, in.AlertReported.LatencyP95Ms
+	}
+	return []any{in.ID, in.ServiceID, in.Severity, in.Title, in.Status, in.AlertName, in.Source,
+		in.Fingerprint, in.AlertStartsAt, errRate, p95, in.CreatedAt, in.ResolvedAt,
+		in.ResolutionNote, in.OpenedBy, in.ResolvedBy, signals}, nil
+}
+
+// eventArrays returns events from index from on as parallel arrays for
+// unnest, and the seq of the first one.
+func eventArrays(events []models.IncidentEvent, from int) (at []time.Time, kinds, descriptions []string) {
+	at, kinds, descriptions = []time.Time{}, []string{}, []string{}
+	for _, e := range events[min(from, len(events)):] {
+		at = append(at, e.Timestamp)
+		kinds = append(kinds, e.EventType)
+		descriptions = append(descriptions, e.Description)
+	}
+	return at, kinds, descriptions
+}
+
+// CreateIncident stores a new incident and its timeline at version 1, in
+// one statement. A second active incident for the same service and alert
+// fingerprint is ErrConflict.
+func (s *PostgresStore) CreateIncident(ctx context.Context, record models.IncidentRecord) (models.IncidentRecord, error) {
+	roundIncidentTimes(&record)
+	args, err := incidentArgs(record)
+	if err != nil {
+		return models.IncidentRecord{}, err
+	}
+	at, kinds, descriptions := eventArrays(record.Events, 0)
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO incident_records (
-			id, service_id, service_name, incident, service, signals, events, created_at, updated_at
+		WITH inserted AS (
+			INSERT INTO incidents (
+				id, service_id, severity, title, status, alert_name, source, fingerprint,
+				alert_starts_at, reported_error_rate_pct, reported_latency_p95_ms,
+				created_at, resolved_at, resolution_note, opened_by, resolved_by, signals
+			)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+			RETURNING id
 		)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now())
-		ON CONFLICT (id) DO UPDATE SET
-			service_id = EXCLUDED.service_id,
-			service_name = EXCLUDED.service_name,
-			incident = EXCLUDED.incident,
-			service = EXCLUDED.service,
-			signals = EXCLUDED.signals,
-			events = EXCLUDED.events,
-			updated_at = now()
-	`, record.Incident.ID, record.Service.ID, record.Service.Name, incidentJSON, serviceJSON, signalsJSON,
-		eventsJSON, record.Incident.CreatedAt)
-	return err
+		INSERT INTO incident_events (incident_id, seq, at, event_type, description)
+		SELECT inserted.id, e.n, e.at, e.kind, e.description
+		FROM inserted, unnest($18::timestamptz[], $19::text[], $20::text[]) WITH ORDINALITY AS e(at, kind, description, n)
+	`, append(args, at, kinds, descriptions)...)
+	if isUniqueViolation(err) {
+		return models.IncidentRecord{}, fmt.Errorf("%w: %s already has an active incident for this alert", ErrConflict, record.Service.Name)
+	}
+	if err != nil {
+		return models.IncidentRecord{}, err
+	}
+	record.Incident.Version = 1
+	return record, nil
+}
+
+// UpdateIncident stores record over the incident if it is still at
+// record.Incident.Version, appends the events beyond those already stored,
+// and returns the record at its new version. Stored events are never
+// rewritten. A changed or missing incident is ErrConflict or ErrNotFound.
+func (s *PostgresStore) UpdateIncident(ctx context.Context, record models.IncidentRecord) (models.IncidentRecord, error) {
+	roundIncidentTimes(&record)
+	args, err := incidentArgs(record)
+	if err != nil {
+		return models.IncidentRecord{}, err
+	}
+	at, kinds, descriptions := eventArrays(record.Events, 0)
+	var updated bool
+	err = s.db.QueryRowContext(ctx, `
+		WITH updated AS (
+			UPDATE incidents SET
+				severity = $3, title = $4, status = $5, alert_name = $6, source = $7, fingerprint = $8,
+				alert_starts_at = $9, reported_error_rate_pct = $10, reported_latency_p95_ms = $11,
+				resolved_at = $12, resolution_note = $13, opened_by = $14, resolved_by = $15, signals = $16,
+				version = version + 1, updated_at = now()
+			WHERE id = $1 AND service_id = $2 AND version = $17
+			RETURNING id
+		), appended AS (
+			INSERT INTO incident_events (incident_id, seq, at, event_type, description)
+			SELECT updated.id, e.n, e.at, e.kind, e.description
+			FROM updated, unnest($18::timestamptz[], $19::text[], $20::text[]) WITH ORDINALITY AS e(at, kind, description, n)
+			ON CONFLICT (incident_id, seq) DO NOTHING
+		)
+		SELECT EXISTS (SELECT 1 FROM updated)
+	`, append(append(args[:11:11], args[12:]...), record.Incident.Version, at, kinds, descriptions)...).Scan(&updated)
+	if isUniqueViolation(err) {
+		return models.IncidentRecord{}, fmt.Errorf("%w: %s already has an active incident for this alert", ErrConflict, record.Service.Name)
+	}
+	if err != nil {
+		return models.IncidentRecord{}, err
+	}
+	if !updated {
+		var version int
+		err := s.db.QueryRowContext(ctx, `SELECT version FROM incidents WHERE id = $1`, record.Incident.ID).Scan(&version)
+		if errors.Is(err, sql.ErrNoRows) {
+			return models.IncidentRecord{}, ErrNotFound
+		}
+		if err != nil {
+			return models.IncidentRecord{}, err
+		}
+		return models.IncidentRecord{}, fmt.Errorf("%w: incident %s is at version %d, not %d", ErrConflict, record.Incident.ID, version, record.Incident.Version)
+	}
+	record.Incident.Version++
+	return record, nil
+}
+
+// roundIncidentTimes rounds the record's times to the microsecond PostgreSQL
+// stores, so the record a write returns equals the one a read returns.
+func roundIncidentTimes(r *models.IncidentRecord) {
+	round := func(t *time.Time) {
+		if t != nil {
+			*t = t.Truncate(time.Microsecond)
+		}
+	}
+	round(&r.Incident.CreatedAt)
+	round(r.Incident.AlertStartsAt)
+	round(r.Incident.ResolvedAt)
+	for i := range r.Events {
+		round(&r.Events[i].Timestamp)
+	}
+}
+
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
 
 func (s *PostgresStore) GetIncidentRecord(ctx context.Context, id string) (models.IncidentRecord, error) {
-	record, err := s.loadIncidentRecord(ctx, `
-		SELECT incident, service, signals, events
-		FROM incident_records
-		WHERE id = $1
-	`, id)
-	if errors.Is(err, sql.ErrNoRows) {
+	records, err := s.loadIncidents(ctx, `SELECT `+incidentColumns+`
+		FROM incidents i JOIN services s ON s.id = i.service_id
+		WHERE i.id = $1`, id)
+	if err != nil {
+		return models.IncidentRecord{}, err
+	}
+	if len(records) == 0 {
 		return models.IncidentRecord{}, ErrNotFound
 	}
-	return record, err
+	return records[0], nil
 }
 
 func (s *PostgresStore) ListIncidentRecords(ctx context.Context, req page.Request) ([]models.IncidentRecord, string, error) {
 	after, afterID, since := keysetArgs(req)
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT incident, service, signals, events, created_at
-		FROM incident_records
-		WHERE ($1::timestamptz IS NULL OR (created_at, id) < ($1, $2))
-		  AND ($3::timestamptz IS NULL OR created_at >= $3)
-		ORDER BY created_at DESC, id DESC
-		LIMIT $4
-	`, after, afterID, since, req.Size()+1)
+	records, err := s.loadIncidents(ctx, `SELECT `+incidentColumns+`
+		FROM incidents i JOIN services s ON s.id = i.service_id
+		WHERE ($1::timestamptz IS NULL OR (i.created_at, i.id) < ($1, $2))
+		  AND ($3::timestamptz IS NULL OR i.created_at >= $3)
+		ORDER BY i.created_at DESC, i.id DESC
+		LIMIT $4`, after, afterID, since, req.Size()+1)
 	if err != nil {
 		return nil, "", err
 	}
-	defer func() { _ = rows.Close() }()
-
-	// The cursor uses the stored created_at, which PostgreSQL rounds to
-	// microseconds, not the nanosecond time inside the incident JSON.
-	type row struct {
-		record  models.IncidentRecord
-		created time.Time
-	}
-	var page []row
-	for rows.Next() {
-		var r row
-		var incidentJSON, serviceJSON, signalsJSON, eventsJSON []byte
-		if err := rows.Scan(&incidentJSON, &serviceJSON, &signalsJSON, &eventsJSON, &r.created); err != nil {
-			return nil, "", err
-		}
-		record, err := decodeIncidentRecord(incidentJSON, serviceJSON, signalsJSON, eventsJSON)
-		if err != nil {
-			return nil, "", err
-		}
-		r.record = record
-		page = append(page, r)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, "", err
-	}
-	page, next := trimPage(page, req, func(r row) (time.Time, string) { return r.created, r.record.Incident.ID })
-	records := make([]models.IncidentRecord, len(page))
-	for i, r := range page {
-		records[i] = r.record
-	}
+	records, next := trimPage(records, req, func(r models.IncidentRecord) (time.Time, string) {
+		return r.Incident.CreatedAt, r.Incident.ID
+	})
 	return records, next, nil
 }
 
 func (s *PostgresStore) FindActiveIncident(ctx context.Context, service, fingerprint string) (models.IncidentRecord, error) {
-	record, err := s.loadIncidentRecord(ctx, `
-		SELECT incident, service, signals, events
-		FROM incident_records
-		WHERE service_name = $1
-		  AND incident->>'fingerprint' = $2
-		  AND incident->>'status' = 'active'
-		ORDER BY created_at DESC
-		LIMIT 1
-	`, service, fingerprint)
-	if errors.Is(err, sql.ErrNoRows) {
+	records, err := s.loadIncidents(ctx, `SELECT `+incidentColumns+`
+		FROM incidents i JOIN services s ON s.id = i.service_id
+		WHERE s.name = $1 AND i.fingerprint = $2 AND i.status = 'active'
+		ORDER BY i.created_at DESC
+		LIMIT 1`, service, fingerprint)
+	if err != nil {
+		return models.IncidentRecord{}, err
+	}
+	if len(records) == 0 {
 		return models.IncidentRecord{}, ErrNotFound
 	}
-	return record, err
+	return records[0], nil
 }
 
-type incidentScanner interface {
-	Scan(dest ...any) error
-}
-
-func (s *PostgresStore) loadIncidentRecord(ctx context.Context, query string, args ...any) (models.IncidentRecord, error) {
-	return scanIncidentRecord(s.db.QueryRowContext(ctx, query, args...))
-}
-
-func scanIncidentRecord(scanner incidentScanner) (models.IncidentRecord, error) {
-	var incidentJSON, serviceJSON, signalsJSON, eventsJSON []byte
-	if err := scanner.Scan(&incidentJSON, &serviceJSON, &signalsJSON, &eventsJSON); err != nil {
-		return models.IncidentRecord{}, err
+// loadIncidents runs query, then loads the timelines of the incidents it
+// returned in one more query. The first result set is closed before the
+// second query, so a read holds one connection.
+func (s *PostgresStore) loadIncidents(ctx context.Context, query string, args ...any) ([]models.IncidentRecord, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
 	}
-	return decodeIncidentRecord(incidentJSON, serviceJSON, signalsJSON, eventsJSON)
-}
-
-func decodeIncidentRecord(incidentJSON, serviceJSON, signalsJSON, eventsJSON []byte) (models.IncidentRecord, error) {
-	var record models.IncidentRecord
-	if err := json.Unmarshal(incidentJSON, &record.Incident); err != nil {
-		return models.IncidentRecord{}, err
+	var records []models.IncidentRecord
+	index := map[string]int{}
+	for rows.Next() {
+		r, err := scanIncident(rows)
+		if err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		index[r.Incident.ID] = len(records)
+		records = append(records, r)
 	}
-	if err := json.Unmarshal(serviceJSON, &record.Service); err != nil {
-		return models.IncidentRecord{}, err
+	if err := rows.Close(); err != nil {
+		return nil, err
 	}
-	if err := json.Unmarshal(signalsJSON, &record.Signals); err != nil {
-		return models.IncidentRecord{}, err
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
-	if err := json.Unmarshal(eventsJSON, &record.Events); err != nil {
-		return models.IncidentRecord{}, err
+	if len(records) == 0 {
+		return records, nil
 	}
-	return record, nil
+	ids := make([]string, len(records))
+	for i, r := range records {
+		ids[i] = r.Incident.ID
+	}
+	events, err := s.db.QueryContext(ctx, `
+		SELECT incident_id, at, event_type, description
+		FROM incident_events
+		WHERE incident_id = ANY($1)
+		ORDER BY incident_id, seq`, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = events.Close() }()
+	for events.Next() {
+		var id string
+		var e models.IncidentEvent
+		if err := events.Scan(&id, &e.Timestamp, &e.EventType, &e.Description); err != nil {
+			return nil, err
+		}
+		r := &records[index[id]]
+		r.Events = append(r.Events, e)
+	}
+	return records, events.Err()
 }
 
 func timePtr(t time.Time) *time.Time {
