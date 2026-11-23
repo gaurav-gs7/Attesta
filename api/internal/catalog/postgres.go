@@ -33,11 +33,11 @@ type PostgresStore struct {
 // lock_timeout, idle_in_transaction_session_timeout and application_name
 // as session parameters.
 const (
-	defaultMaxConns        = 10
-	defaultConnLifetime    = 30 * time.Minute
-	defaultLifetimeJitter  = 5 * time.Minute
-	defaultConnIdleTime    = 5 * time.Minute
-	defaultHealthCheck     = 30 * time.Second
+	defaultMaxConns         = 10
+	defaultConnLifetime     = 30 * time.Minute
+	defaultLifetimeJitter   = 5 * time.Minute
+	defaultConnIdleTime     = 5 * time.Minute
+	defaultHealthCheck      = 30 * time.Second
 	defaultStatementTimeout = "10s"
 )
 

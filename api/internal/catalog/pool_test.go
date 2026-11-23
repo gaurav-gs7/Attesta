@@ -109,9 +109,21 @@ func TestReadsNeedOneConnection(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		wg.Add(4)
 		go func() { defer wg.Done(); _, err := store.ListServices(ctx); errs <- err }()
-		go func() { defer wg.Done(); _, _, err := store.ListWorkflowRuns(ctx, page.Request{Limit: 50}); errs <- err }()
-		go func() { defer wg.Done(); _, _, err := store.ListDeployments(ctx, svc.ID, page.Request{Limit: 50}); errs <- err }()
-		go func() { defer wg.Done(); _, _, err := store.ListIncidentRecords(ctx, page.Request{Limit: 50}); errs <- err }()
+		go func() {
+			defer wg.Done()
+			_, _, err := store.ListWorkflowRuns(ctx, page.Request{Limit: 50})
+			errs <- err
+		}()
+		go func() {
+			defer wg.Done()
+			_, _, err := store.ListDeployments(ctx, svc.ID, page.Request{Limit: 50})
+			errs <- err
+		}()
+		go func() {
+			defer wg.Done()
+			_, _, err := store.ListIncidentRecords(ctx, page.Request{Limit: 50})
+			errs <- err
+		}()
 	}
 	wg.Wait()
 	close(errs)
