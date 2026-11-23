@@ -221,6 +221,15 @@ Without `DATABASE_URL`, Attesta keeps everything in memory. With it, the service
 
 The deployment, incident and workflow lists are paginated newest first: pass `?limit=` (1 to 200, default 50) and, for the next page, the `nextCursor` value from the previous response as `?cursor=`. `nextCursor` is absent on the last page. A store error is reported as `500`, never answered from a cache.
 
+Each client is rate-limited on `/api/` with a token bucket: by address before authentication (50 requests/s, burst 100), so a flood of bad credentials never reaches a token lookup or TokenReview, and by caller identity after it (20/s, burst 40), so one caller cannot starve others from many addresses. Over the limit the API answers 429 with `Retry-After`. The limiters keep at most 10,000 clients; past that, idle entries are dropped and new clients share one bucket. Every `/api/` request's context is cancelled after 25s (below the 30s write timeout), so store and Prometheus calls stop when nobody is waiting; headers are capped at 64 KiB and bodies at 1 MiB, and every request field has a length cap (a service name is a DNS label, at most 63 characters).
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ATTESTA_RATE_LIMIT_IP_RPS`, `..._IP_BURST` | `50`, `100` | Per-address limit; an RPS of `0` disables it |
+| `ATTESTA_RATE_LIMIT_PRINCIPAL_RPS`, `..._PRINCIPAL_BURST` | `20`, `40` | Per-caller limit; `0` disables it |
+| `ATTESTA_TRUST_FORWARDED_FOR` | `false` | Key the per-address limit on the last `X-Forwarded-For` hop. Only behind a proxy that sets it, or clients pick their own key |
+| `ATTESTA_REQUEST_TIMEOUT` | `25s` | Context deadline for each `/api/` request; must be under 30s |
+
 Every response carries an `X-Request-ID` header: the caller's own, if it sends a well-formed one, or a generated ID. Access logs, panic logs (which include the panic value and stack) and logs from workflow runs started by the request all carry it as `request_id`, and every 500 returns it in the body as `requestId`. A 500 never carries the underlying error: store and Prometheus errors name hosts, ports, database users and SQL, so the detail is logged under the request ID (and, for workflow runs, the run ID) and the client gets `internal error` plus the ID to quote. Only errors the caller can act on, such as conflicts, closed gates and validation failures, keep their wording. `/readyz` answers 503 when the store does not respond within 2 seconds; `/livez` does not depend on the store.
 
 ## Repository Layout

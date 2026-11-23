@@ -89,3 +89,25 @@ func TestValidateAcceptsEachAuthMethodAndChecksPairs(t *testing.T) {
 		}
 	}
 }
+
+func TestRateLimitsFromEnvironment(t *testing.T) {
+	t.Setenv("ATTESTA_RATE_LIMIT_IP_RPS", "0")
+	t.Setenv("ATTESTA_RATE_LIMIT_PRINCIPAL_RPS", "5")
+	t.Setenv("ATTESTA_RATE_LIMIT_PRINCIPAL_BURST", "7")
+	t.Setenv("ATTESTA_TRUST_FORWARDED_FOR", "true")
+	limits, err := RateLimits()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if limits.PerIP.Rate != 0 || limits.PerPrincipal.Rate != 5 || limits.PerPrincipal.Burst != 7 || !limits.TrustForwardedFor {
+		t.Fatalf("limits = %+v", limits)
+	}
+	t.Setenv("ATTESTA_RATE_LIMIT_IP_RPS", "fast")
+	if _, err := RateLimits(); err == nil {
+		t.Fatal("a non-numeric rate was accepted")
+	}
+	t.Setenv("ATTESTA_REQUEST_TIMEOUT", "45s")
+	if _, err := RequestTimeout(); err == nil {
+		t.Fatal("a request timeout above the write timeout was accepted")
+	}
+}

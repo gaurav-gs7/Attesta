@@ -46,6 +46,11 @@ type Server struct {
 	workflows     *workflows.Engine
 	workflowOpts  []workflows.Option
 	logger        *slog.Logger
+
+	rateLimits       RateLimits
+	ipLimiter        *limiter
+	principalLimiter *limiter
+	requestTimeout   time.Duration
 }
 
 // WithLogger sets the logger for access logs, recovered panics and workflow
@@ -122,10 +127,14 @@ func NewServer(store catalog.Store, generator *templates.Generator, opts ...Opti
 		maxBodyBytes: 1 << 20,
 		startedAt:    time.Now().UTC(),
 		metrics:      newServerMetrics(time.Now()),
+
+		requestTimeout: DefaultRequestTimeout,
 	}
 	for _, opt := range opts {
 		opt(server)
 	}
+	server.ipLimiter = newLimiter(server.rateLimits.PerIP)
+	server.principalLimiter = newLimiter(server.rateLimits.PerPrincipal)
 	if server.logger == nil {
 		server.logger = slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	}
@@ -179,7 +188,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/workflows/{id}", s.getWorkflow)
 	// The recoverer sits outside auth and inside logging and metrics, so a
 	// panic anywhere in a handler is logged and counted as the 500 it became.
-	return withRequestID(s.logging(s.metricsMiddleware(s.recoverer(s.auth(recordPattern(mux))))))
+	return withRequestID(s.logging(s.metricsMiddleware(s.recoverer(s.withTimeout(s.limitIP(s.auth(s.limitPrincipal(recordPattern(mux)))))))))
 }
 
 func (s *Server) live(w http.ResponseWriter, _ *http.Request) {

@@ -1,0 +1,72 @@
+package config
+
+import (
+	"fmt"
+	"os"
+	"strconv"
+	"time"
+
+	"github.com/gaurav-gs7/attesta/api/internal/httpapi"
+)
+
+// RateLimits reads ATTESTA_RATE_LIMIT_{IP,PRINCIPAL}_{RPS,BURST} over
+// httpapi.DefaultRateLimits. An RPS of 0 disables that limit.
+// ATTESTA_TRUST_FORWARDED_FOR=true keys the per-IP limit on
+// X-Forwarded-For; set it only behind a proxy that sets the header.
+func RateLimits() (httpapi.RateLimits, error) {
+	limits := httpapi.DefaultRateLimits
+	var err error
+	if limits.PerIP.Rate, err = floatEnv("ATTESTA_RATE_LIMIT_IP_RPS", limits.PerIP.Rate); err != nil {
+		return limits, err
+	}
+	if limits.PerIP.Burst, err = intEnv("ATTESTA_RATE_LIMIT_IP_BURST", limits.PerIP.Burst); err != nil {
+		return limits, err
+	}
+	if limits.PerPrincipal.Rate, err = floatEnv("ATTESTA_RATE_LIMIT_PRINCIPAL_RPS", limits.PerPrincipal.Rate); err != nil {
+		return limits, err
+	}
+	if limits.PerPrincipal.Burst, err = intEnv("ATTESTA_RATE_LIMIT_PRINCIPAL_BURST", limits.PerPrincipal.Burst); err != nil {
+		return limits, err
+	}
+	limits.TrustForwardedFor = boolEnv("ATTESTA_TRUST_FORWARDED_FOR")
+	return limits, nil
+}
+
+// RequestTimeout reads ATTESTA_REQUEST_TIMEOUT (a Go duration) over
+// httpapi.DefaultRequestTimeout. It must stay below the server's 30s
+// write timeout.
+func RequestTimeout() (time.Duration, error) {
+	raw := os.Getenv("ATTESTA_REQUEST_TIMEOUT")
+	if raw == "" {
+		return httpapi.DefaultRequestTimeout, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 || d >= 30*time.Second {
+		return 0, fmt.Errorf("ATTESTA_REQUEST_TIMEOUT=%q: want a duration above 0 and below 30s", raw)
+	}
+	return d, nil
+}
+
+func floatEnv(key string, fallback float64) (float64, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback, nil
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil || v < 0 {
+		return 0, fmt.Errorf("%s=%q: want a number of requests per second, 0 to disable", key, raw)
+	}
+	return v, nil
+}
+
+func intEnv(key string, fallback int) (int, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback, nil
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v < 1 {
+		return 0, fmt.Errorf("%s=%q: want a positive whole number", key, raw)
+	}
+	return v, nil
+}

@@ -64,10 +64,21 @@ func main() {
 		}
 	}
 
+	limits, err := config.RateLimits()
+	if err != nil {
+		log.Fatalf("rate limits: %v", err)
+	}
+	requestTimeout, err := config.RequestTimeout()
+	if err != nil {
+		log.Fatalf("request timeout: %v", err)
+	}
+
 	generator := templates.NewGenerator(cfg.TemplateDir, cfg.OutputDir)
 	opts := []httpapi.Option{
 		httpapi.WithMaxBodyBytes(cfg.MaxBodyMB * 1024 * 1024),
 		httpapi.WithPrometheus(promCfg),
+		httpapi.WithRateLimits(limits),
+		httpapi.WithRequestTimeout(requestTimeout),
 	}
 	if authenticator != nil {
 		opts = append(opts, httpapi.WithAuthenticator(authenticator))
@@ -87,6 +98,7 @@ func main() {
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    64 << 10,
 	}
 
 	errCh := make(chan error, 1)
