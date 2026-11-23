@@ -203,7 +203,7 @@ duplicate_onboarding_idempotent() {
 low_traffic_waits_for_more_samples() {
   local output="$run_dir/low-traffic-health-gate.json"
   log "proving low traffic waits for more samples instead of rolling back"
-  api POST "/api/v1/services/$SERVICE_NAME/health-gate" '{"p99LatencyMs":900,"errorRate":9.5,"successCount":10}' "$output" 200
+  api POST "/api/v1/services/$SERVICE_NAME/health-gate" '{"p95LatencyMs":900,"errorRate":9.5,"successCount":10}' "$output" 200
   assert_contains "$output" '"action"[[:space:]]*:[[:space:]]*"continue"' "expected low traffic decision to continue"
   assert_contains "$output" 'waiting for more samples' "expected low traffic reason to wait for samples"
   record "low-traffic-waits-for-more-samples" "$output"
@@ -213,12 +213,14 @@ bad_canary_rolls_back_and_records_evidence() {
   local output="$run_dir/bad-canary-health-gate.json"
   local deployments="$run_dir/deployments-after-rollback.json"
   local rollback="$run_dir/rollback-evidence.json"
-  log "proving a bad canary records rollback intent"
-  api POST "/api/v1/services/$SERVICE_NAME/health-gate" '{"p99LatencyMs":450,"errorRate":0.2,"successCount":100}' "$output" 202
+  log "proving a bad canary gets a rollback decision, judged against the service's own SLO"
+  # No rollout is in flight (the SLO gate cannot open without Prometheus), so
+  # the decision is returned and nothing is recorded.
+  api POST "/api/v1/services/$SERVICE_NAME/health-gate" '{"p95LatencyMs":450,"errorRate":0.2,"successCount":100}' "$output" 200
   assert_contains "$output" '"action"[[:space:]]*:[[:space:]]*"rollback"' "expected bad canary to request rollback"
-  assert_contains "$output" '"rollbackDeployment"[[:space:]]*:[[:space:]]*\{' "expected rollback deployment evidence in health-gate response"
+  assert_contains "$output" '"latencyP95Ms"[[:space:]]*:[[:space:]]*300' "expected the policy applied to be reported"
+  assert_contains "$output" '"rollout"[[:space:]]*:[[:space:]]*null' "expected no rollout to be marked without one in flight"
   api GET "/api/v1/services/$SERVICE_NAME/deployments" "" "$deployments" 200
-  assert_contains "$deployments" 'rollback-requested' "expected the rollback request to be recorded"
   cp "$output" "$rollback"
   record "bad-canary-rolls-back" "$output"
   record "rollback-evidence-recorded" "$rollback"

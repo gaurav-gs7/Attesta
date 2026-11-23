@@ -620,12 +620,15 @@ func (s *Server) healthGate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
 	var metrics reliability.Metrics
-	if err := json.NewDecoder(r.Body).Decode(&metrics); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+	if !s.decodeStrict(w, r, &metrics) {
 		return
 	}
+	if err := metrics.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	policy := reliability.PolicyFor(service)
 	var decision reliability.Decision
 	status := http.StatusOK
 	var rolledBack *models.Rollout
@@ -638,7 +641,7 @@ func (s *Server) healthGate(w http.ResponseWriter, r *http.Request) {
 				Name:        "evaluate-canary-sli-window",
 				MaxAttempts: 1,
 				Run: func(context.Context) error {
-					decision = reliability.EvaluateCanary(reliability.DefaultSLO(service.SLOTarget), metrics)
+					decision = reliability.EvaluateCanary(policy, metrics)
 					if !decision.Healthy && !service.RollbackOnFailure {
 						decision.Action = "hold"
 						decision.Reason += "; rollbackOnFailure is false for this service, so no rollback was requested"
@@ -685,7 +688,9 @@ func (s *Server) healthGate(w http.ResponseWriter, r *http.Request) {
 		// measure the canary itself on this endpoint.
 		"inputSource": "caller-supplied",
 		"metrics":     metrics,
-		"decision":    decision,
+		// The thresholds applied, taken from the service record.
+		"policy":   policy,
+		"decision": decision,
 		// The active rollout marked rollback-requested, if the gate breached
 		// and one was in flight.
 		"rollout":  rolledBack,

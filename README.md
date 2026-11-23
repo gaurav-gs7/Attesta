@@ -112,7 +112,7 @@ Timelines contain only recorded events: deployment records from the 2 hours befo
 
 ## Health Gate And Rollback Requests
 
-`POST /api/v1/services/{name}/health-gate` evaluates the `p99LatencyMs`, `errorRate` and `successCount` in the request body against fixed thresholds (300ms, 1%, at least 50 successes). The response marks its input as `caller-supplied`. When the decision is `rollback`, the service has `rollbackOnFailure: true` and a rollout is in flight, Attesta moves that rollout to `rollback-requested`; with no rollout in flight, or with `rollbackOnFailure: false` (decision `hold`), nothing is recorded.
+`POST /api/v1/services/{name}/health-gate` evaluates the `p95LatencyMs`, `errorRate` (percent) and `successCount` in the request body against the service's own objectives: its registered p95 latency and error-rate threshold (300ms and 1% if unset), with at least 50 successes before a healthy canary is promoted. The response reports the `policy` it applied and marks its input as `caller-supplied`. `p99LatencyMs` is rejected: comparing a p99 against a p95 objective is what the gate used to do. When the decision is `rollback`, the service has `rollbackOnFailure: true` and a rollout is in flight, Attesta moves that rollout to `rollback-requested`; with no rollout in flight, or with `rollbackOnFailure: false` (decision `hold`), nothing is recorded.
 
 `POST /api/v1/services/{name}/rollback` requests a rollback of the service's most recent rollout. Neither endpoint changes the cluster.
 
