@@ -208,3 +208,19 @@ func clone(run models.WorkflowRun) models.WorkflowRun {
 	run.Events = append([]models.WorkflowEvent(nil), run.Events...)
 	return run
 }
+
+// PruneWorkflowRuns deletes finished runs that completed before cutoff and
+// returns how many. Running runs are kept.
+func (s *MemoryStore) PruneWorkflowRuns(_ context.Context, cutoff time.Time) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for id, run := range s.runs {
+		if run.State != StateRunning && run.CompletedAt != nil && run.CompletedAt.Before(cutoff) {
+			delete(s.runs, id)
+			delete(s.heartbeat, id)
+			n++
+		}
+	}
+	return n, nil
+}

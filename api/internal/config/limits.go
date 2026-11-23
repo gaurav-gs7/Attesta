@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/gaurav-gs7/attesta/api/internal/catalog"
 	"github.com/gaurav-gs7/attesta/api/internal/httpapi"
 )
 
@@ -69,4 +71,36 @@ func intEnv(key string, fallback int) (int, error) {
 		return 0, fmt.Errorf("%s=%q: want a positive whole number", key, raw)
 	}
 	return v, nil
+}
+
+// Retention reads ATTESTA_WORKFLOW_RETENTION and
+// ATTESTA_INCIDENT_RETENTION over catalog.DefaultRetention: a Go duration
+// or a whole number of days ("30d"); "0" keeps records forever.
+func Retention() (catalog.Retention, error) {
+	r := catalog.DefaultRetention
+	var err error
+	if r.WorkflowRuns, err = retentionEnv("ATTESTA_WORKFLOW_RETENTION", r.WorkflowRuns); err != nil {
+		return r, err
+	}
+	if r.ResolvedIncidents, err = retentionEnv("ATTESTA_INCIDENT_RETENTION", r.ResolvedIncidents); err != nil {
+		return r, err
+	}
+	return r, nil
+}
+
+func retentionEnv(key string, fallback time.Duration) (time.Duration, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback, nil
+	}
+	if days, ok := strings.CutSuffix(raw, "d"); ok {
+		if n, err := strconv.Atoi(days); err == nil && n >= 0 {
+			return time.Duration(n) * 24 * time.Hour, nil
+		}
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 || (d > 0 && d < time.Hour) {
+		return 0, fmt.Errorf("%s=%q: want a duration of at least 1h, a number of days such as 30d, or 0 to keep forever", key, raw)
+	}
+	return d, nil
 }

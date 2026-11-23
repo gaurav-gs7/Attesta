@@ -40,6 +40,7 @@ type Store interface {
 	// first, and the cursor of the next page ("" at the end).
 	ListDeployments(context.Context, string, page.Request) ([]models.Deployment, string, error)
 	workflows.Store
+	Pruner
 	// CreateIncident stores a new incident at version 1. A second active
 	// incident for the same service and non-empty alert fingerprint is
 	// ErrConflict.

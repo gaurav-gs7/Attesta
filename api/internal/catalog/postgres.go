@@ -990,6 +990,50 @@ func roundIncidentTimes(r *models.IncidentRecord) {
 	}
 }
 
+// PruneWorkflowRuns deletes finished runs completed before cutoff, with
+// their steps and events, in batches.
+func (s *PostgresStore) PruneWorkflowRuns(ctx context.Context, cutoff time.Time) (int, error) {
+	return s.pruneBatches(ctx, `
+		DELETE FROM workflow_runs WHERE id IN (
+			SELECT id FROM workflow_runs
+			WHERE state <> 'running' AND completed_at < $1
+			ORDER BY completed_at
+			LIMIT $2
+			FOR UPDATE SKIP LOCKED
+		)`, cutoff)
+}
+
+// PruneResolvedIncidents deletes incidents resolved before cutoff, with
+// their events, in batches.
+func (s *PostgresStore) PruneResolvedIncidents(ctx context.Context, cutoff time.Time) (int, error) {
+	return s.pruneBatches(ctx, `
+		DELETE FROM incidents WHERE id IN (
+			SELECT id FROM incidents
+			WHERE status = 'resolved' AND resolved_at < $1
+			ORDER BY resolved_at
+			LIMIT $2
+			FOR UPDATE SKIP LOCKED
+		)`, cutoff)
+}
+
+func (s *PostgresStore) pruneBatches(ctx context.Context, query string, cutoff time.Time) (int, error) {
+	total := 0
+	for {
+		result, err := s.db.ExecContext(ctx, query, cutoff, pruneBatch)
+		if err != nil {
+			return total, err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return total, err
+		}
+		total += int(n)
+		if n < pruneBatch {
+			return total, nil
+		}
+	}
+}
+
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"

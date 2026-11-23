@@ -210,6 +210,20 @@ func (s *MemoryStore) activeDuplicate(record models.IncidentRecord) bool {
 	return false
 }
 
+// PruneResolvedIncidents deletes incidents resolved before cutoff.
+func (s *MemoryStore) PruneResolvedIncidents(_ context.Context, cutoff time.Time) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for id, r := range s.incidents {
+		if r.Incident.Status == "resolved" && r.Incident.ResolvedAt != nil && r.Incident.ResolvedAt.Before(cutoff) {
+			delete(s.incidents, id)
+			n++
+		}
+	}
+	return n, nil
+}
+
 func cloneIncident(r models.IncidentRecord) models.IncidentRecord {
 	r.Events = append([]models.IncidentEvent(nil), r.Events...)
 	return r

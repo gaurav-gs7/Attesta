@@ -111,3 +111,16 @@ func TestRateLimitsFromEnvironment(t *testing.T) {
 		t.Fatal("a request timeout above the write timeout was accepted")
 	}
 }
+
+func TestRetentionFromEnvironment(t *testing.T) {
+	t.Setenv("ATTESTA_WORKFLOW_RETENTION", "7d")
+	t.Setenv("ATTESTA_INCIDENT_RETENTION", "0")
+	r, err := Retention()
+	if err != nil || r.WorkflowRuns != 7*24*time.Hour || r.ResolvedIncidents != 0 {
+		t.Fatalf("retention %+v, %v", r, err)
+	}
+	t.Setenv("ATTESTA_WORKFLOW_RETENTION", "5m")
+	if _, err := Retention(); err == nil {
+		t.Fatal("a retention under an hour was accepted")
+	}
+}

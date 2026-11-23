@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -72,6 +73,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("request timeout: %v", err)
 	}
+	retention, err := config.Retention()
+	if err != nil {
+		log.Fatalf("retention: %v", err)
+	}
 
 	generator := templates.NewGenerator(cfg.TemplateDir)
 	opts := []httpapi.Option{
@@ -90,6 +95,7 @@ func main() {
 	reaperCtx, stopReaper := context.WithCancel(ctx)
 	defer stopReaper()
 	handler.StartWorkflowReaper(reaperCtx)
+	catalog.StartPruner(reaperCtx, store, retention, time.Hour, slog.Default())
 
 	server := &http.Server{
 		Addr:              cfg.Addr,
