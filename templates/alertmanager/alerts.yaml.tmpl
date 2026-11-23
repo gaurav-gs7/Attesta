@@ -5,7 +5,7 @@ metadata:
   namespace: {{ .Service.Namespace }}
   labels:
     app.kubernetes.io/name: {{ .Service.Name }}
-    attesta.dev/team: {{ .Service.Team }}
+    attesta.dev/team: {{ quote .Service.Team }}
 spec:
   groups:
     - name: {{ .Service.Name }}.slo
@@ -19,12 +19,12 @@ spec:
           for: 10m
           labels:
             severity: page
-            team: {{ .Service.Team }}
+            team: {{ quote .Service.Team }}
             service: {{ .Service.Name }}
           annotations:
             summary: "{{ .Service.Name }} 5xx rate is above {{ .Service.SLOErrorRate }}%"
 {{- if .Service.RunbookURL }}
-            runbook_url: "{{ .Service.RunbookURL }}"
+            runbook_url: {{ quote .Service.RunbookURL }}
 {{- end }}
         - alert: {{ .PrometheusName }}_high_p95_latency
           expr: |
@@ -32,10 +32,10 @@ spec:
           for: 10m
           labels:
             severity: ticket
-            team: {{ .Service.Team }}
+            team: {{ quote .Service.Team }}
             service: {{ .Service.Name }}
           annotations:
             summary: "{{ .Service.Name }} p95 latency is above {{ .Service.SLOLatencyP95Ms }}ms"
 {{- if .Service.RunbookURL }}
-            runbook_url: "{{ .Service.RunbookURL }}"
+            runbook_url: {{ quote .Service.RunbookURL }}
 {{- end }}

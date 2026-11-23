@@ -41,7 +41,7 @@ spec:
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: http://otel-collector.{{ .Service.Namespace }}.svc.cluster.local:4317
             - name: OTEL_RESOURCE_ATTRIBUTES
-              value: service.namespace={{ .Service.Namespace }},deployment.environment={{ .Service.Environment }},attesta.team={{ .Service.Team }}
+              value: {{ quote (printf "service.namespace=%s,deployment.environment=%s,attesta.team=%s" .Service.Namespace .Service.Environment .Service.Team) }}
           ports:
             - name: http
               containerPort: {{ .ContainerPort }}

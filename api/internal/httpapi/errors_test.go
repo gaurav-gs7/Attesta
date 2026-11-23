@@ -58,3 +58,18 @@ func TestStatusDoesNotDependOnErrorWording(t *testing.T) {
 		t.Fatalf("store failure: %d %s, want 500 with errorCode internal", rec.Code, rec.Body.String())
 	}
 }
+
+// Audit X-2 through the API: the reproduced payload is rejected before
+// anything is stored or generated.
+func TestOnboardingRejectsManifestInjection(t *testing.T) {
+	store := catalog.NewMemoryStore()
+	server := newTestServer(t, store)
+	body := `{"name":"payments-api","team":"platform\n    pod-security.kubernetes.io/enforce: privileged","owner":"gaurav","language":"go","environment":"staging","namespace":"payments"}`
+	rec := authorizedRequest(server, http.MethodPost, "/api/v1/services", []byte(body))
+	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), `"policy":"team"`) {
+		t.Fatalf("injected team: %d %s, want 422 naming the team policy", rec.Code, rec.Body.String())
+	}
+	if _, err := store.GetServiceByName(context.Background(), "payments-api"); err == nil {
+		t.Fatal("service with an injected team was stored")
+	}
+}

@@ -5,7 +5,7 @@ metadata:
   namespace: {{ .Service.Namespace }}
   labels:
     app.kubernetes.io/name: {{ .Service.Name }}
-    attesta.dev/team: {{ .Service.Team }}
+    attesta.dev/team: {{ quote .Service.Team }}
 spec:
   groups:
     # Error ratio over each window of the multi-window burn-rate alerts.
@@ -37,12 +37,12 @@ spec:
           for: 2m
           labels:
             severity: page
-            team: {{ .Service.Team }}
+            team: {{ quote .Service.Team }}
             service: {{ .Service.Name }}
           annotations:
             summary: "{{ .Service.Name }} is burning its error budget at 14.4x or more (1h and 5m)"
 {{- if .Service.RunbookURL }}
-            runbook_url: "{{ .Service.RunbookURL }}"
+            runbook_url: {{ quote .Service.RunbookURL }}
 {{- end }}
         # 6x for 6h spends 5% of the 30-day budget.
         - alert: {{ .PrometheusName }}_slow_burn
@@ -53,10 +53,10 @@ spec:
           for: 15m
           labels:
             severity: ticket
-            team: {{ .Service.Team }}
+            team: {{ quote .Service.Team }}
             service: {{ .Service.Name }}
           annotations:
             summary: "{{ .Service.Name }} is burning its error budget at 6x or more (6h and 30m)"
 {{- if .Service.RunbookURL }}
-            runbook_url: "{{ .Service.RunbookURL }}"
+            runbook_url: {{ quote .Service.RunbookURL }}
 {{- end }}

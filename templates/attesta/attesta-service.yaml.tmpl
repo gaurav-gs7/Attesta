@@ -5,17 +5,17 @@ metadata:
   namespace: {{ .Service.Namespace }}
   labels:
     attesta.dev/tier: {{ .Service.Tier }}
-    attesta.dev/team: {{ .Service.Team }}
+    attesta.dev/team: {{ quote .Service.Team }}
 spec:
-  owner: {{ .Service.Owner }}
-  team: {{ .Service.Team }}
+  owner: {{ quote .Service.Owner }}
+  team: {{ quote .Service.Team }}
   tier: {{ .Service.Tier }}
   language: {{ .Service.Language }}
   runtime: kubernetes
-  pager: {{ .Service.Pager }}
-  repository: {{ .Service.Repository }}
-  runbook: {{ .Service.RunbookURL }}
-  dashboard: {{ .Service.DashboardURL }}
+  pager: {{ quote .Service.Pager }}
+  repository: {{ quote .Service.Repository }}
+  runbook: {{ quote .Service.RunbookURL }}
+  dashboard: {{ quote .Service.DashboardURL }}
   deployment:
     strategy: {{ .Service.DeploymentStrategy }}
     maxErrorRate: {{ .Service.SLOErrorRate }}

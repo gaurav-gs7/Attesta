@@ -2,6 +2,7 @@ package templates
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"text/template"
 
 	"github.com/gaurav-gs7/attesta/api/internal/models"
+	"github.com/gaurav-gs7/attesta/api/internal/security"
 	"github.com/gaurav-gs7/attesta/api/internal/slo"
 )
 
@@ -40,6 +42,11 @@ func NewGenerator(templateDir, outputDir string) *Generator {
 }
 
 func (g *Generator) Generate(service models.Service) (Result, error) {
+	// The API validates services before generating, but the generator is a
+	// library too: it refuses input it cannot render safely.
+	if err := security.RejectIfFindings(security.ValidateService(service)); err != nil {
+		return Result{}, fmt.Errorf("refusing to generate a scaffold: %w", err)
+	}
 	languageTemplates := filepath.Join(g.templateDir, "service-"+strings.ToLower(service.Language))
 	if _, err := os.Stat(languageTemplates); err != nil {
 		return Result{}, fmt.Errorf("language templates: %w", err)
@@ -134,7 +141,7 @@ func renderTemplateFile(source, target string, d data) error {
 	if err != nil {
 		return err
 	}
-	tpl, err := template.New(filepath.Base(source)).Parse(string(content))
+	tpl, err := template.New(filepath.Base(source)).Funcs(funcs).Parse(string(content))
 	if err != nil {
 		return err
 	}
@@ -185,4 +192,14 @@ func burnWindowNames() []string {
 		names[i] = w.Name
 	}
 	return names
+}
+
+// funcs are available to every template. quote renders a string as a JSON
+// string literal, which is also a valid double-quoted YAML scalar, so a value
+// can never close its quotes or start a new key in a generated manifest.
+var funcs = template.FuncMap{
+	"quote": func(s string) (string, error) {
+		b, err := json.Marshal(s)
+		return string(b), err
+	},
 }

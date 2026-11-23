@@ -5,12 +5,12 @@ metadata:
   namespace: argocd
   labels:
     attesta.dev/service: {{ .Service.Name }}
-    attesta.dev/team: {{ .Service.Team }}
+    attesta.dev/team: {{ quote .Service.Team }}
 spec:
   project: default
   source:
     # No repository URL was registered for this service: replace the placeholder.
-    repoURL: {{ if .Service.RepoURL }}{{ .Service.RepoURL }}{{ else }}https://github.com/CHANGE-ME/{{ .Service.Name }}.git{{ end }}
+    repoURL: {{ if .Service.RepoURL }}{{ quote .Service.RepoURL }}{{ else }}https://github.com/CHANGE-ME/{{ .Service.Name }}.git{{ end }}
     targetRevision: main
     path: k8s/overlays/{{ .Service.Environment }}
   destination:

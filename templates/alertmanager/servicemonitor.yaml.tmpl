@@ -5,7 +5,7 @@ metadata:
   namespace: {{ .Service.Namespace }}
   labels:
     app.kubernetes.io/name: {{ .Service.Name }}
-    attesta.dev/team: {{ .Service.Team }}
+    attesta.dev/team: {{ quote .Service.Team }}
 spec:
   # Copies the pod's pod-template-hash label onto every series as
   # pod_template_hash, so the RolloutGuard can analyse the new revision alone.

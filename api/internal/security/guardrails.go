@@ -9,7 +9,25 @@ import (
 	"github.com/gaurav-gs7/attesta/api/internal/models"
 )
 
-var dnsLabel = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+var (
+	dnsLabel = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
+	// A person or group: a handle or an email address.
+	ownerPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$`)
+	// A pager rotation reference such as "platform-oncall" or
+	// "pagerduty:PABC123".
+	pagerPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@:+/-]{0,127}$`)
+	// owner/repo, as GitHub and GitLab name repositories.
+	repoPath = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$`)
+	// Characters allowed in a URL: RFC 3986 unreserved and reserved
+	// characters and percent-encoding, which excludes whitespace, quotes,
+	// backslashes and angle brackets.
+	urlChars = regexp.MustCompile(`^[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+$`)
+)
+
+const (
+	maxURLLength    = 2048
+	maxDependencies = 50
+)
 
 type Finding struct {
 	Policy  string `json:"policy"`
@@ -54,26 +72,60 @@ func ValidateService(service models.Service) []Finding {
 	default:
 		findings = append(findings, Finding{"tier", "tier must be critical, high, medium, or low"})
 	}
+	// Every free-text field ends up in generated manifests, labels and
+	// source. Each one has a strict pattern and a length cap, so no value
+	// can carry a newline, quote or YAML syntax into them.
 	if service.Team == "" || service.Owner == "" {
 		findings = append(findings, Finding{"ownership", "team and owner are required for operational accountability"})
 	}
-	if service.RepoURL != "" {
-		if !validRepository(service.RepoURL) {
-			findings = append(findings, Finding{"repo-url", "repo_url must be a valid https URL or owner/repo path when provided"})
-		}
+	if service.Team != "" && !dnsLabel.MatchString(service.Team) {
+		findings = append(findings, Finding{"team", "team must be a Kubernetes DNS label (lowercase letters, digits and '-', at most 63 characters)"})
+	}
+	if service.Owner != "" && !ownerPattern.MatchString(service.Owner) {
+		findings = append(findings, Finding{"owner", "owner must be a handle or email address: letters, digits and . _ @ + -, at most 128 characters"})
+	}
+	if service.Pager != "" && !pagerPattern.MatchString(service.Pager) {
+		findings = append(findings, Finding{"pager", "pager must be a rotation reference: letters, digits and . _ @ : + / -, at most 128 characters"})
+	}
+	if service.RepoURL != "" && !validRepository(service.RepoURL) {
+		findings = append(findings, Finding{"repo-url", "repoUrl must be an https URL or an owner/repo path"})
 	}
 	if service.Repository != "" && !validRepository(service.Repository) {
-		findings = append(findings, Finding{"repository", "repository must be a valid https URL or owner/repo path when provided"})
+		findings = append(findings, Finding{"repository", "repository must be an https URL or an owner/repo path"})
+	}
+	if service.RunbookURL != "" && !validHTTPSURL(service.RunbookURL) {
+		findings = append(findings, Finding{"runbook-url", "runbookUrl must be an https URL"})
+	}
+	if service.DashboardURL != "" && !validHTTPSURL(service.DashboardURL) {
+		findings = append(findings, Finding{"dashboard-url", "dashboardUrl must be an https URL"})
+	}
+	if len(service.Dependencies) > maxDependencies {
+		findings = append(findings, Finding{"dependencies", fmt.Sprintf("at most %d dependencies", maxDependencies)})
+	}
+	for _, dep := range service.Dependencies {
+		if !dnsLabel.MatchString(dep) {
+			findings = append(findings, Finding{"dependencies", fmt.Sprintf("dependency %q must be a service name (a Kubernetes DNS label)", dep)})
+			break
+		}
 	}
 	return findings
 }
 
 func validRepository(value string) bool {
-	if !strings.Contains(value, "://") {
-		return strings.Contains(value, "/") && !strings.Contains(value, " ")
+	if strings.Contains(value, "://") {
+		return validHTTPSURL(value)
+	}
+	return repoPath.MatchString(value)
+}
+
+// validHTTPSURL accepts an absolute https URL with a host, made only of
+// characters a URL may contain, of bounded length.
+func validHTTPSURL(value string) bool {
+	if len(value) > maxURLLength || !urlChars.MatchString(value) {
+		return false
 	}
 	parsed, err := url.Parse(value)
-	return err == nil && parsed.Scheme == "https" && parsed.Host != ""
+	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil
 }
 
 func RejectIfFindings(findings []Finding) error {

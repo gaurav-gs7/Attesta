@@ -1,6 +1,6 @@
 {
   "title": "{{ .Service.Name }} Golden Signals",
-  "tags": ["attesta", "{{ .Service.Team }}", "{{ .Service.Environment }}"],
+  "tags": ["attesta", {{ quote .Service.Team }}, "{{ .Service.Environment }}"],
   "timezone": "browser",
   "schemaVersion": 39,
   "version": 1,

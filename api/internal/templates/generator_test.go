@@ -366,3 +366,36 @@ func TestGeneratedBurnRateRulesAreMultiWindow(t *testing.T) {
 		t.Errorf("slow burn alert is not the 6h+30m pair at 6x: %q", slow)
 	}
 }
+
+// Audit X-2, second layer: even a value that reached a template unvalidated
+// stays one YAML scalar, because user values are rendered with quote.
+func TestTemplatesQuoteUserValues(t *testing.T) {
+	root := filepath.Clean("../../..")
+	evil := testService("go")
+	evil.Team = "platform\n    pod-security.kubernetes.io/enforce: privileged"
+	target := filepath.Join(t.TempDir(), "namespace.yaml")
+	if err := renderTemplateFile(filepath.Join(root, "templates/kustomize/base/namespace.yaml.tmpl"), target, data{Service: evil}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ns struct {
+		Metadata struct {
+			Labels map[string]string `json:"labels"`
+		} `json:"metadata"`
+	}
+	if err := yaml.Unmarshal(raw, &ns); err != nil {
+		t.Fatalf("namespace.yaml does not parse: %v\n%s", err, raw)
+	}
+	if _, injected := ns.Metadata.Labels["pod-security.kubernetes.io/enforce"]; injected || len(ns.Metadata.Labels) != 2 ||
+		ns.Metadata.Labels["attesta.dev/team"] != evil.Team {
+		t.Fatalf("team value escaped its scalar: labels %v\n%s", ns.Metadata.Labels, raw)
+	}
+
+	// And the generator refuses such input outright.
+	if _, err := NewGenerator(filepath.Join(root, "templates"), t.TempDir()).Generate(evil); err == nil {
+		t.Fatal("generator rendered a service with an injected team")
+	}
+}

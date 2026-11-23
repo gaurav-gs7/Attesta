@@ -3,5 +3,5 @@ kind: Namespace
 metadata:
   name: {{ .Service.Namespace }}
   labels:
-    attesta.dev/team: {{ .Service.Team }}
+    attesta.dev/team: {{ quote .Service.Team }}
     attesta.dev/environment: {{ .Service.Environment }}
