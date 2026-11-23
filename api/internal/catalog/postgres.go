@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/gaurav-gs7/attesta/api/internal/models"
@@ -21,29 +23,93 @@ import (
 )
 
 type PostgresStore struct {
-	db *sql.DB
+	db   *sql.DB
+	pool *pgxpool.Pool
+}
+
+// Connection defaults, each overridable in DATABASE_URL: pool_max_conns,
+// pool_max_conn_lifetime, pool_max_conn_idle_time and
+// pool_health_check_period for the pool, and statement_timeout,
+// lock_timeout, idle_in_transaction_session_timeout and application_name
+// as session parameters.
+const (
+	defaultMaxConns        = 10
+	defaultConnLifetime    = 30 * time.Minute
+	defaultLifetimeJitter  = 5 * time.Minute
+	defaultConnIdleTime    = 5 * time.Minute
+	defaultHealthCheck     = 30 * time.Second
+	defaultStatementTimeout = "10s"
+)
+
+var defaultSessionParams = map[string]string{
+	// No single statement runs longer than this. Requests have a 25s
+	// deadline; one slow statement must not use all of it.
+	"statement_timeout": defaultStatementTimeout,
+	// A statement waiting on a row or table lock gives up rather than
+	// queueing behind a long transaction.
+	"lock_timeout": "5s",
+	// A transaction left open by a stuck caller is ended by the server and
+	// its locks released.
+	"idle_in_transaction_session_timeout": "30s",
+	"application_name":                    "attesta-api",
 }
 
 func NewPostgresStore(ctx context.Context, databaseURL string) (*PostgresStore, error) {
 	return newPostgresStore(ctx, databaseURL, nil)
 }
 
-// newPostgresStore opens the store, optionally tracing every statement. Tests
-// use the tracer to count round trips.
-func newPostgresStore(ctx context.Context, databaseURL string, tracer pgx.QueryTracer) (*PostgresStore, error) {
-	cfg, err := pgx.ParseConfig(databaseURL)
+// poolConfig parses databaseURL and fills in the defaults it does not set.
+func poolConfig(databaseURL string) (*pgxpool.Config, error) {
+	cfg, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
 		return nil, err
 	}
-	cfg.Tracer = tracer
-	db := stdlib.OpenDB(*cfg)
-	if err := db.PingContext(ctx); err != nil {
-		_ = db.Close()
+	set := func(key string) bool { return strings.Contains(databaseURL, key+"=") }
+	if !set("pool_max_conns") {
+		cfg.MaxConns = defaultMaxConns
+	}
+	if !set("pool_max_conn_lifetime") {
+		cfg.MaxConnLifetime = defaultConnLifetime
+	}
+	if !set("pool_max_conn_lifetime_jitter") {
+		cfg.MaxConnLifetimeJitter = defaultLifetimeJitter
+	}
+	if !set("pool_max_conn_idle_time") {
+		cfg.MaxConnIdleTime = defaultConnIdleTime
+	}
+	if !set("pool_health_check_period") {
+		cfg.HealthCheckPeriod = defaultHealthCheck
+	}
+	for key, value := range defaultSessionParams {
+		if _, ok := cfg.ConnConfig.RuntimeParams[key]; !ok {
+			cfg.ConnConfig.RuntimeParams[key] = value
+		}
+	}
+	return cfg, nil
+}
+
+// newPostgresStore opens the store, optionally tracing every statement. Tests
+// use the tracer to count round trips.
+func newPostgresStore(ctx context.Context, databaseURL string, tracer pgx.QueryTracer) (*PostgresStore, error) {
+	cfg, err := poolConfig(databaseURL)
+	if err != nil {
 		return nil, err
 	}
-	store := &PostgresStore{db: db}
+	cfg.ConnConfig.Tracer = tracer
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	// database/sql on top of pgxpool: pgxpool owns the connections, their
+	// limits and lifetimes, and database/sql keeps none idle of its own.
+	db := stdlib.OpenDBFromPool(pool)
+	store := &PostgresStore{db: db, pool: pool}
+	if err := db.PingContext(ctx); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
 	if err := migrate(ctx, db); err != nil {
-		_ = db.Close()
+		_ = store.Close()
 		return nil, err
 	}
 	return store, nil
@@ -54,8 +120,14 @@ func (s *PostgresStore) Ping(ctx context.Context) error {
 	return s.db.PingContext(ctx)
 }
 
+// Close closes the store. Closing the *sql.DB does not close the pool
+// under it.
 func (s *PostgresStore) Close() error {
-	return s.db.Close()
+	err := s.db.Close()
+	if s.pool != nil {
+		s.pool.Close()
+	}
+	return err
 }
 
 func (s *PostgresStore) CreateService(ctx context.Context, service models.Service) (models.Service, error) {

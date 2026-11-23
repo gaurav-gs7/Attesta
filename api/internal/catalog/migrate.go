@@ -79,6 +79,17 @@ func migrateFS(ctx context.Context, db *sql.DB, fsys fs.FS) (err error) {
 	}
 	defer func() { _ = conn.Close() }()
 
+	// Migrations, and waiting for another replica's, may take longer than
+	// the store's statement and lock timeouts. Lift them for this session
+	// and restore them before the connection goes back to the pool.
+	if _, err := conn.ExecContext(ctx, `SET statement_timeout = 0; SET lock_timeout = 0`); err != nil {
+		return err
+	}
+	defer func() {
+		if _, resetErr := conn.ExecContext(context.WithoutCancel(ctx), `RESET statement_timeout; RESET lock_timeout`); resetErr != nil && err == nil {
+			err = resetErr
+		}
+	}()
 	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, migrationLockID); err != nil {
 		return fmt.Errorf("migration lock: %w", err)
 	}
