@@ -27,7 +27,7 @@ func TestStateMachine(t *testing.T) {
 	}
 	for _, tc := range cases {
 		r := models.Rollout{State: tc.from}
-		err := Apply(&r, tc.action, "test", time.Now())
+		err := Apply(&r, tc.action, "test", "tester", time.Now())
 		if tc.to == "" {
 			if !errors.Is(err, ErrInvalidTransition) || r.State != tc.from || len(r.Events) != 0 {
 				t.Errorf("%s from %s: err %v state %s; want rejected and unchanged", tc.action, tc.from, err, r.State)

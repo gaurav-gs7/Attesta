@@ -93,6 +93,8 @@ type RolloutEvent struct {
 	From   string    `json:"from,omitempty"`
 	To     string    `json:"to"`
 	Reason string    `json:"reason,omitempty"`
+	// Actor is who made the transition.
+	Actor string `json:"actor,omitempty"`
 }
 
 // ServiceStatus is the current state of a service. Every value is either read
@@ -127,6 +129,9 @@ type Incident struct {
 	CreatedAt      time.Time     `json:"createdAt"`
 	ResolvedAt     *time.Time    `json:"resolvedAt,omitempty"`
 	ResolutionNote string        `json:"resolutionNote,omitempty"`
+	// OpenedBy and ResolvedBy are the callers who opened and resolved it.
+	OpenedBy   string `json:"openedBy,omitempty"`
+	ResolvedBy string `json:"resolvedBy,omitempty"`
 }
 
 type AlertSignals struct {
@@ -231,6 +236,8 @@ type WorkflowRun struct {
 	// ErrorCode classifies a failed run (see workflows.Code*); callers
 	// branch on it, never on Error's wording.
 	ErrorCode string `json:"errorCode,omitempty"`
+	// Actor is who started the run: an API caller's identity, or "system".
+	Actor string `json:"actor,omitempty"`
 }
 
 type WorkflowStep struct {

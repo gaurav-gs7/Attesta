@@ -54,12 +54,12 @@ func Active(state string) bool { return state == StateStarted || state == StateP
 // Apply moves r by action, appending the transition to its events. It fails
 // with ErrInvalidTransition and leaves r unchanged if the action is not
 // allowed from r's state.
-func Apply(r *models.Rollout, action, reason string, at time.Time) error {
+func Apply(r *models.Rollout, action, reason, actor string, at time.Time) error {
 	to, ok := transitions[action][r.State]
 	if !ok {
 		return fmt.Errorf("%w: cannot %s a rollout that is %s", ErrInvalidTransition, action, r.State)
 	}
-	r.Events = append(r.Events, models.RolloutEvent{At: at, From: r.State, To: to, Reason: reason})
+	r.Events = append(r.Events, models.RolloutEvent{At: at, From: r.State, To: to, Reason: reason, Actor: actor})
 	r.State = to
 	r.UpdatedAt = at
 	return nil

@@ -33,7 +33,34 @@ func withRequestID(next http.Handler) http.Handler {
 			id = newRequestID()
 		}
 		w.Header().Set(RequestIDHeader, id)
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestIDKey{}, id)))
+		ctx := context.WithValue(r.Context(), requestIDKey{}, id)
+		ctx = context.WithValue(ctx, requestInfoKey{}, &requestInfo{})
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// requestInfo carries what inner handlers learn about a request (who the
+// caller is, which route it matched) out to the outer middleware that logs
+// and counts it, which hold an earlier copy of the request.
+type requestInfo struct {
+	actor   string
+	pattern string
+}
+
+type requestInfoKey struct{}
+
+func infoFrom(ctx context.Context) *requestInfo {
+	info, _ := ctx.Value(requestInfoKey{}).(*requestInfo)
+	return info
+}
+
+// recordPattern notes the route pattern the mux matched.
+func recordPattern(mux *http.ServeMux) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mux.ServeHTTP(w, r)
+		if info := infoFrom(r.Context()); info != nil {
+			info.pattern = r.Pattern
+		}
 	})
 }
 

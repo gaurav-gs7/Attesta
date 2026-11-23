@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gaurav-gs7/attesta/api/internal/auth"
 	"github.com/gaurav-gs7/attesta/api/internal/catalog"
 	"github.com/gaurav-gs7/attesta/api/internal/incidents"
 	"github.com/gaurav-gs7/attesta/api/internal/models"
@@ -94,6 +95,7 @@ func (s *Server) openIncident(ctx context.Context, service models.Service, in in
 		Fingerprint:   in.fingerprint,
 		AlertStartsAt: in.alertStartsAt,
 		AlertReported: in.reported,
+		OpenedBy:      auth.Actor(ctx),
 		CreatedAt:     time.Now().UTC(),
 	}
 	run := s.workflows.Run(ctx, workflows.Spec{
@@ -193,6 +195,7 @@ func (s *Server) resolve(ctx context.Context, record models.IncidentRecord, at t
 				record.Incident.Status = "resolved"
 				record.Incident.ResolvedAt = &at
 				record.Incident.ResolutionNote = note
+				record.Incident.ResolvedBy = auth.Actor(ctx)
 				record.Events = append(record.Events, models.IncidentEvent{
 					Timestamp:   at,
 					EventType:   incidents.EventResolved,

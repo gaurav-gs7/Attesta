@@ -8,13 +8,16 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/client-go/kubernetes"
+
+	"github.com/gaurav-gs7/attesta/api/internal/auth"
 	"github.com/gaurav-gs7/attesta/api/internal/prometheus"
 )
 
 // ErrNoAuth is returned by Validate when no API token is configured and
 // unauthenticated access has not been explicitly allowed.
-var ErrNoAuth = errors.New("ATTESTA_API_TOKEN is not set; refusing to start an unauthenticated API " +
-	"(set ATTESTA_INSECURE_NO_AUTH=true for local development only)")
+var ErrNoAuth = errors.New("no authentication configured: set ATTESTA_API_TOKENS_FILE, ATTESTA_AUTH_KUBERNETES=true " +
+	"or ATTESTA_API_TOKEN; refusing to start an unauthenticated API (set ATTESTA_INSECURE_NO_AUTH=true for local development only)")
 
 type Config struct {
 	Addr           string
@@ -23,29 +26,93 @@ type Config struct {
 	OutputDir      string
 	APIToken       string
 	InsecureNoAuth bool
-	MaxBodyMB      int64
-	PrometheusURL  string
+	// TokensFile lists API tokens by hash, each with a name and role.
+	TokensFile string
+	// KubernetesAuth enables Kubernetes TokenReview, with roles from
+	// RoleBindingsFile and tokens required to carry Audiences.
+	KubernetesAuth   bool
+	RoleBindingsFile string
+	Audiences        []string
+	// TLSCertFile and TLSKeyFile make the API serve HTTPS.
+	TLSCertFile   string
+	TLSKeyFile    string
+	MaxBodyMB     int64
+	PrometheusURL string
 }
 
 func Load() Config {
 	return Config{
-		Addr:           env("ATTESTA_ADDR", ":8080"),
-		DatabaseURL:    os.Getenv("DATABASE_URL"),
-		TemplateDir:    env("ATTESTA_TEMPLATE_DIR", "templates"),
-		OutputDir:      env("ATTESTA_OUTPUT_DIR", "generated/services"),
-		APIToken:       os.Getenv("ATTESTA_API_TOKEN"),
-		InsecureNoAuth: boolEnv("ATTESTA_INSECURE_NO_AUTH"),
-		MaxBodyMB:      1,
-		PrometheusURL:  os.Getenv("ATTESTA_PROMETHEUS_URL"),
+		Addr:             env("ATTESTA_ADDR", ":8080"),
+		DatabaseURL:      os.Getenv("DATABASE_URL"),
+		TemplateDir:      env("ATTESTA_TEMPLATE_DIR", "templates"),
+		OutputDir:        env("ATTESTA_OUTPUT_DIR", "generated/services"),
+		APIToken:         os.Getenv("ATTESTA_API_TOKEN"),
+		InsecureNoAuth:   boolEnv("ATTESTA_INSECURE_NO_AUTH"),
+		TokensFile:       os.Getenv("ATTESTA_API_TOKENS_FILE"),
+		KubernetesAuth:   boolEnv("ATTESTA_AUTH_KUBERNETES"),
+		RoleBindingsFile: os.Getenv("ATTESTA_AUTH_ROLE_BINDINGS_FILE"),
+		Audiences:        list(os.Getenv("ATTESTA_AUTH_AUDIENCES")),
+		TLSCertFile:      os.Getenv("ATTESTA_TLS_CERT_FILE"),
+		TLSKeyFile:       os.Getenv("ATTESTA_TLS_KEY_FILE"),
+		MaxBodyMB:        1,
+		PrometheusURL:    os.Getenv("ATTESTA_PROMETHEUS_URL"),
 	}
 }
 
 // Validate rejects configurations that would expose an unauthenticated API.
 func (c Config) Validate() error {
-	if c.APIToken == "" && !c.InsecureNoAuth {
+	if c.APIToken == "" && c.TokensFile == "" && !c.KubernetesAuth && !c.InsecureNoAuth {
 		return ErrNoAuth
 	}
+	if c.KubernetesAuth && c.RoleBindingsFile == "" {
+		return errors.New("ATTESTA_AUTH_KUBERNETES needs ATTESTA_AUTH_ROLE_BINDINGS_FILE to map users and groups to roles")
+	}
+	if (c.TLSCertFile == "") != (c.TLSKeyFile == "") {
+		return errors.New("set both ATTESTA_TLS_CERT_FILE and ATTESTA_TLS_KEY_FILE, or neither")
+	}
 	return nil
+}
+
+// Authenticator builds the chain of configured authenticators: the tokens
+// file, Kubernetes TokenReview, then the legacy shared token. It returns
+// nil when none is configured. newKube is called only for Kubernetes auth.
+func (c Config) Authenticator(newKube func() (kubernetes.Interface, error)) (auth.Authenticator, error) {
+	var chain auth.Chain
+	if c.TokensFile != "" {
+		tokens, err := auth.NewTokenFile(c.TokensFile)
+		if err != nil {
+			return nil, err
+		}
+		chain = append(chain, tokens)
+	}
+	if c.KubernetesAuth {
+		bindings, err := auth.LoadBindings(c.RoleBindingsFile)
+		if err != nil {
+			return nil, err
+		}
+		client, err := newKube()
+		if err != nil {
+			return nil, fmt.Errorf("kubernetes client for token review: %w", err)
+		}
+		chain = append(chain, auth.NewTokenReview(client, bindings, c.Audiences))
+	}
+	if c.APIToken != "" {
+		chain = append(chain, auth.NewStaticToken(c.APIToken, auth.RoleAdmin))
+	}
+	if len(chain) == 0 {
+		return nil, nil
+	}
+	return chain, nil
+}
+
+func list(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 // Prometheus reads the Prometheus client configuration:

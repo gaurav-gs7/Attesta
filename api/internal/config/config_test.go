@@ -67,3 +67,25 @@ func TestPrometheusConfigReadsSecretsFromFiles(t *testing.T) {
 		t.Fatal("a malformed timeout was accepted")
 	}
 }
+
+func TestValidateAcceptsEachAuthMethodAndChecksPairs(t *testing.T) {
+	for _, c := range []Config{
+		{TokensFile: "/etc/attesta/tokens.json"},
+		{KubernetesAuth: true, RoleBindingsFile: "/etc/attesta/bindings.json"},
+		{APIToken: "x"},
+		{InsecureNoAuth: true},
+	} {
+		if err := c.Validate(); err != nil {
+			t.Errorf("%+v: %v", c, err)
+		}
+	}
+	for _, c := range []Config{
+		{},
+		{KubernetesAuth: true},
+		{APIToken: "x", TLSCertFile: "/tls.crt"},
+	} {
+		if err := c.Validate(); err == nil {
+			t.Errorf("%+v: accepted", c)
+		}
+	}
+}

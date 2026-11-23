@@ -155,6 +155,7 @@ func (e *Engine) RunIdempotent(ctx context.Context, spec Spec) (models.WorkflowR
 		spec.MaxAttempts = 1
 	}
 	run := newRun(spec)
+	run.Actor = ActorFrom(ctx)
 	if spec.IdempotencyKey == "" {
 		if err := e.store.SaveWorkflowRun(ctx, run); err != nil {
 			return persistFailed(run, "workflow start", err), Executed

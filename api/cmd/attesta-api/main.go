@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"log"
 	"net/http"
@@ -9,6 +10,9 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 
 	"github.com/gaurav-gs7/attesta/api/internal/catalog"
 	"github.com/gaurav-gs7/attesta/api/internal/config"
@@ -22,8 +26,23 @@ func main() {
 	if err := cfg.Validate(); err != nil {
 		log.Fatal(err)
 	}
-	if cfg.APIToken == "" {
-		log.Printf("WARNING: ATTESTA_INSECURE_NO_AUTH is set; /api/ routes accept unauthenticated requests")
+	authenticator, err := cfg.Authenticator(func() (kubernetes.Interface, error) {
+		rc, err := rest.InClusterConfig()
+		if err != nil {
+			return nil, err
+		}
+		return kubernetes.NewForConfig(rc)
+	})
+	if err != nil {
+		log.Fatalf("authentication: %v", err)
+	}
+	if authenticator == nil {
+		log.Printf("WARNING: ATTESTA_INSECURE_NO_AUTH is set; /api/ routes accept unauthenticated requests as an anonymous admin")
+	} else if cfg.APIToken != "" {
+		log.Printf("WARNING: ATTESTA_API_TOKEN is one shared admin identity; prefer ATTESTA_API_TOKENS_FILE or ATTESTA_AUTH_KUBERNETES")
+	}
+	if cfg.TLSCertFile == "" {
+		log.Printf("WARNING: serving plain HTTP; set ATTESTA_TLS_CERT_FILE and ATTESTA_TLS_KEY_FILE unless TLS is terminated in front of the API")
 	}
 
 	ctx := context.Background()
@@ -46,11 +65,16 @@ func main() {
 	}
 
 	generator := templates.NewGenerator(cfg.TemplateDir, cfg.OutputDir)
-	handler := httpapi.NewServer(store, generator,
-		httpapi.WithAPIToken(cfg.APIToken),
-		httpapi.WithMaxBodyBytes(cfg.MaxBodyMB*1024*1024),
+	opts := []httpapi.Option{
+		httpapi.WithMaxBodyBytes(cfg.MaxBodyMB * 1024 * 1024),
 		httpapi.WithPrometheus(promCfg),
-	)
+	}
+	if authenticator != nil {
+		opts = append(opts, httpapi.WithAuthenticator(authenticator))
+	} else {
+		opts = append(opts, httpapi.WithInsecureNoAuth())
+	}
+	handler := httpapi.NewServer(store, generator, opts...)
 
 	reaperCtx, stopReaper := context.WithCancel(ctx)
 	defer stopReaper()
@@ -68,6 +92,11 @@ func main() {
 	errCh := make(chan error, 1)
 	go func() {
 		log.Printf("attesta api listening on %s", cfg.Addr)
+		if cfg.TLSCertFile != "" {
+			server.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+			errCh <- server.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
+			return
+		}
 		errCh <- server.ListenAndServe()
 	}()
 

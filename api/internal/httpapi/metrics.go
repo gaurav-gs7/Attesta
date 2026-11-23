@@ -57,7 +57,6 @@ func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
 		start := time.Now()
 		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(recorder, r)
-		// The mux sets r.Pattern on this same request when a route matches.
 		route, method := routeOf(r), methodOf(r.Method)
 		s.metrics.requests.WithLabelValues(route, method, strconv.Itoa(recorder.status)).Inc()
 		s.metrics.duration.WithLabelValues(route, method).Observe(time.Since(start).Seconds())
@@ -68,13 +67,17 @@ func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
 // /api/v1/services/{name}/rollouts/{id}, or "other" when nothing matched
 // (a 404, or a request rejected before routing).
 func routeOf(r *http.Request) string {
-	if r.Pattern == "" {
+	pattern := r.Pattern
+	if info := infoFrom(r.Context()); info != nil && info.pattern != "" {
+		pattern = info.pattern
+	}
+	if pattern == "" {
 		return "other"
 	}
-	if _, path, ok := strings.Cut(r.Pattern, " "); ok {
+	if _, path, ok := strings.Cut(pattern, " "); ok {
 		return path
 	}
-	return r.Pattern
+	return pattern
 }
 
 func methodOf(method string) string {

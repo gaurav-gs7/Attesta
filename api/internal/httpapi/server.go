@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -18,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gaurav-gs7/attesta/api/internal/auth"
 	"github.com/gaurav-gs7/attesta/api/internal/catalog"
 	"github.com/gaurav-gs7/attesta/api/internal/incidents"
 	"github.com/gaurav-gs7/attesta/api/internal/models"
@@ -33,18 +33,19 @@ import (
 )
 
 type Server struct {
-	store        catalog.Store
-	generator    *templates.Generator
-	apiToken     string
-	maxBodyBytes int64
-	promConfig   promclient.Config
-	prom         *promclient.Client
-	promErr      error
-	startedAt    time.Time
-	metrics      *serverMetrics
-	workflows    *workflows.Engine
-	workflowOpts []workflows.Option
-	logger       *slog.Logger
+	store         catalog.Store
+	generator     *templates.Generator
+	authenticator auth.Authenticator
+	insecure      bool
+	maxBodyBytes  int64
+	promConfig    promclient.Config
+	prom          *promclient.Client
+	promErr       error
+	startedAt     time.Time
+	metrics       *serverMetrics
+	workflows     *workflows.Engine
+	workflowOpts  []workflows.Option
+	logger        *slog.Logger
 }
 
 // WithLogger sets the logger for access logs, recovered panics and workflow
@@ -57,9 +58,29 @@ func WithLogger(l *slog.Logger) Option {
 
 type Option func(*Server)
 
+// WithAPIToken accepts a single shared token as an admin identity named
+// "shared-api-token". Prefer WithAuthenticator with a tokens file or
+// Kubernetes TokenReview, which give every caller its own identity.
 func WithAPIToken(token string) Option {
 	return func(s *Server) {
-		s.apiToken = token
+		if token != "" {
+			s.authenticator = auth.NewStaticToken(token, auth.RoleAdmin)
+		}
+	}
+}
+
+// WithAuthenticator sets how callers are identified.
+func WithAuthenticator(a auth.Authenticator) Option {
+	return func(s *Server) {
+		s.authenticator = a
+	}
+}
+
+// WithInsecureNoAuth lets requests through without credentials, as an
+// anonymous admin. For local development only.
+func WithInsecureNoAuth() Option {
+	return func(s *Server) {
+		s.insecure = true
 	}
 }
 
@@ -158,7 +179,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/workflows/{id}", s.getWorkflow)
 	// The recoverer sits outside auth and inside logging and metrics, so a
 	// panic anywhere in a handler is logged and counted as the 500 it became.
-	return withRequestID(s.logging(s.metricsMiddleware(s.recoverer(s.auth(mux)))))
+	return withRequestID(s.logging(s.metricsMiddleware(s.recoverer(s.auth(recordPattern(mux))))))
 }
 
 func (s *Server) live(w http.ResponseWriter, _ *http.Request) {
@@ -176,7 +197,7 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), readyTimeout)
 	defer cancel()
 	body := map[string]any{
-		"authEnabled": s.apiToken != "",
+		"authEnabled": s.authenticator != nil,
 		"uptimeSec":   int(time.Since(s.startedAt).Seconds()),
 	}
 	if err := s.store.Ping(ctx); err != nil {
@@ -466,7 +487,7 @@ func (s *Server) startRollout(w http.ResponseWriter, r *http.Request) {
 						ServiceID: service.ID, Service: service.Name,
 						Version: req.Version, Image: req.Image, GitSHA: req.GitSHA,
 						State: rollouts.StateStarted, CreatedAt: now, UpdatedAt: now,
-						Events: []models.RolloutEvent{{At: now, To: rollouts.StateStarted, Reason: "deployment gate allowed"}},
+						Events: []models.RolloutEvent{{At: now, To: rollouts.StateStarted, Reason: "deployment gate allowed", Actor: auth.Actor(ctx)}},
 					}, models.Deployment{
 						ServiceID: service.ID, Version: req.Version, Image: req.Image,
 						Environment: service.Environment, Status: rollouts.DeploymentStatus(rollouts.StateStarted),
@@ -615,7 +636,7 @@ func (s *Server) actionReason(w http.ResponseWriter, r *http.Request) (string, b
 
 func (s *Server) transition(w http.ResponseWriter, r *http.Request, service models.Service, rollout models.Rollout, action, reason string) {
 	from := rollout.State
-	if err := rollouts.Apply(&rollout, action, reason, time.Now().UTC()); err != nil {
+	if err := rollouts.Apply(&rollout, action, reason, auth.Actor(r.Context()), time.Now().UTC()); err != nil {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "rollout": rollout})
 		return
 	}
@@ -682,7 +703,7 @@ func (s *Server) healthGate(w http.ResponseWriter, r *http.Request) {
 						return err
 					}
 					from := active.State
-					if err := rollouts.Apply(&active, rollouts.ActionRollback, "health gate: "+decision.Reason, time.Now().UTC()); err != nil {
+					if err := rollouts.Apply(&active, rollouts.ActionRollback, "health gate: "+decision.Reason, auth.Actor(ctx), time.Now().UTC()); err != nil {
 						return err
 					}
 					if err := s.store.UpdateRollout(ctx, active, from); err != nil {
@@ -1060,29 +1081,50 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
+// auth identifies the caller of every /api/ request and checks its role
+// against the route (auth.Required). The caller's identity goes into the
+// request context, the access log, and every workflow run, rollout
+// transition and incident the request records.
 func (s *Server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.apiToken == "" || !strings.HasPrefix(r.URL.Path, "/api/") {
+		if !strings.HasPrefix(r.URL.Path, "/api/") {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// Alertmanager's webhook http_config can only send an Authorization
-		// header, so a Bearer token is accepted as well as X-Attesta-Token.
-		presented := r.Header.Get("X-Attesta-Token")
-		if presented == "" {
-			if bearer, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
-				presented = bearer
+		var principal auth.Principal
+		switch {
+		case s.authenticator != nil:
+			p, err := s.authenticator.Authenticate(r.Context(), auth.Token(r))
+			switch {
+			case errors.Is(err, auth.ErrNoCredentials):
+				w.Header().Set("WWW-Authenticate", `Bearer realm="attesta"`)
+				writeError(w, http.StatusUnauthorized, "missing credentials: send Authorization: Bearer <token>")
+				return
+			case errors.Is(err, auth.ErrInvalidCredentials):
+				w.Header().Set("WWW-Authenticate", `Bearer realm="attesta", error="invalid_token"`)
+				writeError(w, http.StatusUnauthorized, "invalid or unrecognised credentials")
+				return
+			case err != nil:
+				s.logger.ErrorContext(r.Context(), "authentication check failed", "error", err)
+				writeError(w, http.StatusServiceUnavailable, "authentication is temporarily unavailable")
+				return
 			}
-		}
-		// Hash both sides so the comparison runs in constant time regardless of
-		// the presented token's length.
-		got := sha256.Sum256([]byte(presented))
-		want := sha256.Sum256([]byte(s.apiToken))
-		if subtle.ConstantTimeCompare(got[:], want[:]) != 1 {
-			writeError(w, http.StatusUnauthorized, "missing or invalid Attesta API token")
+			principal = p
+		case s.insecure:
+			principal = auth.Principal{Name: "anonymous", Role: auth.RoleAdmin, Via: "insecure"}
+		default:
+			writeError(w, http.StatusUnauthorized, "authentication is not configured on this server")
 			return
 		}
-		next.ServeHTTP(w, r)
+		if need := auth.Required(r.Method, r.URL.Path); !principal.Allows(need) {
+			writeError(w, http.StatusForbidden, fmt.Sprintf("%s has role %s; this request needs %s", principal.Name, principal.Role, need))
+			return
+		}
+		if info := infoFrom(r.Context()); info != nil {
+			info.actor = principal.Name
+		}
+		ctx := workflows.WithActor(auth.WithPrincipal(r.Context(), principal), principal.Name)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -1091,7 +1133,12 @@ func (s *Server) logging(next http.Handler) http.Handler {
 		start := time.Now()
 		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(recorder, r)
+		actor := ""
+		if info := infoFrom(r.Context()); info != nil {
+			actor = info.actor
+		}
 		s.logger.InfoContext(r.Context(), "request",
+			"actor", actor,
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", recorder.status,

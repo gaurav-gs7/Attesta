@@ -55,7 +55,21 @@ The scaffold is written to `generated/services/payments-api`. Without `ATTESTA_P
 
 ## Authentication
 
-The API refuses to start unless `ATTESTA_API_TOKEN` is set. Clients send the token in the `X-Attesta-Token` header; `/livez`, `/readyz` and `/metrics` stay open for probes and scrapers. For throwaway local runs only, `ATTESTA_INSECURE_NO_AUTH=true` starts the API without authentication and logs a warning.
+Every `/api/` request is made by an identity with a role; `/livez`, `/readyz` and `/metrics` stay open for probes and scrapers. Roles are ordered, each including the one before:
+
+| Role | May |
+| --- | --- |
+| `viewer` | read everything |
+| `operator` | start and change rollouts, send health-gate results, open and resolve incidents, post Alertmanager alerts |
+| `admin` | register services |
+
+Callers send `Authorization: Bearer <token>` (the older `X-Attesta-Token` header still works). Identities come from one or more of:
+
+- **A tokens file**, `ATTESTA_API_TOKENS_FILE`: JSON listing each token's name, role and SHA-256 (`{"tokens":[{"name":"ci-deployer","role":"operator","sha256":"..."}]}`; hash a token with `printf %s "$TOKEN" | sha256sum`). Only hashes are stored. The file is re-read when it changes, so a token is rotated by adding the new hash, moving the caller over and removing the old one, without a restart.
+- **Kubernetes TokenReview**, `ATTESTA_AUTH_KUBERNETES=true`: service account and user tokens are checked with the cluster's TokenReview API (results cached for a minute). `ATTESTA_AUTH_ROLE_BINDINGS_FILE` maps users and groups to roles (`{"bindings":[{"role":"operator","users":["system:serviceaccount:ci:deployer"]},{"role":"viewer","groups":["system:authenticated"]}]}`); an authenticated caller with no binding is refused. `ATTESTA_AUTH_AUDIENCES` (for example `attesta`) requires tokens issued for this API.
+- **`ATTESTA_API_TOKEN`**, one shared token acting as admin under the name `shared-api-token`. It is kept for compatibility and logs a warning, because every caller is the same identity.
+
+The caller's name is recorded as the actor of every workflow run, every rollout transition, the opener and resolver of every incident, and in the access log. Without any of these the API refuses to start; `ATTESTA_INSECURE_NO_AUTH=true` runs it for throwaway local use, every caller an anonymous admin. `ATTESTA_TLS_CERT_FILE` and `ATTESTA_TLS_KEY_FILE` make it serve HTTPS (TLS 1.2 or later); without them it warns that TLS must be terminated in front of it. OIDC is not implemented.
 
 
 ## Kubernetes Controller
