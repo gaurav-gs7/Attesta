@@ -7,11 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/gaurav-gs7/attesta/api/internal/models"
@@ -76,7 +76,7 @@ func (s *PostgresStore) CreateService(ctx context.Context, service models.Servic
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
 	`, service.ID, service.Name, service.Team, service.Owner, service.Tier, service.Language,
 		service.RepoURL, service.Repository, service.Pager, service.RunbookURL, service.DashboardURL,
-		encodeList(service.Dependencies), service.Namespace, service.Environment, service.SLOTarget,
+		textArray(service.Dependencies), service.Namespace, service.Environment, service.SLOTarget,
 		service.SLOLatencyP95Ms, service.SLOErrorRate, service.DeploymentStrategy,
 		service.RollbackOnFailure, service.CreatedAt, service.UpdatedAt)
 	if err != nil {
@@ -106,16 +106,16 @@ func (s *PostgresStore) ListServices(ctx context.Context) ([]models.Service, err
 	var services []models.Service
 	for rows.Next() {
 		var service models.Service
-		var dependencies string
+		var dependencies []string
 		if err := rows.Scan(&service.ID, &service.Name, &service.Team, &service.Owner,
 			&service.Tier, &service.Language, &service.RepoURL, &service.Repository,
-			&service.Pager, &service.RunbookURL, &service.DashboardURL, &dependencies,
+			&service.Pager, &service.RunbookURL, &service.DashboardURL, arrayScanner(&dependencies),
 			&service.Namespace, &service.Environment, &service.SLOTarget, &service.SLOLatencyP95Ms,
 			&service.SLOErrorRate, &service.DeploymentStrategy, &service.RollbackOnFailure,
 			&service.CreatedAt, &service.UpdatedAt); err != nil {
 			return nil, err
 		}
-		service.Dependencies = decodeList(dependencies)
+		service.Dependencies = nonEmpty(dependencies)
 		services = append(services, service)
 	}
 	return services, rows.Err()
@@ -123,7 +123,7 @@ func (s *PostgresStore) ListServices(ctx context.Context) ([]models.Service, err
 
 func (s *PostgresStore) GetServiceByName(ctx context.Context, name string) (models.Service, error) {
 	var service models.Service
-	var dependencies string
+	var dependencies []string
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, name, team, owner, tier, language, repo_url, repository, pager,
 		       runbook_url, dashboard_url, dependencies, namespace, environment,
@@ -133,14 +133,14 @@ func (s *PostgresStore) GetServiceByName(ctx context.Context, name string) (mode
 		WHERE name = $1
 	`, name).Scan(&service.ID, &service.Name, &service.Team, &service.Owner,
 		&service.Tier, &service.Language, &service.RepoURL, &service.Repository,
-		&service.Pager, &service.RunbookURL, &service.DashboardURL, &dependencies,
+		&service.Pager, &service.RunbookURL, &service.DashboardURL, arrayScanner(&dependencies),
 		&service.Namespace, &service.Environment, &service.SLOTarget, &service.SLOLatencyP95Ms,
 		&service.SLOErrorRate, &service.DeploymentStrategy, &service.RollbackOnFailure,
 		&service.CreatedAt, &service.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return models.Service{}, ErrNotFound
 	}
-	service.Dependencies = decodeList(dependencies)
+	service.Dependencies = nonEmpty(dependencies)
 	return service, err
 }
 
@@ -887,21 +887,22 @@ func timePtr(t time.Time) *time.Time {
 // failed.
 const activeKeyIndex = "uq_workflow_runs_active_idempotency_key"
 
-func encodeList(values []string) string {
-	return strings.Join(values, ",")
+// textArray is a []string for a NOT NULL text[] column: nil becomes '{}'.
+func textArray(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
 }
 
-func decodeList(value string) []string {
-	if strings.TrimSpace(value) == "" {
+// arrayScanner scans a text[] column; database/sql cannot scan arrays
+// itself. A pgtype.Map caches scan plans and is not safe for concurrent
+// use, so each scan gets its own.
+func arrayScanner(dst *[]string) any { return pgtype.NewMap().SQLScanner(dst) }
+
+func nonEmpty(values []string) []string {
+	if len(values) == 0 {
 		return nil
 	}
-	parts := strings.Split(value, ",")
-	out := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			out = append(out, part)
-		}
-	}
-	return out
+	return values
 }

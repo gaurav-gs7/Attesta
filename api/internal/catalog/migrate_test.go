@@ -166,3 +166,13 @@ func TestSchemaHasNoUnusedTables(t *testing.T) {
 		}
 	}
 }
+
+// onlyMigrations is a filesystem holding the given migrations, to bring a
+// test database to an older version.
+func onlyMigrations(ms []migration) fstest.MapFS {
+	fsys := fstest.MapFS{}
+	for _, m := range ms {
+		fsys["migrations/"+m.name] = &fstest.MapFile{Data: []byte(m.sql)}
+	}
+	return fsys
+}

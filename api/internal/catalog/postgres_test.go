@@ -138,8 +138,21 @@ func TestPostgresRefusesASecondActiveRun(t *testing.T) {
 // Audit W-2: databases written by earlier versions hold several active runs
 // per key. Migrating keeps one, retires the rest and builds the unique index.
 func TestPostgresMigrationDeduplicatesActiveRuns(t *testing.T) {
-	store, dsn := postgresForTest(t)
+	// A database created by the start-up DDL of earlier versions: the
+	// baseline schema, without the unique index, and no recorded version.
+	dsn := emptyDatabase(t)
 	ctx := context.Background()
+	all, err := loadMigrations(migrationFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &PostgresStore{db: openDB(t, dsn)}
+	if err := migrateFS(ctx, store.db, onlyMigrations(all[:1])); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`DROP TABLE schema_migrations`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := store.db.Exec(`DROP INDEX ` + activeKeyIndex); err != nil {
 		t.Fatal(err)
 	}
@@ -153,11 +166,6 @@ func TestPostgresMigrationDeduplicatesActiveRuns(t *testing.T) {
 		}
 	}
 
-	// A database created by the start-up DDL of earlier versions has no
-	// recorded version, so the baseline migration runs over it.
-	if _, err := store.db.Exec(`DROP TABLE schema_migrations`); err != nil {
-		t.Fatal(err)
-	}
 	migrated, err := NewPostgresStore(ctx, dsn)
 	if err != nil {
 		t.Fatalf("migrate a database with duplicate active runs: %v", err)
