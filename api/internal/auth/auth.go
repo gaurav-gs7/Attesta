@@ -87,7 +87,7 @@ func (c Chain) Authenticate(ctx context.Context, token string) (Principal, error
 	if token == "" {
 		return Principal{}, ErrNoCredentials
 	}
-	var lastErr error = ErrInvalidCredentials
+	lastErr := ErrInvalidCredentials
 	for _, a := range c {
 		p, err := a.Authenticate(ctx, token)
 		if err == nil {
