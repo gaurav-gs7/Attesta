@@ -153,6 +153,11 @@ func TestPostgresMigrationDeduplicatesActiveRuns(t *testing.T) {
 		}
 	}
 
+	// A database created by the start-up DDL of earlier versions has no
+	// recorded version, so the baseline migration runs over it.
+	if _, err := store.db.Exec(`DROP TABLE schema_migrations`); err != nil {
+		t.Fatal(err)
+	}
 	migrated, err := NewPostgresStore(ctx, dsn)
 	if err != nil {
 		t.Fatalf("migrate a database with duplicate active runs: %v", err)
