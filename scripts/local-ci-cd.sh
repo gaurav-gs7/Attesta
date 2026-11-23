@@ -284,9 +284,9 @@ attesta_reliability_demo() {
   run env GOCACHE="$GOCACHE" GOMODCACHE="$GOMODCACHE" ATTESTA_API_TOKEN="$ATTESTA_API_TOKEN" ATTESTA_API_URL="$ATTESTA_API_URL" \
     go run ./cli/cmd/attesta health-gate \
       --name "$SERVICE_NAME" \
-      --p99-latency-ms 450 \
+      --p95-latency-ms 450 \
       --error-rate 0.2 \
-      --success-count 100
+      --requests 100
 
   if [[ "$AUTO_ROLLBACK" == "true" ]]; then
     automate_kubernetes_rollback
