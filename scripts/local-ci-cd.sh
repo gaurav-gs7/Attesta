@@ -280,7 +280,7 @@ verify_runtime() {
 }
 
 attesta_reliability_demo() {
-  log "SIMULATED: posting fixed bad metrics (p99 450ms) to the Attesta health gate; nothing is measured from the cluster"
+  log "SIMULATED: posting fixed bad metrics (p95 450ms) to the Attesta health gate; nothing is measured from the cluster"
   run env GOCACHE="$GOCACHE" GOMODCACHE="$GOMODCACHE" ATTESTA_API_TOKEN="$ATTESTA_API_TOKEN" ATTESTA_API_URL="$ATTESTA_API_URL" \
     go run ./cli/cmd/attesta health-gate \
       --name "$SERVICE_NAME" \
