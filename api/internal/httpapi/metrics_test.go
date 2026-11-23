@@ -40,9 +40,9 @@ func TestRequestMetricsHaveBoundedLabels(t *testing.T) {
 		routes.ServeHTTP(rec, httptest.NewRequest(method, path, nil))
 	}
 	for i := 0; i < 2000; i++ {
-		send(http.MethodGet, fmt.Sprintf("/nope/%d", i))                            // unmatched, no token needed
+		send(http.MethodGet, fmt.Sprintf("/nope/%d", i))                               // unmatched, no token needed
 		send(http.MethodGet, fmt.Sprintf("/api/v1/services/svc-%d/rollouts/%d", i, i)) // unauthenticated, ID-bearing
-		send(fmt.Sprintf("M%d", i), "/livez")                                         // made-up method
+		send(fmt.Sprintf("M%d", i), "/livez")                                          // made-up method
 	}
 	body := scrape(t, server)
 	if n := seriesCount(body, "attesta_http_requests_total"); n > 10 {
