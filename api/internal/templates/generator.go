@@ -30,9 +30,9 @@ type data struct {
 	PrometheusName string
 	// BurnWindows are the windows of the multi-window burn-rate rules, the
 	// same ones the API's deployment gate uses.
-	BurnWindows []string
-	ImageName      string
-	ContainerPort  int
+	BurnWindows   []string
+	ImageName     string
+	ContainerPort int
 }
 
 func NewGenerator(templateDir, outputDir string) *Generator {
