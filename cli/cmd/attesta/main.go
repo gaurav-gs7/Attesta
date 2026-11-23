@@ -7,10 +7,19 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
+
+	"github.com/gaurav-gs7/attesta/internal/scaffold"
 )
+
+// serviceName is a DNS label, as the API requires; checked before the name
+// becomes a directory.
+var serviceName = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
 
 type onboardRequest struct {
 	Name               string  `json:"name"`
@@ -139,6 +148,8 @@ func service(args []string) error {
 		return get("/api/v1/services")
 	case "describe":
 		return serviceGetByArg(args[1:], "service describe", "/api/v1/services/%s")
+	case "scaffold":
+		return serviceScaffold(args[1:])
 	default:
 		return fmt.Errorf("unknown service subcommand %q", args[0])
 	}
@@ -163,6 +174,7 @@ func onboard(args []string) error {
 	fs.StringVar(&req.Pager, "pager", "", "pager/on-call rotation")
 	fs.StringVar(&req.RunbookURL, "runbook", "", "runbook URL")
 	fs.StringVar(&req.DashboardURL, "dashboard", "", "dashboard URL")
+	output := fs.String("output", "generated/services", "directory to write the scaffold into, as <output>/<name>; empty to skip the download")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -173,7 +185,76 @@ func onboard(args []string) error {
 		req.Team = req.Owner
 	}
 
-	return post("/api/v1/services", req)
+	if err := post("/api/v1/services", req); err != nil {
+		return err
+	}
+	if *output == "" {
+		return nil
+	}
+	return fetchScaffold(req.Name, *output)
+}
+
+func serviceScaffold(args []string) error {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return fmt.Errorf("service name is required")
+	}
+	fs := flag.NewFlagSet("service scaffold", flag.ExitOnError)
+	output := fs.String("output", "generated/services", "directory to write the scaffold into, as <output>/<name>")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	return fetchScaffold(args[0], *output)
+}
+
+// fetchScaffold downloads the service's scaffold archive and writes it to
+// output/name. The archive is checked (regular files only, all under
+// name/, size limits) and written to a temporary directory renamed into
+// place, so a failure leaves any earlier scaffold untouched.
+func fetchScaffold(name, output string) error {
+	if !serviceName.MatchString(name) {
+		return fmt.Errorf("service name %q is not a DNS label", name)
+	}
+	raw, err := download("/api/v1/services/" + url.PathEscape(name) + "/scaffold")
+	if err != nil {
+		return err
+	}
+	files, err := scaffold.ReadTarGz(bytes.NewReader(raw), name)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(output, name)
+	if err := scaffold.WriteDir(dir, files); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "scaffold: %d files written to %s\n", len(files), dir)
+	return nil
+}
+
+func download(path string) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(baseURL(), "/")+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if token := os.Getenv("ATTESTA_API_TOKEN"); token != "" {
+		req.Header.Set("X-Attesta-Token", token)
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, scaffold.MaxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("api returned %s: %s", resp.Status, string(body))
+	}
+	if len(body) > scaffold.MaxBytes {
+		return nil, fmt.Errorf("scaffold archive is over %d bytes", scaffold.MaxBytes)
+	}
+	return body, nil
 }
 
 func onboardInit(args []string) error {
@@ -457,6 +538,7 @@ Usage:
   attesta onboard --name payments-api --language go --team platform --owner gaurav --env staging --slo 99.9 --strategy canary
   attesta service list
   attesta service describe payments-api
+  attesta service scaffold payments-api --output generated/services
   attesta check payments-api
   attesta score payments-api
   attesta slo status payments-api

@@ -140,5 +140,5 @@ func TestNoAuthenticatorFailsClosed(t *testing.T) {
 
 func templatesFor(t *testing.T, root string) *templates.Generator {
 	t.Helper()
-	return templates.NewGenerator(filepath.Join(root, "templates"), t.TempDir())
+	return templates.NewGenerator(filepath.Join(root, "templates"))
 }

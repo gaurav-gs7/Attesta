@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gaurav-gs7/attesta/api/internal/catalog"
 	"github.com/gaurav-gs7/attesta/api/internal/templates"
+	"github.com/gaurav-gs7/attesta/internal/scaffold"
 )
 
 func TestAPITokenRequiredForAPIPaths(t *testing.T) {
@@ -67,13 +70,13 @@ func TestCreateServiceIdempotencySurvivesEngineRestart(t *testing.T) {
 		"slo":"99.9",
 		"deploymentStrategy":"canary"
 	}`)
-	firstServer := NewServer(store, templates.NewGenerator(filepath.Join(root, "templates"), t.TempDir()), WithAPIToken("secret"))
+	firstServer := NewServer(store, templates.NewGenerator(filepath.Join(root, "templates")), WithAPIToken("secret"))
 	first := authorizedRequest(firstServer, http.MethodPost, "/api/v1/services", body)
 	if first.Code != http.StatusCreated {
 		t.Fatalf("expected first create 201, got %d: %s", first.Code, first.Body.String())
 	}
 
-	restarted := NewServer(store, templates.NewGenerator(filepath.Join(root, "templates"), t.TempDir()), WithAPIToken("secret"))
+	restarted := NewServer(store, templates.NewGenerator(filepath.Join(root, "templates")), WithAPIToken("secret"))
 	second := authorizedRequest(restarted, http.MethodPost, "/api/v1/services", body)
 	if second.Code != http.StatusOK {
 		t.Fatalf("expected idempotent create after restart 200, got %d: %s", second.Code, second.Body.String())
@@ -125,7 +128,7 @@ func TestSLOEvaluationFailsClosedWhenPrometheusUnavailable(t *testing.T) {
 func TestIncidentsPersistThroughStore(t *testing.T) {
 	store := catalog.NewMemoryStore()
 	root := filepath.Clean("../../..")
-	generator := templates.NewGenerator(filepath.Join(root, "templates"), t.TempDir())
+	generator := templates.NewGenerator(filepath.Join(root, "templates"))
 	server := NewServer(store, generator, WithAPIToken("secret"))
 	createBody := []byte(`{
 		"name":"payments-api",
@@ -165,7 +168,7 @@ func TestIncidentsPersistThroughStore(t *testing.T) {
 func testServer(t *testing.T, opts ...Option) *Server {
 	t.Helper()
 	root := filepath.Clean("../../..")
-	generator := templates.NewGenerator(filepath.Join(root, "templates"), t.TempDir())
+	generator := templates.NewGenerator(filepath.Join(root, "templates"))
 	return NewServer(catalog.NewMemoryStore(), generator, opts...)
 }
 
@@ -184,4 +187,51 @@ func authorizedRequest(server *Server, method, path string, body []byte) *httpte
 	rec := httptest.NewRecorder()
 	server.Routes().ServeHTTP(rec, req)
 	return rec
+}
+
+// Audit X-7: onboarding wrote the scaffold to the API's own disk, returned
+// the server path, and left a partial tree when rendering failed. It is
+// now rendered in memory and downloaded as an archive.
+func TestScaffoldIsServedAsAnArchive(t *testing.T) {
+	server := newTestServer(t, catalog.NewMemoryStore())
+	rec := authorizedRequest(server, http.MethodPost, "/api/v1/services", onboardingBody)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("onboard: %d %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Generated map[string]any `json:"generated"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if _, leaked := body.Generated["outputPath"]; leaked || strings.Contains(rec.Body.String(), os.TempDir()) {
+		t.Fatalf("onboarding response names a server path: %s", rec.Body.String())
+	}
+	if body.Generated["archive"] != "/api/v1/services/payments-api/scaffold" {
+		t.Fatalf("archive link = %v", body.Generated["archive"])
+	}
+
+	dl := authorizedRequest(server, http.MethodGet, "/api/v1/services/payments-api/scaffold", nil)
+	if dl.Code != http.StatusOK || dl.Header().Get("Content-Type") != "application/gzip" {
+		t.Fatalf("download: %d %s", dl.Code, dl.Header().Get("Content-Type"))
+	}
+	files, err := scaffold.ReadTarGz(dl.Body, "payments-api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed, _ := body.Generated["files"].([]any)
+	if len(files) == 0 || len(files) != len(listed) {
+		t.Fatalf("archive has %d files, onboarding listed %d", len(files), len(listed))
+	}
+	found := false
+	for _, f := range files {
+		found = found || f.Path == ".github/workflows/ci.yml"
+	}
+	if !found {
+		t.Fatal("archive lacks the CI workflow")
+	}
+
+	if code := authorizedRequest(server, http.MethodGet, "/api/v1/services/nope/scaffold", nil).Code; code != http.StatusNotFound {
+		t.Fatalf("unknown service: %d, want 404", code)
+	}
 }

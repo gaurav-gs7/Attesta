@@ -30,6 +30,7 @@ import (
 	sloengine "github.com/gaurav-gs7/attesta/api/internal/slo"
 	"github.com/gaurav-gs7/attesta/api/internal/templates"
 	"github.com/gaurav-gs7/attesta/api/internal/workflows"
+	scaffoldpkg "github.com/gaurav-gs7/attesta/internal/scaffold"
 )
 
 type Server struct {
@@ -177,6 +178,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/services/{name}/health-gate", s.healthGate)
 	mux.HandleFunc("POST /api/v1/services/{name}/rollback", s.serviceRollback)
 	mux.HandleFunc("GET /api/v1/services/{name}/runbook", s.runbook)
+	mux.HandleFunc("GET /api/v1/services/{name}/scaffold", s.scaffold)
 	mux.HandleFunc("POST /api/v1/incidents", s.createIncident)
 	mux.HandleFunc("GET /api/v1/incidents", s.listIncidents)
 	mux.HandleFunc("GET /api/v1/incidents/{id}", s.getIncident)
@@ -238,7 +240,7 @@ func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var created models.Service
-	var generated templates.Result
+	var generated templates.Scaffold
 	idempotent := false
 	run, outcome := s.workflows.RunIdempotent(r.Context(), workflows.Spec{
 		Name:           "service-onboarding",
@@ -298,8 +300,11 @@ func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
 				Name:        "render-golden-path-scaffold",
 				MaxAttempts: 2,
 				Run: func(context.Context) error {
+					// Rendered in memory, to check the service renders; the
+					// files are served by GET .../scaffold, never written
+					// to this server's disk.
 					var err error
-					generated, err = s.generator.Generate(created)
+					generated, err = s.generator.Render(created)
 					return err
 				},
 			},
@@ -323,7 +328,7 @@ func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
 			s.internalError(w, r, err)
 			return
 		}
-		generated, err = s.generator.Generate(created)
+		generated, err = s.generator.Render(created)
 		if err != nil {
 			s.internalError(w, r, err)
 			return
@@ -337,7 +342,7 @@ func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, status, map[string]any{
 		"service":    created,
-		"generated":  generated,
+		"generated":  scaffoldSummary(generated),
 		"workflow":   run,
 		"idempotent": idempotent,
 	})
@@ -851,6 +856,40 @@ func (s *Server) incidentPostmortem(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 	_, _ = w.Write([]byte(incidents.Postmortem(record)))
+}
+
+// scaffoldSummary is what onboarding reports about the scaffold: the files
+// it contains and where to download it. No server paths.
+func scaffoldSummary(sc templates.Scaffold) map[string]any {
+	return map[string]any{
+		"serviceName": sc.ServiceName,
+		"files":       sc.Paths(),
+		"archive":     "/api/v1/services/" + sc.ServiceName + "/scaffold",
+	}
+}
+
+// scaffold renders the service's scaffold on demand and returns it as a
+// gzipped tar with every file under <name>/. It is rendered into memory
+// first, so a failure is a JSON error rather than a truncated archive.
+func (s *Server) scaffold(w http.ResponseWriter, r *http.Request) {
+	service, ok := s.loadService(w, r)
+	if !ok {
+		return
+	}
+	rendered, err := s.generator.Render(service)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	var buf bytes.Buffer
+	if err := scaffoldpkg.WriteTarGz(&buf, service.Name, rendered.Files); err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-scaffold.tar.gz"`, service.Name))
+	w.Header().Set("Content-Length", strconv.Itoa(buf.Len()))
+	_, _ = w.Write(buf.Bytes())
 }
 
 func (s *Server) runbook(w http.ResponseWriter, r *http.Request) {

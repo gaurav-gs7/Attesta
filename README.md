@@ -51,7 +51,7 @@ go run ./cli/cmd/attesta service init payments-api \
   --pager payments-oncall
 ```
 
-The scaffold is written to `generated/services/payments-api`. Without `ATTESTA_PROMETHEUS_URL` the SLO state is `unknown`, so `attesta slo status payments-api` reports why, and rollouts are refused.
+The API renders the scaffold in memory and never writes it to its own disk; the CLI downloads it from `GET /api/v1/services/payments-api/scaffold` (a `.tar.gz` with every file under `payments-api/`) and writes it to `generated/services/payments-api` (`--output` changes the parent, `--output ""` skips it; `attesta service scaffold payments-api` fetches it again). The CLI accepts only regular files under that one directory, within size limits, and writes them to a temporary directory that is renamed into place, so a failed download leaves an earlier scaffold as it was. Without `ATTESTA_PROMETHEUS_URL` the SLO state is `unknown`, so `attesta slo status payments-api` reports why, and rollouts are refused.
 
 ## Authentication
 
@@ -214,6 +214,7 @@ Without `DATABASE_URL`, Attesta keeps everything in memory. With it, the service
 | `POST /api/v1/services/{name}/health-gate` | Evaluate caller-supplied canary metrics |
 | `POST /api/v1/services/{name}/rollback` | Record a rollback request |
 | `GET /api/v1/services/{name}/runbook` | Runbook rendered from the service record |
+| `GET /api/v1/services/{name}/scaffold` | The service's scaffold as a `.tar.gz`, rendered on demand |
 | `POST /api/v1/incidents`, `GET /api/v1/incidents` | Open and list incidents |
 | `POST /api/v1/alerts/alertmanager` | Alertmanager webhook |
 | `GET /api/v1/incidents/{id}`, `.../timeline`, `.../postmortem`, `POST .../resolve` | Incident record, timeline, draft, resolve |

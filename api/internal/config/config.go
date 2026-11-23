@@ -23,7 +23,6 @@ type Config struct {
 	Addr           string
 	DatabaseURL    string
 	TemplateDir    string
-	OutputDir      string
 	APIToken       string
 	InsecureNoAuth bool
 	// TokensFile lists API tokens by hash, each with a name and role.
@@ -45,7 +44,6 @@ func Load() Config {
 		Addr:             env("ATTESTA_ADDR", ":8080"),
 		DatabaseURL:      os.Getenv("DATABASE_URL"),
 		TemplateDir:      env("ATTESTA_TEMPLATE_DIR", "templates"),
-		OutputDir:        env("ATTESTA_OUTPUT_DIR", "generated/services"),
 		APIToken:         os.Getenv("ATTESTA_API_TOKEN"),
 		InsecureNoAuth:   boolEnv("ATTESTA_INSECURE_NO_AUTH"),
 		TokensFile:       os.Getenv("ATTESTA_API_TOKENS_FILE"),

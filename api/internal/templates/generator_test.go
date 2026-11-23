@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/gaurav-gs7/attesta/api/internal/models"
+	"github.com/gaurav-gs7/attesta/internal/scaffold"
 )
 
 func testService(language string) models.Service {
@@ -36,12 +37,27 @@ func testService(language string) models.Service {
 	}
 }
 
+// Result is a scaffold rendered and written to a temporary directory, so
+// tests can run the validator and build the generated service.
+type Result struct {
+	OutputPath string
+	Files      []string
+}
+
 func generate(t *testing.T, service models.Service) Result {
 	t.Helper()
 	root := filepath.Clean("../../..")
-	result, err := NewGenerator(filepath.Join(root, "templates"), t.TempDir()).Generate(service)
+	rendered, err := NewGenerator(filepath.Join(root, "templates")).Render(service)
 	if err != nil {
 		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), service.Name)
+	if err := scaffold.WriteDir(dir, rendered.Files); err != nil {
+		t.Fatal(err)
+	}
+	result := Result{OutputPath: dir}
+	for _, p := range rendered.Paths() {
+		result.Files = append(result.Files, filepath.Join(dir, filepath.FromSlash(p)))
 	}
 	return result
 }
@@ -389,11 +405,12 @@ func TestTemplatesQuoteUserValues(t *testing.T) {
 	root := filepath.Clean("../../..")
 	evil := testService("go")
 	evil.Team = "platform\n    pod-security.kubernetes.io/enforce: privileged"
-	target := filepath.Join(t.TempDir(), "namespace.yaml")
-	if err := renderTemplateFile(filepath.Join(root, "templates/kustomize/base/namespace.yaml.tmpl"), target, data{Service: evil}); err != nil {
+	source := filepath.Join(root, "templates/kustomize/base/namespace.yaml.tmpl")
+	tmpl, err := os.ReadFile(source)
+	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(target)
+	raw, err := renderTemplate(source, tmpl, data{Service: evil})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,7 +428,7 @@ func TestTemplatesQuoteUserValues(t *testing.T) {
 	}
 
 	// And the generator refuses such input outright.
-	if _, err := NewGenerator(filepath.Join(root, "templates"), t.TempDir()).Generate(evil); err == nil {
+	if _, err := NewGenerator(filepath.Join(root, "templates")).Render(evil); err == nil {
 		t.Fatal("generator rendered a service with an injected team")
 	}
 }

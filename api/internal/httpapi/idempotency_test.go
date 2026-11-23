@@ -80,7 +80,7 @@ func newTestServer(t *testing.T, store catalog.Store, opts ...Option) *Server {
 	t.Helper()
 	root := filepath.Clean("../../..")
 	opts = append([]Option{WithAPIToken("secret")}, opts...)
-	return NewServer(store, templates.NewGenerator(filepath.Join(root, "templates"), t.TempDir()), opts...)
+	return NewServer(store, templates.NewGenerator(filepath.Join(root, "templates")), opts...)
 }
 
 // failingStore fails the next N claims, or exactly the Nth workflow save,

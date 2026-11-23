@@ -73,7 +73,7 @@ func main() {
 		log.Fatalf("request timeout: %v", err)
 	}
 
-	generator := templates.NewGenerator(cfg.TemplateDir, cfg.OutputDir)
+	generator := templates.NewGenerator(cfg.TemplateDir)
 	opts := []httpapi.Option{
 		httpapi.WithMaxBodyBytes(cfg.MaxBodyMB * 1024 * 1024),
 		httpapi.WithPrometheus(promCfg),

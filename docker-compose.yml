@@ -23,16 +23,17 @@ services:
       ATTESTA_ADDR: ":8080"
       DATABASE_URL: "postgres://attesta:attesta@postgres:5432/attesta?sslmode=disable"
       ATTESTA_TEMPLATE_DIR: "/app/templates"
-      ATTESTA_OUTPUT_DIR: "/app/generated/services"
       ATTESTA_API_TOKEN: "local-dev-token"
     ports:
       - "8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
-    volumes:
-      - attesta-generated:/app/generated
+    # The API writes nothing to disk.
+    read_only: true
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
 
 volumes:
   attesta-postgres:
-  attesta-generated:

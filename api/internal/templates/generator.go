@@ -4,26 +4,42 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
+	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"text/template"
 
 	"github.com/gaurav-gs7/attesta/api/internal/models"
 	"github.com/gaurav-gs7/attesta/api/internal/security"
 	"github.com/gaurav-gs7/attesta/api/internal/slo"
+	"github.com/gaurav-gs7/attesta/internal/scaffold"
 )
 
+// Generator renders a service's golden-path scaffold from templateDir. It
+// only reads templateDir: the scaffold is built in memory and handed to
+// the caller, which serves it as an archive or writes it where the
+// developer asked.
 type Generator struct {
 	templateDir string
-	outputDir   string
 }
 
-type Result struct {
-	ServiceName string   `json:"serviceName"`
-	OutputPath  string   `json:"outputPath"`
-	Files       []string `json:"files"`
+// Scaffold is a rendered scaffold. File paths are relative to the
+// service's directory.
+type Scaffold struct {
+	ServiceName string
+	Files       []scaffold.File
+}
+
+// Paths lists the scaffold's files, sorted.
+func (s Scaffold) Paths() []string {
+	paths := make([]string, 0, len(s.Files))
+	for _, f := range s.Files {
+		paths = append(paths, f.Path)
+	}
+	sort.Strings(paths)
+	return paths
 }
 
 type data struct {
@@ -37,24 +53,21 @@ type data struct {
 	ContainerPort int
 }
 
-func NewGenerator(templateDir, outputDir string) *Generator {
-	return &Generator{templateDir: templateDir, outputDir: outputDir}
+func NewGenerator(templateDir string) *Generator {
+	return &Generator{templateDir: templateDir}
 }
 
-func (g *Generator) Generate(service models.Service) (Result, error) {
+// Render renders service's scaffold in memory. Nothing is written on
+// failure because nothing is written at all.
+func (g *Generator) Render(service models.Service) (Scaffold, error) {
 	// The API validates services before generating, but the generator is a
 	// library too: it refuses input it cannot render safely.
 	if err := security.RejectIfFindings(security.ValidateService(service)); err != nil {
-		return Result{}, fmt.Errorf("refusing to generate a scaffold: %w", err)
+		return Scaffold{}, fmt.Errorf("refusing to generate a scaffold: %w", err)
 	}
 	languageTemplates := filepath.Join(g.templateDir, "service-"+strings.ToLower(service.Language))
 	if _, err := os.Stat(languageTemplates); err != nil {
-		return Result{}, fmt.Errorf("language templates: %w", err)
-	}
-
-	outputPath := filepath.Join(g.outputDir, service.Name)
-	if err := os.MkdirAll(outputPath, 0o755); err != nil {
-		return Result{}, err
+		return Scaffold{}, fmt.Errorf("language templates: %w", err)
 	}
 
 	d := data{
@@ -66,109 +79,90 @@ func (g *Generator) Generate(service models.Service) (Result, error) {
 		ContainerPort:  8080,
 	}
 
-	var files []string
+	out := Scaffold{ServiceName: service.Name}
+	seen := map[string]string{}
 	for _, section := range []copySection{
-		{source: languageTemplates, target: outputPath},
-		{source: filepath.Join(g.templateDir, "attesta"), target: outputPath},
-		{source: filepath.Join(g.templateDir, "github-actions"), target: filepath.Join(outputPath, ".github", "workflows")},
-		{source: filepath.Join(g.templateDir, "kustomize", "base"), target: filepath.Join(outputPath, "k8s", "base")},
-		{source: filepath.Join(g.templateDir, "kustomize", "overlays", "dev"), target: filepath.Join(outputPath, "k8s", "overlays", "dev")},
-		{source: filepath.Join(g.templateDir, "kustomize", "overlays", "staging"), target: filepath.Join(outputPath, "k8s", "overlays", "staging")},
-		{source: filepath.Join(g.templateDir, "kustomize", "overlays", "prod"), target: filepath.Join(outputPath, "k8s", "overlays", "prod")},
-		{source: filepath.Join(g.templateDir, "grafana"), target: filepath.Join(outputPath, "observability")},
-		{source: filepath.Join(g.templateDir, "alertmanager"), target: filepath.Join(outputPath, "observability")},
-		{source: filepath.Join(g.templateDir, "opentelemetry"), target: filepath.Join(outputPath, "observability")},
-		{source: filepath.Join(g.templateDir, "runbooks"), target: filepath.Join(outputPath, "runbooks")},
-		{source: filepath.Join(g.templateDir, "terraform"), target: filepath.Join(outputPath, "infra", "terraform")},
-		{source: filepath.Join(g.templateDir, "argocd"), target: filepath.Join(outputPath, "infra", "argocd")},
+		{source: languageTemplates, target: "."},
+		{source: filepath.Join(g.templateDir, "attesta"), target: "."},
+		{source: filepath.Join(g.templateDir, "github-actions"), target: ".github/workflows"},
+		{source: filepath.Join(g.templateDir, "kustomize", "base"), target: "k8s/base"},
+		{source: filepath.Join(g.templateDir, "kustomize", "overlays", "dev"), target: "k8s/overlays/dev"},
+		{source: filepath.Join(g.templateDir, "kustomize", "overlays", "staging"), target: "k8s/overlays/staging"},
+		{source: filepath.Join(g.templateDir, "kustomize", "overlays", "prod"), target: "k8s/overlays/prod"},
+		{source: filepath.Join(g.templateDir, "grafana"), target: "observability"},
+		{source: filepath.Join(g.templateDir, "alertmanager"), target: "observability"},
+		{source: filepath.Join(g.templateDir, "opentelemetry"), target: "observability"},
+		{source: filepath.Join(g.templateDir, "runbooks"), target: "runbooks"},
+		{source: filepath.Join(g.templateDir, "terraform"), target: "infra/terraform"},
+		{source: filepath.Join(g.templateDir, "argocd"), target: "infra/argocd"},
 	} {
-		written, err := g.renderSection(section, d)
+		files, err := renderSection(section, d)
 		if err != nil {
-			return Result{}, err
+			return Scaffold{}, err
 		}
-		files = append(files, written...)
+		for _, f := range files {
+			if from, dup := seen[f.Path]; dup {
+				return Scaffold{}, fmt.Errorf("templates %s and %s both render %s", from, section.source, f.Path)
+			}
+			seen[f.Path] = section.source
+			out.Files = append(out.Files, f)
+		}
 	}
-
-	return Result{ServiceName: service.Name, OutputPath: outputPath, Files: files}, nil
+	return out, nil
 }
 
 type copySection struct {
 	source string
+	// target is slash-separated, relative to the service's directory.
 	target string
 }
 
-func (g *Generator) renderSection(section copySection, d data) ([]string, error) {
+func renderSection(section copySection, d data) ([]scaffold.File, error) {
 	if _, err := os.Stat(section.source); err != nil {
 		return nil, fmt.Errorf("template section %s: %w", section.source, err)
 	}
 
-	var files []string
-	err := filepath.WalkDir(section.source, func(path string, entry os.DirEntry, walkErr error) error {
+	var files []scaffold.File
+	err := filepath.WalkDir(section.source, func(p string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		rel, err := filepath.Rel(section.source, path)
+		if entry.IsDir() {
+			return nil
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("template %s is not a regular file", p)
+		}
+		rel, err := filepath.Rel(section.source, p)
 		if err != nil {
 			return err
 		}
-		if rel == "." {
-			return nil
-		}
-
-		targetRel := strings.TrimSuffix(rel, ".tmpl")
-		targetPath := filepath.Join(section.target, targetRel)
-		if entry.IsDir() {
-			return os.MkdirAll(targetPath, 0o755)
-		}
-		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		target := path.Join(section.target, strings.TrimSuffix(filepath.ToSlash(rel), ".tmpl"))
+		content, err := os.ReadFile(p)
+		if err != nil {
 			return err
 		}
-		if strings.HasSuffix(path, ".tmpl") {
-			if err := renderTemplateFile(path, targetPath, d); err != nil {
+		if strings.HasSuffix(p, ".tmpl") {
+			if content, err = renderTemplate(p, content, d); err != nil {
 				return err
 			}
-		} else if err := copyFile(path, targetPath); err != nil {
-			return err
 		}
-		files = append(files, targetPath)
+		files = append(files, scaffold.File{Path: target, Content: content})
 		return nil
 	})
 	return files, err
 }
 
-func renderTemplateFile(source, target string, d data) error {
-	content, err := os.ReadFile(source)
-	if err != nil {
-		return err
-	}
+func renderTemplate(source string, content []byte, d data) ([]byte, error) {
 	tpl, err := template.New(filepath.Base(source)).Funcs(funcs).Parse(string(content))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var buf bytes.Buffer
 	if err := tpl.Execute(&buf, d); err != nil {
-		return err
+		return nil, fmt.Errorf("render %s: %w", source, err)
 	}
-	return os.WriteFile(target, buf.Bytes(), 0o644)
-}
-
-func copyFile(source, target string) error {
-	in, err := os.Open(source)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = in.Close() }()
-
-	out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		return err
-	}
-	// A failed close can mean the data never reached the disk.
-	return out.Close()
+	return buf.Bytes(), nil
 }
 
 func title(name string) string {
