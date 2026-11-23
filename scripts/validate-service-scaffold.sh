@@ -55,6 +55,9 @@ require_grep "automountServiceAccountToken: false" "k8s/base/serviceaccount.yaml
 require_grep "prometheus.io/scrape" "k8s/base/deployment.yaml" "Prometheus scrape annotations are required"
 require_grep "Trivy|trivy" ".github/workflows/ci.yml" "CI must include image scanning"
 require_grep "kubectl kustomize" ".github/workflows/ci.yml" "CI must render Kubernetes manifests"
+if grep -En '^[[:space:]-]*uses:' "$service_dir/.github/workflows/ci.yml" | grep -Evq 'uses: [^@[:space:]]+@[0-9a-f]{40}([[:space:]]|$)'; then
+  failures+=("every CI action must be pinned to a full commit SHA in .github/workflows/ci.yml")
+fi
 require_grep "Application" "infra/argocd/application.yaml" "Argo CD application is required"
 require_grep "high_error_rate" "observability/alerts.yaml" "error-rate SLO alert is required"
 require_grep "high_p95_latency" "observability/alerts.yaml" "p95 latency alert is required"

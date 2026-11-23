@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -146,6 +147,21 @@ func TestGeneratedScaffoldPassesValidator(t *testing.T) {
 	out, err := exec.Command("bash", "../../../scripts/validate-service-scaffold.sh", result.OutputPath).CombinedOutput()
 	if err != nil {
 		t.Fatalf("validator failed: %v\n%s", err, out)
+	}
+
+	// A tag reference must fail validation.
+	ci := filepath.Join(result.OutputPath, ".github/workflows/ci.yml")
+	raw, err := os.ReadFile(ci)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unpinned := regexp.MustCompile(`actions/checkout@[0-9a-f]{40}`).ReplaceAllString(string(raw), "actions/checkout@v4")
+	if err := os.WriteFile(ci, []byte(unpinned), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err = exec.Command("bash", "../../../scripts/validate-service-scaffold.sh", result.OutputPath).CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "pinned to a full commit SHA") {
+		t.Fatalf("validator accepted an unpinned action: %v\n%s", err, out)
 	}
 }
 
@@ -397,5 +413,42 @@ func TestTemplatesQuoteUserValues(t *testing.T) {
 	// And the generator refuses such input outright.
 	if _, err := NewGenerator(filepath.Join(root, "templates"), t.TempDir()).Generate(evil); err == nil {
 		t.Fatal("generator rendered a service with an injected team")
+	}
+}
+
+// Audit X-8: the generated CI ran aquasecurity/trivy-action@master with
+// packages: write granted to the whole workflow.
+func TestGeneratedCIPinsActionsAndScopesWrites(t *testing.T) {
+	raw := read(t, generate(t, testService("go")), ".github/workflows/ci.yml")
+	var wf struct {
+		Permissions map[string]string `json:"permissions"`
+		Jobs        map[string]struct {
+			If          string            `json:"if"`
+			Needs       any               `json:"needs"`
+			Permissions map[string]string `json:"permissions"`
+			Steps       []struct {
+				Uses string `json:"uses"`
+			} `json:"steps"`
+		} `json:"jobs"`
+	}
+	if err := yaml.Unmarshal([]byte(raw), &wf); err != nil {
+		t.Fatalf("ci.yml does not parse: %v\n%s", err, raw)
+	}
+	if len(wf.Permissions) != 1 || wf.Permissions["contents"] != "read" {
+		t.Fatalf("workflow-level permissions = %v, want contents: read only", wf.Permissions)
+	}
+	pinned := regexp.MustCompile(`^[\w.-]+/[\w.-]+@[0-9a-f]{40}$`)
+	for name, job := range wf.Jobs {
+		for _, step := range job.Steps {
+			if step.Uses != "" && !pinned.MatchString(step.Uses) {
+				t.Errorf("job %s uses %q, not pinned to a commit SHA", name, step.Uses)
+			}
+		}
+		if job.Permissions["packages"] == "write" && (name != "push" || !strings.Contains(job.If, "refs/heads/main") || job.Needs == nil) {
+			t.Errorf("job %s can write packages without being the main-only push job after the checks", name)
+		}
+	}
+	if wf.Jobs["push"].Permissions["packages"] != "write" {
+		t.Error("the push job cannot push")
 	}
 }

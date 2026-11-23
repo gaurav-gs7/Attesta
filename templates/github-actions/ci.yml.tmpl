@@ -5,21 +5,26 @@ on:
   push:
     branches: [main]
 
+# Read-only by default. Only the push job, on main, may write packages.
 permissions:
   contents: read
-  packages: write
-  security-events: write
 
 env:
   IMAGE: {{ .ImageName }}
 
+# Every action is pinned to a full commit SHA. A tag can be moved to other
+# code (in March 2026 76 of 77 aquasecurity/trivy-action tags were
+# force-pushed to a credential stealer); a commit cannot. Update a pin by
+# replacing the SHA and the version comment together.
 jobs:
   build-test-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         if: "${{ "{{" }} hashFiles('go.mod') != '' {{ "}}" }}"
         with:
           go-version-file: go.mod
@@ -39,14 +44,33 @@ jobs:
         run: docker build -t "$IMAGE:${{ "{{" }} github.sha {{ "}}" }}" .
 
       - name: Scan image
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
         with:
           image-ref: "${{ "{{" }} env.IMAGE {{ "}}" }}:${{ "{{" }} github.sha {{ "}}" }}"
+          # Pin the scanner too: "latest" was the other path the March 2026
+          # compromise used.
+          version: v0.69.3
           severity: CRITICAL
           exit-code: "1"
 
-      - name: Push image
-        if: github.ref == 'refs/heads/main'
+  push:
+    # Only after tests and the scan pass, only for main.
+    needs: build-test-scan
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Build and push image
+        env:
+          REGISTRY_TOKEN: ${{ "{{" }} secrets.GITHUB_TOKEN {{ "}}" }}
+          REGISTRY_USER: ${{ "{{" }} github.actor {{ "}}" }}
         run: |
-          echo "${{ "{{" }} secrets.GITHUB_TOKEN {{ "}}" }}" | docker login ghcr.io -u "${{ "{{" }} github.actor {{ "}}" }}" --password-stdin
+          echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
+          docker build -t "$IMAGE:${{ "{{" }} github.sha {{ "}}" }}" .
           docker push "$IMAGE:${{ "{{" }} github.sha {{ "}}" }}"
