@@ -35,7 +35,7 @@ type onboardRequest struct {
 type healthGateRequest struct {
 	P95LatencyMs float64 `json:"p95LatencyMs"`
 	ErrorRate    float64 `json:"errorRate"`
-	SuccessCount int     `json:"successCount"`
+	Requests     int     `json:"requests"`
 }
 
 type incidentRequest struct {
@@ -242,7 +242,7 @@ func healthGate(args []string) error {
 	req := healthGateRequest{}
 	fs.Float64Var(&req.P95LatencyMs, "p95-latency-ms", 0, "observed p95 latency in milliseconds (the service's objective is a p95)")
 	fs.Float64Var(&req.ErrorRate, "error-rate", 0, "observed error rate percentage")
-	fs.IntVar(&req.SuccessCount, "success-count", 100, "successful request sample count")
+	fs.IntVar(&req.Requests, "requests", 100, "requests the canary served, failures included")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -469,7 +469,7 @@ Usage:
   attesta workflows show wf-...
   attesta list
   attesta status --name payments-api
-  attesta health-gate --name payments-api --p95-latency-ms 450 --error-rate 0.2 --success-count 100
+  attesta health-gate --name payments-api --p95-latency-ms 450 --error-rate 0.2 --requests 100
   attesta rollback --name payments-api
   attesta deployments --name payments-api
 `)

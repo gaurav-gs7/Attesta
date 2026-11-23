@@ -642,8 +642,8 @@ func (s *Server) healthGate(w http.ResponseWriter, r *http.Request) {
 				MaxAttempts: 1,
 				Run: func(context.Context) error {
 					decision = reliability.EvaluateCanary(policy, metrics)
-					if !decision.Healthy && !service.RollbackOnFailure {
-						decision.Action = "hold"
+					if decision.Action == reliability.ActionRollback && !service.RollbackOnFailure {
+						decision.Action = reliability.ActionHold
 						decision.Reason += "; rollbackOnFailure is false for this service, so no rollback was requested"
 					}
 					return nil
@@ -652,7 +652,7 @@ func (s *Server) healthGate(w http.ResponseWriter, r *http.Request) {
 			{
 				Name: "request-rollback-of-active-rollout",
 				Run: func(ctx context.Context) error {
-					if decision.Healthy || decision.Action != "rollback" {
+					if decision.Action != reliability.ActionRollback {
 						return nil
 					}
 					active, err := s.store.LatestRollout(ctx, service.ID)

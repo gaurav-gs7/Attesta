@@ -405,7 +405,7 @@ func TestExplicitRollbackOnFailureFalseIsHonoured(t *testing.T) {
 	}
 
 	// Audit S-5: the health gate must not record a rollback request for it.
-	gate := authorizedRequest(server, http.MethodPost, "/api/v1/services/hold-api/health-gate", []byte(`{"p95LatencyMs":900,"errorRate":5,"successCount":500}`))
+	gate := authorizedRequest(server, http.MethodPost, "/api/v1/services/hold-api/health-gate", []byte(`{"p95LatencyMs":900,"errorRate":5,"requests":500}`))
 	if gate.Code != http.StatusOK || !strings.Contains(gate.Body.String(), `"action":"hold"`) || !strings.Contains(gate.Body.String(), `"inputSource":"caller-supplied"`) {
 		t.Fatalf("health gate: %d %s", gate.Code, gate.Body.String())
 	}

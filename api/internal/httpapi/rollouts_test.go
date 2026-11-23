@@ -193,7 +193,7 @@ func TestConcurrentRolloutStartsAdmitOne(t *testing.T) {
 // rollout in flight it reports the decision without writing anything.
 func TestHealthGateRequestsRollbackOfTheActiveRollout(t *testing.T) {
 	server := rolloutServer(t, catalog.NewMemoryStore())
-	breach := `{"p95LatencyMs":450,"errorRate":0.2,"successCount":100}`
+	breach := `{"p95LatencyMs":450,"errorRate":0.2,"requests":100}`
 	if rec := authorizedRequest(server, http.MethodPost, svc+"/health-gate", []byte(breach)); rec.Code != http.StatusOK ||
 		!strings.Contains(rec.Body.String(), `"rollout":null`) {
 		t.Fatalf("breach with no rollout: %d %s, want 200 with no rollout", rec.Code, rec.Body.String())

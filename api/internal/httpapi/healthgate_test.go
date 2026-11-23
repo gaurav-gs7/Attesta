@@ -31,14 +31,30 @@ func TestHealthGateUsesTheServiceObjectives(t *testing.T) {
 	if code := authorizedRequest(server, http.MethodPost, "/api/v1/services", []byte(body)).Code; code != http.StatusCreated {
 		t.Fatalf("onboard: %d", code)
 	}
-	code, out := healthGate(t, server, "slow-api", `{"p95LatencyMs":450,"errorRate":2,"successCount":100}`)
+	code, out := healthGate(t, server, "slow-api", `{"p95LatencyMs":450,"errorRate":2,"requests":100}`)
 	if code != http.StatusOK || out.Decision.Action != "promote" || out.Policy.LatencyP95Ms != 800 || out.Policy.ErrorRatePct != 5 {
 		t.Fatalf("450ms / 2%% against 800ms / 5%%: %d %+v", code, out)
 	}
-	if _, out := healthGate(t, server, "slow-api", `{"p95LatencyMs":850,"errorRate":2,"successCount":100}`); out.Decision.Action != "rollback" {
+	if _, out := healthGate(t, server, "slow-api", `{"p95LatencyMs":850,"errorRate":2,"requests":100}`); out.Decision.Action != "rollback" {
 		t.Fatalf("850ms against 800ms: %+v", out.Decision)
 	}
-	if code, out := healthGate(t, server, "slow-api", `{"p99LatencyMs":450,"errorRate":2,"successCount":100}`); code != http.StatusBadRequest {
+	if code, out := healthGate(t, server, "slow-api", `{"p99LatencyMs":450,"errorRate":2,"requests":100}`); code != http.StatusBadRequest {
 		t.Fatalf("p99 input: %d %+v, want 400", code, out)
+	}
+}
+
+// Audit S-4 through the API: a canary failing every request is rolled back
+// (or held, with rollbackOnFailure false) instead of waiting forever.
+func TestHealthGateRollsBackAFailingCanaryAtLowVolume(t *testing.T) {
+	server := newTestServer(t, catalog.NewMemoryStore())
+	if code := authorizedRequest(server, http.MethodPost, "/api/v1/services", onboardingBody).Code; code != http.StatusCreated {
+		t.Fatalf("onboard: %d", code)
+	}
+	code, out := healthGate(t, server, "payments-api", `{"p95LatencyMs":40,"errorRate":100,"requests":8}`)
+	if code != http.StatusOK || out.Decision.Action != reliability.ActionRollback || out.Decision.Healthy {
+		t.Fatalf("8 requests, all failed: %d %+v, want a rollback decision", code, out.Decision)
+	}
+	if code, out := healthGate(t, server, "payments-api", `{"p95LatencyMs":40,"errorRate":100,"successCount":0}`); code != http.StatusBadRequest {
+		t.Fatalf("successCount input: %d %+v, want 400", code, out)
 	}
 }
