@@ -3,10 +3,12 @@ package httpapi
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/gaurav-gs7/attesta/api/internal/catalog"
 	"github.com/gaurav-gs7/attesta/api/internal/reliability"
+	"github.com/gaurav-gs7/attesta/api/internal/rollouts"
 )
 
 type gateResponse struct {
@@ -56,5 +58,27 @@ func TestHealthGateRollsBackAFailingCanaryAtLowVolume(t *testing.T) {
 	}
 	if code, out := healthGate(t, server, "payments-api", `{"p95LatencyMs":40,"errorRate":100,"successCount":0}`); code != http.StatusBadRequest {
 		t.Fatalf("successCount input: %d %+v, want 400", code, out)
+	}
+}
+
+// Audit S-5: with rollbackOnFailure false, a breach is a hold. This checks
+// it with a rollout actually in flight, the case where a rollback request
+// would otherwise be recorded.
+func TestHealthGateHoldsInFlightRolloutWhenRollbackIsOff(t *testing.T) {
+	server := newTestServer(t, catalog.NewMemoryStore(), WithPrometheusURL(prometheusStub(t, healthyPrometheus())))
+	body := strings.Replace(string(onboardingBody), `"deploymentStrategy":"canary"`, `"deploymentStrategy":"canary","rollbackOnFailure":false`, 1)
+	if code := authorizedRequest(server, http.MethodPost, "/api/v1/services", []byte(body)).Code; code != http.StatusCreated {
+		t.Fatalf("onboard: %d", code)
+	}
+	code, started := call(t, server, http.MethodPost, svc+"/rollouts", rolloutBody)
+	if code != http.StatusAccepted {
+		t.Fatalf("start: %d", code)
+	}
+	code, out := healthGate(t, server, "payments-api", `{"p95LatencyMs":900,"errorRate":5,"requests":500}`)
+	if code != http.StatusOK || out.Decision.Action != reliability.ActionHold {
+		t.Fatalf("breach with rollbackOnFailure false: %d %+v, want 200 hold", code, out.Decision)
+	}
+	if _, got := call(t, server, http.MethodGet, svc+"/rollouts/"+started.Rollout.ID, ""); got.Rollout.State != rollouts.StateStarted {
+		t.Fatalf("rollout moved to %s although rollbackOnFailure is false", got.Rollout.State)
 	}
 }
