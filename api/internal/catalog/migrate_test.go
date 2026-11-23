@@ -3,6 +3,7 @@ package catalog
 import (
 	"context"
 	"database/sql"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -125,5 +126,43 @@ func TestMigrationFilesAreWellFormed(t *testing.T) {
 	badName := fstest.MapFS{"migrations/1_a.sql": {}}
 	if _, err := loadMigrations(badName); err == nil {
 		t.Fatal("a misnamed migration was accepted")
+	}
+}
+
+// Audit D-2: five tables were created and never used. Every table left is
+// one the store reads or writes.
+func TestSchemaHasNoUnusedTables(t *testing.T) {
+	store, _ := postgresForTest(t)
+	rows, err := store.db.Query(`SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		tables = append(tables, name)
+	}
+	src, err := os.ReadFile("postgres.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range tables {
+		if table == "schema_migrations" {
+			continue
+		}
+		if !strings.Contains(string(src), " "+table+" ") && !strings.Contains(string(src), " "+table+"(") && !strings.Contains(string(src), " "+table+"\n") {
+			t.Errorf("table %s is not referenced by the store", table)
+		}
+	}
+	for _, dropped := range []string{"incidents", "slo_snapshots", "rollout_events", "incident_events", "readiness_checks"} {
+		for _, table := range tables {
+			if table == dropped {
+				t.Errorf("unused table %s still exists", dropped)
+			}
+		}
 	}
 }
