@@ -16,7 +16,6 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gaurav-gs7/attesta/api/internal/catalog"
@@ -101,7 +100,7 @@ func NewServer(store catalog.Store, generator *templates.Generator, opts ...Opti
 		generator:    generator,
 		maxBodyBytes: 1 << 20,
 		startedAt:    time.Now().UTC(),
-		metrics:      newServerMetrics(),
+		metrics:      newServerMetrics(time.Now()),
 	}
 	for _, opt := range opts {
 		opt(server)
@@ -128,7 +127,7 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /livez", s.live)
 	mux.HandleFunc("GET /readyz", s.ready)
-	mux.HandleFunc("GET /metrics", s.prometheusMetrics)
+	mux.Handle("GET /metrics", s.metrics.handler())
 	mux.HandleFunc("POST /api/v1/services", s.createService)
 	mux.HandleFunc("GET /api/v1/services", s.listServices)
 	mux.HandleFunc("GET /api/v1/services/{name}", s.getService)
@@ -1130,19 +1129,6 @@ func (s *Server) recoverer(next http.Handler) http.Handler {
 	})
 }
 
-func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-		next.ServeHTTP(recorder, r)
-		s.metrics.observe(r.Method, r.URL.Path, recorder.status)
-	})
-}
-
-func (s *Server) prometheusMetrics(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-	_, _ = w.Write([]byte(s.metrics.render(time.Since(s.startedAt))))
-}
-
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
@@ -1151,48 +1137,4 @@ type statusRecorder struct {
 func (r *statusRecorder) WriteHeader(status int) {
 	r.status = status
 	r.ResponseWriter.WriteHeader(status)
-}
-
-type serverMetrics struct {
-	mu       sync.Mutex
-	requests map[string]int64
-}
-
-func newServerMetrics() *serverMetrics {
-	return &serverMetrics{requests: make(map[string]int64)}
-}
-
-func (m *serverMetrics) observe(method, path string, status int) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	key := fmt.Sprintf("%s|%s|%d", method, routeLabel(path), status)
-	m.requests[key]++
-}
-
-func (m *serverMetrics) render(uptime time.Duration) string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	var b strings.Builder
-	b.WriteString("# HELP attesta_uptime_seconds Attesta API uptime in seconds.\n")
-	b.WriteString("# TYPE attesta_uptime_seconds gauge\n")
-	fmt.Fprintf(&b, "attesta_uptime_seconds %d\n", int(uptime.Seconds()))
-	b.WriteString("# HELP attesta_http_requests_total Total Attesta HTTP requests.\n")
-	b.WriteString("# TYPE attesta_http_requests_total counter\n")
-	for key, count := range m.requests {
-		parts := strings.Split(key, "|")
-		fmt.Fprintf(&b, "attesta_http_requests_total{method=%q,route=%q,status=%q} %d\n", parts[0], parts[1], parts[2], count)
-	}
-	return b.String()
-}
-
-func routeLabel(path string) string {
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) >= 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "services" {
-		if len(parts) == 4 {
-			return "/api/v1/services/{name}"
-		}
-		return "/api/v1/services/{name}/" + strings.Join(parts[4:], "/")
-	}
-	return path
 }
