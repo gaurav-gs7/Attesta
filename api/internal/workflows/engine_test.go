@@ -89,7 +89,8 @@ func TestEngineFailsClosedWhenInitialPersistenceFails(t *testing.T) {
 	if stepRan {
 		t.Fatal("step ran even though the workflow start could not be persisted")
 	}
-	if run.State != StateFailed || !strings.Contains(run.Error, "persist workflow start: database unavailable") {
+	// Audit X-5: the store's error text stays in the log, not the run.
+	if run.State != StateFailed || !strings.Contains(run.Error, "persist workflow start") || strings.Contains(run.Error, "database unavailable") {
 		t.Fatalf("expected persistence failure, got state %s error %q", run.State, run.Error)
 	}
 	if run.Events[len(run.Events)-1].Type != "workflow-persistence-failed" {

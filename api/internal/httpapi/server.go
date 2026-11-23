@@ -201,7 +201,8 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 		"uptimeSec":   int(time.Since(s.startedAt).Seconds()),
 	}
 	if err := s.store.Ping(ctx); err != nil {
-		body["status"], body["store"] = "not ready", "unreachable: "+err.Error()
+		s.logger.ErrorContext(r.Context(), "readiness check: store unreachable", "error", err)
+		body["status"], body["store"] = "not ready", "unreachable"
 		writeJSON(w, http.StatusServiceUnavailable, body)
 		return
 	}
@@ -304,18 +305,18 @@ func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if run.State != workflows.StateSucceeded {
-		writeRunFailure(w, run)
+		writeRunFailure(w, r, run)
 		return
 	}
 	if outcome == workflows.Replayed {
 		created, err = s.store.GetServiceByName(r.Context(), service.Name)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			s.internalError(w, r, err)
 			return
 		}
 		generated, err = s.generator.Generate(created)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			s.internalError(w, r, err)
 			return
 		}
 		idempotent = true
@@ -336,7 +337,7 @@ func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listServices(w http.ResponseWriter, r *http.Request) {
 	services, err := s.store.ListServices(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"services": services})
@@ -366,7 +367,7 @@ func (s *Server) serviceStatus(w http.ResponseWriter, r *http.Request) {
 	case err == nil:
 		status.LatestDeployment = &deployment
 	case !errors.Is(err, catalog.ErrNotFound):
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, status)
@@ -414,16 +415,18 @@ func (s *Server) evaluateSLO(ctx context.Context, service models.Service) models
 			"no Prometheus configured (ATTESTA_PROMETHEUS_URL is unset); SLO state unknown, deployment gate fails closed")
 	}
 	if s.promErr != nil {
+		s.logger.ErrorContext(ctx, "Prometheus client misconfigured", "service", service.Name, "error", s.promErr)
 		return sloengine.Unknown(service, models.SLOSourcePrometheus,
-			fmt.Sprintf("Prometheus client misconfigured: %v; SLO state unknown, deployment gate fails closed", s.promErr))
+			"Prometheus client misconfigured; SLO state unknown, deployment gate fails closed")
 	}
 	// Each query has its own timeout; this bounds the whole evaluation.
 	checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	signals, err := s.prom.Signals(checkCtx, service)
 	if err != nil {
+		s.logger.ErrorContext(ctx, "Prometheus query failed", "service", service.Name, "error", err)
 		return sloengine.Unknown(service, models.SLOSourcePrometheus,
-			fmt.Sprintf("Prometheus query failed: %v; SLO state unknown, deployment gate fails closed", err))
+			"Prometheus query failed; SLO state unknown, deployment gate fails closed")
 	}
 	return sloengine.Evaluate(service, signals)
 }
@@ -439,7 +442,7 @@ func (s *Server) deployments(w http.ResponseWriter, r *http.Request) {
 	}
 	deployments, next, err := s.store.ListDeployments(r.Context(), service.ID, req)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, pageBody(map[string]any{
@@ -506,7 +509,7 @@ func (s *Server) startRollout(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusConflict, map[string]any{"error": run.Error, "errorCode": run.ErrorCode, "service": service.Name, "gate": gate, "workflow": run})
 			return
 		}
-		writeRunFailure(w, run)
+		writeRunFailure(w, r, run)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"service": service.Name, "rollout": rollout, "gate": gate, "workflow": run})
@@ -514,13 +517,27 @@ func (s *Server) startRollout(w http.ResponseWriter, r *http.Request) {
 
 // writeRunFailure answers for a failed workflow run by its error code:
 // conflicts and closed gates are 409, anything else 500.
-func writeRunFailure(w http.ResponseWriter, run models.WorkflowRun) {
+// The run's error text is already safe to return (workflows.Engine logs
+// the detail of internal failures and records a generic message).
+func writeRunFailure(w http.ResponseWriter, r *http.Request, run models.WorkflowRun) {
 	status := http.StatusInternalServerError
 	switch run.ErrorCode {
 	case workflows.CodeConflict, workflows.CodeGateClosed:
 		status = http.StatusConflict
 	}
-	writeJSON(w, status, map[string]any{"error": run.Error, "errorCode": run.ErrorCode, "workflow": run})
+	writeJSON(w, status, map[string]any{"error": run.Error, "errorCode": run.ErrorCode, "requestId": RequestID(r.Context()), "workflow": run})
+}
+
+// internalError answers 500 for a failure the client cannot act on. Store
+// and Prometheus errors carry hosts, ports, database users and SQL, so the
+// detail goes to the log under the request ID and the client gets only
+// the ID to quote.
+func (s *Server) internalError(w http.ResponseWriter, r *http.Request, err error) {
+	s.logger.ErrorContext(r.Context(), "request failed", "method", r.Method, "path", r.URL.Path, "error", err)
+	writeJSON(w, http.StatusInternalServerError, map[string]string{
+		"error":     "internal error",
+		"requestId": RequestID(r.Context()),
+	})
 }
 
 // decodeStrict reads a bounded JSON body that must contain only known
@@ -557,7 +574,7 @@ func (s *Server) loadRollout(w http.ResponseWriter, r *http.Request, service mod
 		return models.Rollout{}, false
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return models.Rollout{}, false
 	}
 	return rollout, true
@@ -611,7 +628,7 @@ func (s *Server) serviceRollback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	s.transition(w, r, service, rollout, rollouts.ActionRollback, reason)
@@ -645,7 +662,7 @@ func (s *Server) transition(w http.ResponseWriter, r *http.Request, service mode
 			writeError(w, http.StatusConflict, err.Error()+"; reload it and retry")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	body := map[string]any{"service": service.Name, "rollout": rollout}
@@ -716,7 +733,7 @@ func (s *Server) healthGate(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	if run.State != workflows.StateSucceeded {
-		writeRunFailure(w, run)
+		writeRunFailure(w, r, run)
 		return
 	}
 	if rolledBack != nil {
@@ -745,7 +762,7 @@ func (s *Server) listIncidents(w http.ResponseWriter, r *http.Request) {
 	}
 	records, next, err := s.store.ListIncidentRecords(r.Context(), req)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, pageBody(map[string]any{"incidents": nonNil(records)}, next))
@@ -766,7 +783,7 @@ func (s *Server) listWorkflows(w http.ResponseWriter, r *http.Request) {
 	}
 	runs, next, err := s.workflows.List(r.Context(), req)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, pageBody(map[string]any{"workflows": runs}, next))
@@ -877,7 +894,7 @@ func (s *Server) loadService(w http.ResponseWriter, r *http.Request) (models.Ser
 		return models.Service{}, false
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return models.Service{}, false
 	}
 	return service, true
@@ -890,7 +907,7 @@ func (s *Server) loadIncident(w http.ResponseWriter, r *http.Request) (models.In
 		return models.IncidentRecord{}, false
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return models.IncidentRecord{}, false
 	}
 	return record, true

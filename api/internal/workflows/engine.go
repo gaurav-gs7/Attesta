@@ -158,7 +158,7 @@ func (e *Engine) RunIdempotent(ctx context.Context, spec Spec) (models.WorkflowR
 	run.Actor = ActorFrom(ctx)
 	if spec.IdempotencyKey == "" {
 		if err := e.store.SaveWorkflowRun(ctx, run); err != nil {
-			return persistFailed(run, "workflow start", err), Executed
+			return e.persistFailed(ctx, run, "workflow start", err), Executed
 		}
 		return e.execute(ctx, spec, run), Executed
 	}
@@ -168,7 +168,7 @@ func (e *Engine) RunIdempotent(ctx context.Context, spec Spec) (models.WorkflowR
 		holder, claimed, err := e.store.ClaimWorkflowRun(ctx, run, e.staleAfter)
 		if err != nil {
 			// Nothing was stored, so the key is free for the retry.
-			return persistFailed(run, "workflow start", err), Executed
+			return e.persistFailed(ctx, run, "workflow start", err), Executed
 		}
 		if claimed {
 			return e.execute(ctx, spec, run), Executed
@@ -258,7 +258,7 @@ func (e *Engine) execute(ctx context.Context, spec Spec, run models.WorkflowRun)
 
 			err = e.runStep(ctx, run.ID, step)
 			if cause := context.Cause(ctx); errors.Is(cause, ErrAbandoned) {
-				return persistFailed(run, "heartbeat", cause)
+				return e.persistFailed(ctx, run, "heartbeat", cause)
 			}
 			done := time.Now().UTC()
 			run.Steps[i].CompletedAt = &done
@@ -268,8 +268,8 @@ func (e *Engine) execute(ctx context.Context, spec Spec, run models.WorkflowRun)
 				run.Events = append(run.Events, models.WorkflowEvent{Timestamp: done, Type: "step-succeeded", Message: step.Name})
 				break
 			}
-			run.Steps[i].Error = err.Error()
-			run.Events = append(run.Events, models.WorkflowEvent{Timestamp: done, Type: "step-failed", Message: fmt.Sprintf("%s: %v", step.Name, err)})
+			run.Steps[i].Error = e.publicError(ctx, run.ID, step.Name, err)
+			run.Events = append(run.Events, models.WorkflowEvent{Timestamp: done, Type: "step-failed", Message: step.Name + ": " + run.Steps[i].Error})
 			if attempt == maxAttempts {
 				break
 			}
@@ -282,17 +282,17 @@ func (e *Engine) execute(ctx context.Context, spec Spec, run models.WorkflowRun)
 			run.Events = append(run.Events, models.WorkflowEvent{Timestamp: done, Type: "step-retry-scheduled",
 				Message: fmt.Sprintf("%s: attempt %d of %d in %s", step.Name, attempt+1, maxAttempts, delay.Round(time.Millisecond))})
 			if !e.sleep(ctx, delay) {
-				err = fmt.Errorf("%s: retry abandoned: %w (last error: %v)", step.Name, context.Cause(ctx), err)
+				err = publicErr{msg: fmt.Sprintf("%s: retry abandoned: %v", step.Name, context.Cause(ctx)), err: err}
 				break
 			}
 		}
 		if err != nil {
 			done := time.Now().UTC()
 			run.State = StateFailed
-			run.Error = err.Error()
+			run.Error = e.publicError(ctx, run.ID, "", err)
 			run.ErrorCode = CodeOf(err)
 			run.CompletedAt = &done
-			run.Events = append(run.Events, models.WorkflowEvent{Timestamp: done, Type: "workflow-failed", Message: err.Error()})
+			run.Events = append(run.Events, models.WorkflowEvent{Timestamp: done, Type: "workflow-failed", Message: run.Error})
 			e.persist(ctx, &run, "workflow failure")
 			return run
 		}
@@ -316,7 +316,7 @@ func (e *Engine) runStep(ctx context.Context, runID string, step Step) (err erro
 	defer func() {
 		if p := recover(); p != nil {
 			e.logger.ErrorContext(ctx, "workflow step panicked", "run", runID, "step", step.Name, "panic", fmt.Sprint(p), "stack", string(debug.Stack()))
-			err = fmt.Errorf("panic in step %s: %v", step.Name, p)
+			err = publicErr{msg: "panic in step " + step.Name, err: fmt.Errorf("%v", p)}
 		}
 	}()
 	return step.Run(ctx)
@@ -394,7 +394,7 @@ func (e *Engine) persist(ctx context.Context, run *models.WorkflowRun, phase str
 	if err == nil {
 		return true
 	}
-	*run = persistFailed(*run, phase, err)
+	*run = e.persistFailed(ctx, *run, phase, err)
 	if !errors.Is(err, ErrAbandoned) {
 		saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
@@ -403,10 +403,51 @@ func (e *Engine) persist(ctx context.Context, run *models.WorkflowRun, phase str
 	return false
 }
 
-func persistFailed(run models.WorkflowRun, phase string, err error) models.WorkflowRun {
+// publicError is the text a run records for err. Runs are returned to API
+// clients, so only errors the caller can act on (conflicts, closed gates)
+// keep their wording. Anything else can carry store or Prometheus detail
+// (hosts, ports, database users, SQL) and is logged in full, with the run
+// and request IDs, and recorded as a generic message.
+func (e *Engine) publicError(ctx context.Context, runID, step string, err error) string {
+	switch CodeOf(err) {
+	case CodeConflict, CodeGateClosed:
+		return err.Error()
+	}
+	if step == "" {
+		e.logger.ErrorContext(ctx, "workflow run failed", "run", runID, "error", err)
+	} else {
+		e.logger.ErrorContext(ctx, "workflow step failed", "run", runID, "step", step, "error", err)
+	}
+	summary := "internal error"
+	var public publicErr
+	switch {
+	case errors.As(err, &public):
+		summary = public.msg
+	case errors.Is(err, context.DeadlineExceeded):
+		summary = "run deadline exceeded"
+	}
+	return summary + "; details are in the server log under run " + runID
+}
+
+// publicErr is an error whose msg is safe to show a client; err holds the
+// detail that only goes to the log.
+type publicErr struct {
+	msg string
+	err error
+}
+
+func (e publicErr) Error() string { return e.msg + ": " + e.err.Error() }
+func (e publicErr) Unwrap() error { return e.err }
+
+func (e *Engine) persistFailed(ctx context.Context, run models.WorkflowRun, phase string, err error) models.WorkflowRun {
 	now := time.Now().UTC()
 	run.State = StateFailed
-	run.Error = fmt.Sprintf("persist %s: %v", phase, err)
+	if errors.Is(err, ErrAbandoned) {
+		run.Error = fmt.Sprintf("persist %s: %v", phase, ErrAbandoned)
+	} else {
+		e.logger.ErrorContext(ctx, "workflow run could not be recorded", "run", run.ID, "phase", phase, "error", err)
+		run.Error = fmt.Sprintf("persist %s failed; details are in the server log under run %s", phase, run.ID)
+	}
 	run.ErrorCode = CodePersistence
 	run.CompletedAt = &now
 	run.Events = append(run.Events, models.WorkflowEvent{

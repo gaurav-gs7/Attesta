@@ -48,7 +48,7 @@ func (s *Server) createIncident(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	in := incidentInput{
@@ -62,7 +62,7 @@ func (s *Server) createIncident(w http.ResponseWriter, r *http.Request) {
 	}
 	record, run := s.openIncident(r.Context(), service, in)
 	if run.State != workflows.StateSucceeded {
-		writeRunFailure(w, run)
+		writeRunFailure(w, r, run)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"incident": record, "workflow": run})
@@ -165,7 +165,7 @@ func (s *Server) resolveIncident(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	if record.Incident.Status == "resolved" {
@@ -178,7 +178,7 @@ func (s *Server) resolveIncident(w http.ResponseWriter, r *http.Request) {
 	}
 	record, run := s.resolve(r.Context(), record, time.Now().UTC(), note)
 	if run.State != workflows.StateSucceeded {
-		writeRunFailure(w, run)
+		writeRunFailure(w, r, run)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"incident": record, "workflow": run})
@@ -261,12 +261,12 @@ func (s *Server) handleAlert(ctx context.Context, alert incidents.AlertmanagerAl
 		return result
 	}
 	if err != nil {
-		result.Action, result.Reason = "failed", err.Error()
+		result.Action, result.Reason = "failed", s.failedAlert(ctx, result.Fingerprint, err)
 		return result
 	}
 	active, err := s.findActiveIncident(ctx, service.Name, result.Fingerprint)
 	if err != nil {
-		result.Action, result.Reason = "failed", err.Error()
+		result.Action, result.Reason = "failed", s.failedAlert(ctx, result.Fingerprint, err)
 		return result
 	}
 
@@ -346,4 +346,11 @@ func (s *Server) allDeployments(ctx context.Context, serviceID string, since tim
 		}
 		req.Limit, req.Since = page.MaxLimit, since
 	}
+}
+
+// failedAlert logs why an alert could not be processed and returns the
+// reason reported back to Alertmanager, which carries no store detail.
+func (s *Server) failedAlert(ctx context.Context, fingerprint string, err error) string {
+	s.logger.ErrorContext(ctx, "alert processing failed", "fingerprint", fingerprint, "error", err)
+	return "internal error; details are in the server log under request " + RequestID(ctx)
 }
