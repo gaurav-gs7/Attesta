@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -46,6 +47,9 @@ type options struct {
 	retryPeriod      time.Duration
 	showVersion      bool
 	prometheusURL    string
+	promTokenFile    string
+	promCAFile       string
+	promTimeout      time.Duration
 }
 
 func main() {
@@ -63,6 +67,9 @@ func main() {
 	flag.DurationVar(&o.renewDeadline, "renew-deadline", 10*time.Second, "leader election renew deadline")
 	flag.DurationVar(&o.retryPeriod, "retry-period", 2*time.Second, "leader election retry period")
 	flag.StringVar(&o.prometheusURL, "prometheus-url", "", "Prometheus base URL for metric analysis of guards that set spec.checks; empty disables analysis")
+	flag.StringVar(&o.promTokenFile, "prometheus-bearer-token-file", "", "file holding a bearer token for Prometheus (for example a mounted Secret)")
+	flag.StringVar(&o.promCAFile, "prometheus-ca-file", "", "PEM bundle to trust for Prometheus's TLS certificate")
+	flag.DurationVar(&o.promTimeout, "prometheus-query-timeout", promql.DefaultQueryTimeout, "timeout for each Prometheus query")
 	flag.BoolVar(&o.showVersion, "version", false, "print the version and exit")
 	flag.Parse()
 
@@ -95,7 +102,19 @@ func run(o options, logger *slog.Logger) error {
 		Logger:    logger,
 	}
 	if o.prometheusURL != "" {
-		opts.Prometheus = promql.NewClient(o.prometheusURL)
+		promOpts := promql.Options{CAFile: o.promCAFile, QueryTimeout: o.promTimeout}
+		if o.promTokenFile != "" {
+			token, err := os.ReadFile(o.promTokenFile)
+			if err != nil {
+				return fmt.Errorf("read --prometheus-bearer-token-file: %w", err)
+			}
+			promOpts.BearerToken = strings.TrimSpace(string(token))
+		}
+		client, err := promql.New(o.prometheusURL, promOpts)
+		if err != nil {
+			return fmt.Errorf("configure Prometheus: %w", err)
+		}
+		opts.Prometheus = client
 	}
 	ctrl, err := controller.NewRolloutGuardController(cfg, opts)
 	if err != nil {

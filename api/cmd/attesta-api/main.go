@@ -13,6 +13,7 @@ import (
 	"github.com/gaurav-gs7/attesta/api/internal/catalog"
 	"github.com/gaurav-gs7/attesta/api/internal/config"
 	"github.com/gaurav-gs7/attesta/api/internal/httpapi"
+	"github.com/gaurav-gs7/attesta/api/internal/prometheus"
 	"github.com/gaurav-gs7/attesta/api/internal/templates"
 )
 
@@ -32,11 +33,23 @@ func main() {
 	}
 	defer closer()
 
+	promCfg, err := cfg.Prometheus()
+	if err != nil {
+		log.Fatalf("prometheus configuration: %v", err)
+	}
+	if promCfg.URL != "" {
+		// Fail at startup on a bad CA file, conflicting auth or invalid
+		// metric names, rather than on the first SLO check.
+		if _, err := prometheus.New(promCfg); err != nil {
+			log.Fatalf("prometheus configuration: %v", err)
+		}
+	}
+
 	generator := templates.NewGenerator(cfg.TemplateDir, cfg.OutputDir)
 	handler := httpapi.NewServer(store, generator,
 		httpapi.WithAPIToken(cfg.APIToken),
 		httpapi.WithMaxBodyBytes(cfg.MaxBodyMB*1024*1024),
-		httpapi.WithPrometheusURL(cfg.PrometheusURL),
+		httpapi.WithPrometheus(promCfg),
 	)
 
 	reaperCtx, stopReaper := context.WithCancel(ctx)

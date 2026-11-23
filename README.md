@@ -91,6 +91,19 @@ Attesta reads `http_requests_total` and `http_request_duration_seconds` for the 
 
 The gate blocks when the error budget remaining is under 10%, when p95 or the error rate is over the service's objective, or when a burn-rate pair is over its threshold on both windows: 14.4x over 1h and 5m (2% of the budget in an hour), or 6x over 6h and 30m (5% in six hours). Requiring both windows means a burn that has already stopped does not block a fix. The generated `PrometheusRule` records the error ratio over the same four windows and alerts on the same pairs.
 
+The API keeps one Prometheus client for its lifetime. Its queries for one evaluation run concurrently (at most six at a time), each with its own timeout. It is configured through the environment:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ATTESTA_PROMETHEUS_URL` | unset (gate `unknown`) | Prometheus base URL |
+| `ATTESTA_PROMETHEUS_BEARER_TOKEN` or `..._BEARER_TOKEN_FILE` | none | Bearer token; prefer the file, from a mounted Secret |
+| `ATTESTA_PROMETHEUS_USERNAME`, `ATTESTA_PROMETHEUS_PASSWORD` or `..._PASSWORD_FILE` | none | Basic auth, instead of a token |
+| `ATTESTA_PROMETHEUS_CA_FILE` | system roots | PEM bundle to trust for Prometheus's TLS certificate |
+| `ATTESTA_PROMETHEUS_QUERY_TIMEOUT` | `3s` | Timeout for each query |
+| `ATTESTA_PROMETHEUS_REQUESTS_METRIC`, `..._DURATION_METRIC`, `..._SERVICE_LABEL`, `..._STATUS_LABEL`, `..._ERROR_STATUS` | `http_requests_total`, `http_request_duration_seconds`, `service`, `status`, `5..` | Series and labels the SLIs are computed from, for services not instrumented like the generated ones |
+
+Names are validated as Prometheus metric and label names, and a bad CA file or conflicting auth stops the API at startup. Responses over 1 MiB are rejected. The controller takes `--prometheus-bearer-token-file`, `--prometheus-ca-file` and `--prometheus-query-timeout`. Per-service query templates from `SLOPolicy` are not implemented: nothing reconciles `SLOPolicy` yet.
+
 The deployment gate is `allowed`, `blocked` or `unknown`. It is `unknown`, and `POST /rollouts` returns 409, whenever a signal cannot be measured: no Prometheus configured, a failed query, no series for the service, a `NaN` result, or fewer than 20 requests in a signal's window (5m for error rate and p95, each burn-rate window, 30d for the budget), where one request would decide the answer. Measured values are omitted from the response rather than reported as zero. Prometheus must retain at least 30 days for the budget to be computed.
 
 ## Incidents

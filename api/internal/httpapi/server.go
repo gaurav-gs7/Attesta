@@ -34,16 +34,18 @@ import (
 )
 
 type Server struct {
-	store         catalog.Store
-	generator     *templates.Generator
-	apiToken      string
-	maxBodyBytes  int64
-	prometheusURL string
-	startedAt     time.Time
-	metrics       *serverMetrics
-	workflows     *workflows.Engine
-	workflowOpts  []workflows.Option
-	logger        *slog.Logger
+	store        catalog.Store
+	generator    *templates.Generator
+	apiToken     string
+	maxBodyBytes int64
+	promConfig   promclient.Config
+	prom         *promclient.Client
+	promErr      error
+	startedAt    time.Time
+	metrics      *serverMetrics
+	workflows    *workflows.Engine
+	workflowOpts []workflows.Option
+	logger       *slog.Logger
 }
 
 // WithLogger sets the logger for access logs, recovered panics and workflow
@@ -72,7 +74,16 @@ func WithMaxBodyBytes(bytes int64) Option {
 
 func WithPrometheusURL(url string) Option {
 	return func(s *Server) {
-		s.prometheusURL = strings.TrimRight(strings.TrimSpace(url), "/")
+		s.promConfig.URL = strings.TrimRight(strings.TrimSpace(url), "/")
+	}
+}
+
+// WithPrometheus configures the Prometheus client: URL, authentication, TLS,
+// per-query timeout and metric names.
+func WithPrometheus(cfg promclient.Config) Option {
+	return func(s *Server) {
+		cfg.URL = strings.TrimRight(strings.TrimSpace(cfg.URL), "/")
+		s.promConfig = cfg
 	}
 }
 
@@ -99,6 +110,10 @@ func NewServer(store catalog.Store, generator *templates.Generator, opts ...Opti
 		server.logger = slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	}
 	server.logger = slog.New(requestIDHandler{server.logger.Handler()})
+	if server.promConfig.URL != "" {
+		// One client for the life of the server, so connections are reused.
+		server.prom, server.promErr = promclient.New(server.promConfig)
+	}
 	server.workflows = workflows.NewEngine(store, append([]workflows.Option{workflows.WithLogger(server.logger)}, server.workflowOpts...)...)
 	return server
 }
@@ -374,13 +389,18 @@ func (s *Server) slos(w http.ResponseWriter, r *http.Request) {
 // query fails, the result is an unknown gate with the reason; Attesta never
 // substitutes estimated values.
 func (s *Server) evaluateSLO(ctx context.Context, service models.Service) models.SLOStatus {
-	if s.prometheusURL == "" {
+	if s.promConfig.URL == "" {
 		return sloengine.Unknown(service, models.SLOSourceNone,
 			"no Prometheus configured (ATTESTA_PROMETHEUS_URL is unset); SLO state unknown, deployment gate fails closed")
 	}
-	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	if s.promErr != nil {
+		return sloengine.Unknown(service, models.SLOSourcePrometheus,
+			fmt.Sprintf("Prometheus client misconfigured: %v; SLO state unknown, deployment gate fails closed", s.promErr))
+	}
+	// Each query has its own timeout; this bounds the whole evaluation.
+	checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	signals, err := promclient.NewClient(s.prometheusURL).Signals(checkCtx, service)
+	signals, err := s.prom.Signals(checkCtx, service)
 	if err != nil {
 		return sloengine.Unknown(service, models.SLOSourcePrometheus,
 			fmt.Sprintf("Prometheus query failed: %v; SLO state unknown, deployment gate fails closed", err))

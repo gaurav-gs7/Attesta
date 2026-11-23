@@ -118,7 +118,7 @@ Metrics:
 - client-go workqueue metrics (`workqueue_depth`, `workqueue_retries_total`, ...) for the `rolloutguard` queue, under the same names controller-runtime uses
 - Go runtime and process metrics
 
-Useful flags: `--prometheus-url` to enable metric analysis, `--namespace` to watch one namespace, `--workers`, `--resync`, `--leader-elect=false` for a single local process, and `--version`.
+Useful flags: `--prometheus-url` to enable metric analysis (with `--prometheus-bearer-token-file`, `--prometheus-ca-file` and `--prometheus-query-timeout` for a secured Prometheus), `--namespace` to watch one namespace, `--workers`, `--resync`, `--leader-elect=false` for a single local process, and `--version`.
 
 ## Status Contract
 

@@ -4,6 +4,8 @@ package promql
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -27,16 +30,72 @@ type Querier interface {
 }
 
 type Client struct {
-	baseURL string
-	http    *http.Client
+	baseURL      string
+	http         *http.Client
+	auth         func(*http.Request)
+	queryTimeout time.Duration
 }
 
-// NewClient returns a client for the Prometheus server at baseURL.
+// Options configure access to a Prometheus server that needs it.
+type Options struct {
+	// BearerToken is sent as "Authorization: Bearer <token>".
+	BearerToken string
+	// Username and Password, if Username is set, are sent as basic auth.
+	Username, Password string
+	// CAFile is a PEM bundle to trust for the server's TLS certificate, in
+	// addition to the system roots.
+	CAFile string
+	// QueryTimeout bounds each query; 0 means DefaultQueryTimeout.
+	QueryTimeout time.Duration
+}
+
+// DefaultQueryTimeout bounds a single query when Options does not.
+const DefaultQueryTimeout = 3 * time.Second
+
+// NewClient returns a client for an unauthenticated Prometheus at baseURL.
 func NewClient(baseURL string) *Client {
-	return &Client{
-		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		http:    &http.Client{Timeout: 5 * time.Second},
+	c, _ := New(baseURL, Options{})
+	return c
+}
+
+// New returns a client for the Prometheus server at baseURL. One client is
+// meant to be shared: it keeps its connections between queries.
+func New(baseURL string, opts Options) (*Client, error) {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if opts.CAFile != "" {
+		pem, err := os.ReadFile(opts.CAFile)
+		if err != nil {
+			return nil, fmt.Errorf("read Prometheus CA file: %w", err)
+		}
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("Prometheus CA file %s holds no PEM certificates", opts.CAFile)
+		}
+		transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	}
+	c := &Client{
+		baseURL:      strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		http:         &http.Client{Transport: transport},
+		auth:         func(*http.Request) {},
+		queryTimeout: opts.QueryTimeout,
+	}
+	if c.queryTimeout <= 0 {
+		c.queryTimeout = DefaultQueryTimeout
+	}
+	switch {
+	case opts.BearerToken != "" && opts.Username != "":
+		return nil, errors.New("configure either a Prometheus bearer token or basic auth, not both")
+	case opts.BearerToken != "":
+		token := opts.BearerToken
+		c.auth = func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+token) }
+	case opts.Username != "":
+		user, pass := opts.Username, opts.Password
+		c.auth = func(r *http.Request) { r.SetBasicAuth(user, pass) }
+	}
+	return c, nil
 }
 
 // WithHTTPClient replaces the HTTP client, for tests.
@@ -49,12 +108,15 @@ func (c *Client) Query(ctx context.Context, query string) (float64, bool, error)
 	if c.baseURL == "" {
 		return 0, false, errors.New("prometheus URL is empty")
 	}
+	ctx, cancel := context.WithTimeout(ctx, c.queryTimeout)
+	defer cancel()
 	values := url.Values{}
 	values.Set("query", query)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/v1/query?"+values.Encode(), nil)
 	if err != nil {
 		return 0, false, err
 	}
+	c.auth(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return 0, false, err
@@ -72,7 +134,14 @@ func (c *Client) Query(ctx context.Context, query string) (float64, bool, error)
 			} `json:"result"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&payload); err != nil {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if err != nil {
+		return 0, false, err
+	}
+	if len(body) > maxResponseBytes {
+		return 0, false, fmt.Errorf("prometheus response exceeds %d bytes", maxResponseBytes)
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
 		return 0, false, err
 	}
 	if payload.Status != "success" {

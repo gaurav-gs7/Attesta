@@ -7,7 +7,9 @@ import (
 	"math"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gaurav-gs7/attesta/api/internal/models"
 )
@@ -223,5 +225,70 @@ func TestSignalsBelowMinimumVolumeAreNotMeasured(t *testing.T) {
 	}
 	if got := strings.Join(signals.Missing, "; "); !strings.Contains(got, "fewer than 20") {
 		t.Fatalf("missing reasons do not name the volume floor: %s", got)
+	}
+}
+
+// slowQuerier answers every query after a delay and records the queries.
+type slowQuerier struct {
+	delay   time.Duration
+	mu      sync.Mutex
+	queries []string
+}
+
+func (s *slowQuerier) Query(ctx context.Context, q string) (float64, bool, error) {
+	s.mu.Lock()
+	s.queries = append(s.queries, q)
+	s.mu.Unlock()
+	select {
+	case <-time.After(s.delay):
+		return 100, true, nil
+	case <-ctx.Done():
+		return 0, false, ctx.Err()
+	}
+}
+
+// Audit S-7: the queries ran one after another under one shared deadline,
+// so a slow Prometheus made later queries fail for lack of time.
+func TestSignalsQueriesRunConcurrently(t *testing.T) {
+	q := &slowQuerier{delay: 200 * time.Millisecond}
+	c := &Client{q: q, m: DefaultMetrics, concurrency: 6}
+	start := time.Now()
+	if _, err := c.Signals(context.Background(), service); err != nil {
+		t.Fatal(err)
+	}
+	elapsed := time.Since(start)
+	sequential := time.Duration(len(q.queries)) * q.delay
+	if elapsed > sequential/2 {
+		t.Fatalf("%d queries of %s took %s; sequential would be %s", len(q.queries), q.delay, elapsed, sequential)
+	}
+}
+
+// Audit S-7: metric and label names were fixed in code.
+func TestMetricNamesAreConfigurable(t *testing.T) {
+	q := &slowQuerier{}
+	c, err := New(Config{URL: "http://prometheus.test", Metrics: Metrics{
+		Requests: "istio_requests_total", Duration: "istio_request_duration_milliseconds",
+		ServiceLabel: "destination_service_name", StatusLabel: "response_code",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.q = q
+	if _, err := c.Signals(context.Background(), service); err != nil {
+		t.Fatal(err)
+	}
+	all := strings.Join(q.queries, "\n")
+	for _, want := range []string{`istio_requests_total{destination_service_name="payments-api"}`, `response_code=~"5.."`, "istio_request_duration_milliseconds_bucket"} {
+		if !strings.Contains(all, want) {
+			t.Fatalf("queries do not use %q:\n%s", want, all)
+		}
+	}
+	if strings.Contains(all, "http_requests_total") {
+		t.Fatalf("default metric name still queried:\n%s", all)
+	}
+	for _, bad := range []Metrics{{Requests: `x{a="b"} or vector(1)`}, {ServiceLabel: "has-dash"}, {ErrorStatus: `5.."} or up{x="`}} {
+		if _, err := New(Config{URL: "http://p", Metrics: bad}); err == nil {
+			t.Fatalf("invalid metric config %+v accepted", bad)
+		}
 	}
 }
