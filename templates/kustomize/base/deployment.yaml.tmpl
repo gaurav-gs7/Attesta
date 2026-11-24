@@ -13,7 +13,9 @@ metadata:
     attesta.io/rollback-guards: {{ .Service.Name }}-rollout
 {{- end }}
 spec:
-  replicas: 2
+  # No replicas: the HorizontalPodAutoscaler owns the count, between the
+  # bounds each overlay sets. A replicas field here would be re-applied on
+  # every sync and fight it.
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ .Service.Name }}

@@ -7,7 +7,9 @@ metadata:
     app.kubernetes.io/name: {{ .Service.Name }}
     attesta.dev/tier: {{ .Service.Tier }}
 spec:
-  minAvailable: 1
+  # At most one pod evicted at a time. minAvailable: 1 would block every
+  # node drain whenever the autoscaler runs a single replica.
+  maxUnavailable: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ .Service.Name }}

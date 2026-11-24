@@ -8,6 +8,7 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: {{ .Service.Name }}
+  # Staging bounds; dev and prod overlays patch them.
   minReplicas: 2
   maxReplicas: 5
   metrics:
