@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/gaurav-gs7/Attesta/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/gaurav-gs7/Attesta/actions/workflows/ci.yml)
 
-Attesta is a Kubernetes rollout guard and a small reliability API. The `attesta-controller` watches Deployments that have a `RolloutGuard`, records their last healthy pod template, and can restore it when Kubernetes declares a rollout stuck. The API gates rollouts on SLOs measured from Prometheus, opens incidents from Alertmanager, and generates a service scaffold with manifests, alerts and a runbook.
+Attesta is a Kubernetes rollout guard and a small reliability API that reports what the guard did. The `attesta-controller` watches Deployments that have a `RolloutGuard`, records their last healthy pod template, and can restore it when Kubernetes declares a rollout stuck. The controller can also pause a new revision while the service's error budget is spent, and records every decision as a hash-chained `RolloutDecision`. The API reports SLOs measured from Prometheus and the guards' verified decisions, opens incidents from Alertmanager with those decisions on the timeline, and generates a service scaffold with manifests, alerts and a runbook.
 
 Every value Attesta reports is either measured, recorded, or explicitly marked as unknown or simulated. Where it has no data it says `unknown` and fails closed.
 
@@ -13,7 +13,7 @@ Every value Attesta reports is either measured, recorded, or explicitly marked a
 | Rollout guard controller | Watches Deployments, writes status and Events, and restores the last healthy template when Kubernetes reports `ProgressDeadlineExceeded` or when the new revision fails `consecutiveFailures` metric checks in a row (error rate, p95 latency, availability from Prometheus, scoped to that revision). Inconclusive data never decides. Rolls back only Deployments that name the guard in `attesta.io/rollback-guards`, and never fights a GitOps tool that re-applies the bad version. Leader election, metrics, probes. | No traffic shifting, so no true canary: `spec.steps` is not used. |
 | SLO gate | Error rate, p95, multi-window burn rates (1h+5m, 6h+30m) and the 30-day error budget from Prometheus, judged by one evaluator (`internal/slo`) that the API's SLO status and the controller share. A guard with `spec.sloGate` pauses each new revision while the service is out of budget or burning it fast, and records why. Unknown data blocks `POST /rollouts`. | The 10% budget floor and the burn-rate thresholds are global constants; the objectives themselves are per guard. A paused rollout is resumed by a person, not automatically. |
 | Decision records | Every promotion, rollback and skipped or failed rollback is written by the controller as an immutable `RolloutDecision`: what it measured (each PromQL query and value, the Deployment's conditions), the revision and images, what it restored, and when. Records form a SHA-256 hash chain per guard; `attesta verify` or `jq` plus `sha256sum` detect an edited, inserted or deleted record. | Tamper-evident, not tamper-proof: anyone who can delete both a guard and its records can erase history; export the records if you need retention. Not signed. |
-| Rollback endpoints | Record a rollback request. | They do not change the cluster. Your deployment tooling, or the controller, must act. |
+| API cluster view | Reads RolloutGuards and the controller's RolloutDecisions (`ATTESTA_CLUSTER_READ`), verifies each chain on read, and cites the decisions in incident timelines. Read-only RBAC; the API never writes to the cluster. | No cache: each request reads the API server. |
 | Incidents | Alertmanager webhook (v4) with fingerprint dedupe and resolve; timeline from recorded events only. | Root cause is never inferred; the postmortem draft leaves it as TODO. |
 | Readiness score | Checks which metadata fields were registered. | It does not inspect the cluster or the repository. |
 | Workflow runner | Ordered in-process steps with per-step state and events, persisted to PostgreSQL. | A crashed run is re-run from the start, not resumed. Only succeeded runs are replayed; failed and abandoned ones are re-run. |
@@ -22,7 +22,7 @@ Every value Attesta reports is either measured, recorded, or explicitly marked a
 ## Components
 
 - `cmd/attesta-controller`: the `RolloutGuard` controller. See [docs/controller-operator.md](docs/controller-operator.md).
-- `cmd/attesta-api`: the HTTP API: service catalog, SLO gate, incidents, readiness, scaffold generator, workflow runner.
+- `cmd/attesta-api`: the HTTP API: service catalog, SLO status, a read-only view of guards and their decisions, incidents, readiness, scaffold generator, workflow runner.
 - `cmd/attesta`: a thin client for the API, sending the API's own request types.
 - `templates/`: the generated service scaffold.
 - `deploy/`: CRDs and the controller's manifests.
@@ -62,7 +62,7 @@ Every `/api/` request is made by an identity with a role; `/livez`, `/readyz` an
 | Role | May |
 | --- | --- |
 | `viewer` | read everything |
-| `operator` | start and change rollouts, open and resolve incidents, post Alertmanager alerts |
+| `operator` | open and resolve incidents, post Alertmanager alerts |
 | `admin` | register services |
 
 Callers send `Authorization: Bearer <token>` (the older `X-Attesta-Token` header still works). Identities come from one or more of:
@@ -133,7 +133,7 @@ The API keeps one Prometheus client for its lifetime. Its queries for one evalua
 
 Names are validated as Prometheus metric and label names, and a bad CA file or conflicting auth stops the API at startup. Responses over 1 MiB are rejected. The controller takes `--prometheus-bearer-token-file`, `--prometheus-ca-file` and `--prometheus-query-timeout`. Per-service query templates from `SLOPolicy` are not implemented: nothing reconciles `SLOPolicy` yet.
 
-The deployment gate is `allowed`, `blocked` or `unknown`. It is `unknown`, and `POST /rollouts` returns 409, whenever a signal cannot be measured: no Prometheus configured, a failed query, no series for the service, a `NaN` result, or fewer than 20 requests in a signal's window (5m for error rate and p95, each burn-rate window, 30d for the budget), where one request would decide the answer. Measured values are omitted from the response rather than reported as zero. Prometheus must retain at least 30 days for the budget to be computed.
+The gate is `allowed`, `blocked` or `unknown`; a RolloutGuard with `spec.sloGate` acts on the same verdict, computed by the same code. It is `unknown` whenever a signal cannot be measured: no Prometheus configured, a failed query, no series for the service, a `NaN` result, or fewer than 20 requests in a signal's window (5m for error rate and p95, each burn-rate window, 30d for the budget), where one request would decide the answer. Measured values are omitted from the response rather than reported as zero. Prometheus must retain at least 30 days for the budget to be computed.
 
 ## Incidents
 
@@ -151,26 +151,22 @@ receivers:
 
 `POST /api/v1/incidents` opens an incident from plain JSON. Error rate and latency in that body are stored as values the sender reported, separate from Attesta's own SLO evaluation.
 
-Timelines contain only recorded events: deployment records from the 2 hours before the alert, the alert, the incident opening and the SLO evaluation. When a recorded rollout started in that window, a correlation event names it as a rollback candidate and says it is not a confirmed cause. The postmortem draft marks what Attesta cannot know as TODO.
+Timelines contain only recorded events: the controller's decisions for the service's guards in the 2 hours before the alert (each citing its RolloutDecision and hash), the alert, the incident opening and the SLO evaluation. When the controller promoted a revision in that window, a correlation event names the latest one as a rollback candidate and says it is not a confirmed cause. The postmortem draft marks what Attesta cannot know as TODO.
 
 
-## Rollback Requests
+## Guards And Decisions
 
-The API accepts no health numbers from callers: there is no endpoint that takes a latency or error rate and acts on it. Canary health is measured by the controller from Prometheus (see Kubernetes Controller).
+The API never writes to the cluster. It reads what the controller does: the RolloutGuards and the RolloutDecisions they recorded, with each guard's hash chain verified on every read. There is no endpoint that starts, pauses or rolls back a rollout, and none that takes a latency or error rate from a caller; the controller measures from Prometheus and acts, and the API reports it.
 
-`POST /api/v1/services/{name}/rollback` requests a rollback of the service's most recent rollout. It does not change the cluster.
-
-### Rollouts
-
-`POST /api/v1/services/{name}/rollouts` takes `{"version": "v2", "image": "ghcr.io/acme/app:v2", "gitSha": "0123abc"}`; version and image are required and validated, unknown fields are rejected, and the body is size-limited. It answers 202 with the rollout if the SLO gate allows it, 409 if the gate is not `allowed` or another rollout is active, and 500 if the store fails. A rollout moves through a state machine:
-
-```
-started --pause--> paused --resume--> started
-started --complete--> completed
-started | paused | completed --rollback--> rollback-requested
+```bash
+ATTESTA_CLUSTER_READ=true make run-api          # uses $KUBECONFIG, or the in-cluster service account
+attesta guards payments-api                     # the service's guards, chains verified
+attesta guard payments/payments-api-rollout     # one guard and every decision it recorded
 ```
 
-`POST .../rollouts/{id}/pause`, `/resume`, `/complete` and `/rollback` take an optional `{"reason": "..."}`, answer 404 for an unknown rollout and 409 for a transition the state does not allow. Each transition is recorded on the rollout. A service has at most one active (started or paused) rollout. Its deployment history has one entry per rollout, carrying the version, image and current status, so pauses and rollback requests never appear as deployments.
+A guard belongs to a service by its `spec.serviceRef`, or else its Deployment's name, in any namespace. `deploy/api/cluster-read-rbac.yaml` grants the API `get` and `list` on `rolloutguards` and `rolloutdecisions`, nothing else. Without `ATTESTA_CLUSTER_READ`, the guard endpoints answer 503 and say so, `GET .../status` carries `guardsUnavailable`, and incident timelines state that the decisions were not read rather than implying nothing happened.
+
+Each guard comes back with `chain`: `verified`, the number of decisions, and, when it fails, `brokenAt` and `problem`, the first sequence where a record was edited, inserted or deleted. The API reads the API server on each request, without a cache.
 
 ## Readiness Score
 
@@ -211,7 +207,7 @@ CI runs on every push: formatting, `go mod tidy` drift, vet, race-enabled tests 
 docker compose up --build
 ```
 
-Without `DATABASE_URL`, Attesta keeps everything in memory. With it, the service catalog, deployment records, workflow runs and incidents are stored in PostgreSQL.
+Without `DATABASE_URL`, Attesta keeps everything in memory. With it, the service catalog, workflow runs and incidents are stored in PostgreSQL. What happened in the cluster is not copied there: it is read from the RolloutDecisions.
 
 ## API Surface
 
@@ -220,13 +216,12 @@ Without `DATABASE_URL`, Attesta keeps everything in memory. With it, the service
 | `GET /livez`, `GET /readyz`, `GET /metrics` | Probes and metrics (no token) |
 | `POST /api/v1/services`, `GET /api/v1/services` | Register and list services |
 | `GET /api/v1/services/{name}` | Service record |
-| `GET /api/v1/services/{name}/status` | Measured SLO state and the latest deployment record |
+| `GET /api/v1/services/{name}/status` | Measured SLO state and the service's guards |
 | `GET /api/v1/services/{name}/readiness`, `POST .../check`, `GET .../score` | Metadata readiness score |
 | `GET /api/v1/services/{name}/slos`, `GET .../error-budget` | SLO evaluation |
-| `GET /api/v1/services/{name}/deployments` | Deployment records |
-| `POST /api/v1/services/{name}/rollouts` | Start a rollout if the SLO gate allows it |
-| `GET /api/v1/services/{name}/rollouts/{id\|latest}`, `POST .../pause`, `.../resume`, `.../complete`, `.../rollback` | Rollout state and transitions |
-| `POST /api/v1/services/{name}/rollback` | Record a rollback request |
+| `GET /api/v1/services/{name}/guards` | The service's RolloutGuards, each chain verified |
+| `GET /api/v1/guards[?namespace=]` | RolloutGuards |
+| `GET /api/v1/guards/{namespace}/{name}` | A guard, every decision it recorded, and the chain's verification |
 | `GET /api/v1/services/{name}/runbook` | Runbook rendered from the service record |
 | `GET /api/v1/services/{name}/scaffold` | The service's scaffold as a `.tar.gz`, rendered on demand |
 | `POST /api/v1/incidents`, `GET /api/v1/incidents` | Open and list incidents |
@@ -234,7 +229,7 @@ Without `DATABASE_URL`, Attesta keeps everything in memory. With it, the service
 | `GET /api/v1/incidents/{id}`, `.../timeline`, `.../postmortem`, `POST .../resolve` | Incident record, timeline, draft, resolve |
 | `GET /api/v1/workflows`, `GET /api/v1/workflows/{id}` | Workflow runs |
 
-The deployment, incident and workflow lists are paginated newest first: pass `?limit=` (1 to 200, default 50) and, for the next page, the `nextCursor` value from the previous response as `?cursor=`. `nextCursor` is absent on the last page. A store error is reported as `500`, never answered from a cache.
+The incident and workflow lists are paginated newest first: pass `?limit=` (1 to 200, default 50) and, for the next page, the `nextCursor` value from the previous response as `?cursor=`. `nextCursor` is absent on the last page. A store error is reported as `500`, never answered from a cache.
 
 With `DATABASE_URL` set, the store uses a pgx connection pool: at most 10 connections, each closed after 30 minutes (plus up to 5 of jitter) or 5 idle minutes, health-checked every 30s. Every session runs with `statement_timeout=10s`, `lock_timeout=5s`, `idle_in_transaction_session_timeout=30s` and `application_name=attesta-api`. Any of these can be set in the URL instead (`pool_max_conns`, `pool_max_conn_lifetime`, `pool_max_conn_idle_time`, `pool_health_check_period`, or the session parameter by name). Migrations lift the two timeouts for their own session only. No read holds more than one connection, so the pool size is the number of requests the store serves at once.
 

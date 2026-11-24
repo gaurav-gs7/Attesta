@@ -289,8 +289,6 @@ attesta_reliability_demo() {
     go run ./cmd/attesta check "$SERVICE_NAME"
   run env GOCACHE="$GOCACHE" GOMODCACHE="$GOMODCACHE" ATTESTA_API_TOKEN="$ATTESTA_API_TOKEN" ATTESTA_API_URL="$ATTESTA_API_URL" \
     go run ./cmd/attesta slo status "$SERVICE_NAME"
-  run env GOCACHE="$GOCACHE" GOMODCACHE="$GOMODCACHE" ATTESTA_API_TOKEN="$ATTESTA_API_TOKEN" ATTESTA_API_URL="$ATTESTA_API_URL" \
-    go run ./cmd/attesta deployments --name "$SERVICE_NAME"
   simulate_incident
   run env GOCACHE="$GOCACHE" GOMODCACHE="$GOMODCACHE" ATTESTA_API_TOKEN="$ATTESTA_API_TOKEN" ATTESTA_API_URL="$ATTESTA_API_URL" \
     go run ./cmd/attesta workflows list
@@ -316,7 +314,7 @@ simulate_incident() {
 }
 
 automate_kubernetes_rollback() {
-  log "this script runs kubectl rollout undo itself, standing in for the deployment tooling that would act on the recorded rollback request"
+  log "SIMULATED: this script runs kubectl rollout undo itself; with a RolloutGuard, attesta-controller does this and records the decision (see scripts/e2e-rollback.sh)"
   run kubectl -n "$NAMESPACE" rollout history "deployment/$SERVICE_NAME"
   run kubectl -n "$NAMESPACE" rollout undo "deployment/$SERVICE_NAME"
   run kubectl -n "$NAMESPACE" rollout status "deployment/$SERVICE_NAME" --timeout=180s

@@ -9,16 +9,13 @@ import (
 
 	"github.com/gaurav-gs7/attesta/internal/models"
 	"github.com/gaurav-gs7/attesta/internal/page"
-	"github.com/gaurav-gs7/attesta/internal/rollouts"
 	"github.com/gaurav-gs7/attesta/internal/workflows"
 )
 
 type MemoryStore struct {
-	mu          sync.RWMutex
-	services    map[string]models.Service
-	deployments map[string][]models.Deployment
-	incidents   map[string]models.IncidentRecord
-	rollouts    map[string]models.Rollout
+	mu        sync.RWMutex
+	services  map[string]models.Service
+	incidents map[string]models.IncidentRecord
 	// Workflow runs, with the engine's idempotency contract.
 	*workflows.MemoryStore
 }
@@ -26,9 +23,7 @@ type MemoryStore struct {
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		services:    make(map[string]models.Service),
-		deployments: make(map[string][]models.Deployment),
 		incidents:   make(map[string]models.IncidentRecord),
-		rollouts:    make(map[string]models.Rollout),
 		MemoryStore: workflows.NewMemoryStore(),
 	}
 }
@@ -76,124 +71,6 @@ func (s *MemoryStore) GetServiceByName(_ context.Context, name string) (models.S
 		return models.Service{}, ErrNotFound
 	}
 	return service, nil
-}
-
-func (s *MemoryStore) RecordDeployment(_ context.Context, deployment models.Deployment) (models.Deployment, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if deployment.ID == "" {
-		deployment.ID = NewID()
-	}
-	if deployment.StartedAt.IsZero() {
-		deployment.StartedAt = nowUTC()
-	}
-	s.deployments[deployment.ServiceID] = append(s.deployments[deployment.ServiceID], deployment)
-	return deployment, nil
-}
-
-func (s *MemoryStore) LatestDeployment(_ context.Context, serviceID string) (models.Deployment, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	deployments := s.deployments[serviceID]
-	if len(deployments) == 0 {
-		return models.Deployment{}, ErrNotFound
-	}
-	latest := deployments[0]
-	for _, d := range deployments[1:] {
-		if page.Less(d.StartedAt, d.ID, latest.StartedAt, latest.ID) {
-			latest = d
-		}
-	}
-	return latest, nil
-}
-
-func (s *MemoryStore) CreateRollout(_ context.Context, rollout models.Rollout, deployment models.Deployment) (models.Rollout, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, existing := range s.rollouts {
-		if existing.ServiceID == rollout.ServiceID && rollouts.Active(existing.State) {
-			return models.Rollout{}, fmt.Errorf("%w: rollout %s (%s) is %s", ErrConflict, existing.ID, existing.Version, existing.State)
-		}
-	}
-	if rollout.ID == "" {
-		rollout.ID = NewID()
-	}
-	if deployment.ID == "" {
-		deployment.ID = NewID()
-	}
-	rollout.DeploymentID, deployment.RolloutID = deployment.ID, rollout.ID
-	s.rollouts[rollout.ID] = cloneRollout(rollout)
-	s.deployments[deployment.ServiceID] = append(s.deployments[deployment.ServiceID], deployment)
-	return rollout, nil
-}
-
-func (s *MemoryStore) GetRollout(_ context.Context, serviceID, id string) (models.Rollout, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	rollout, ok := s.rollouts[id]
-	if !ok || rollout.ServiceID != serviceID {
-		return models.Rollout{}, ErrNotFound
-	}
-	return cloneRollout(rollout), nil
-}
-
-func (s *MemoryStore) LatestRollout(_ context.Context, serviceID string) (models.Rollout, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	var latest *models.Rollout
-	for _, r := range s.rollouts {
-		if r.ServiceID == serviceID && (latest == nil || page.Less(r.CreatedAt, r.ID, latest.CreatedAt, latest.ID)) {
-			rr := r
-			latest = &rr
-		}
-	}
-	if latest == nil {
-		return models.Rollout{}, ErrNotFound
-	}
-	return cloneRollout(*latest), nil
-}
-
-func (s *MemoryStore) UpdateRollout(_ context.Context, rollout models.Rollout, fromState string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	stored, ok := s.rollouts[rollout.ID]
-	if !ok {
-		return ErrNotFound
-	}
-	if stored.State != fromState {
-		return fmt.Errorf("%w: rollout %s is now %s", ErrConflict, rollout.ID, stored.State)
-	}
-	s.rollouts[rollout.ID] = cloneRollout(rollout)
-	for i, d := range s.deployments[rollout.ServiceID] {
-		if d.ID == rollout.DeploymentID {
-			d.Status = rollouts.DeploymentStatus(rollout.State)
-			if !rollouts.Active(rollout.State) && d.CompletedAt == nil {
-				at := rollout.UpdatedAt
-				d.CompletedAt = &at
-			}
-			s.deployments[rollout.ServiceID][i] = d
-		}
-	}
-	return nil
-}
-
-func cloneRollout(r models.Rollout) models.Rollout {
-	r.Events = append([]models.RolloutEvent(nil), r.Events...)
-	return r
-}
-
-func (s *MemoryStore) ListDeployments(_ context.Context, serviceID string, req page.Request) ([]models.Deployment, string, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	deployments := append([]models.Deployment(nil), s.deployments[serviceID]...)
-	sort.Slice(deployments, func(i, j int) bool {
-		return page.Less(deployments[i].StartedAt, deployments[i].ID, deployments[j].StartedAt, deployments[j].ID)
-	})
-	out, next := page.Slice(deployments, req, func(d models.Deployment) (time.Time, string) { return d.StartedAt, d.ID })
-	return out, next, nil
 }
 
 func (s *MemoryStore) activeDuplicate(record models.IncidentRecord) bool {

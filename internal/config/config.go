@@ -41,6 +41,9 @@ type Config struct {
 	// ImageRegistry is where generated services' images live, as
 	// host[:port][/path]; each service's image is <registry>/<name>.
 	ImageRegistry string
+	// ClusterRead lets the API read RolloutGuards and RolloutDecisions, with
+	// the in-cluster service account or $KUBECONFIG.
+	ClusterRead bool
 }
 
 func Load() Config {
@@ -59,6 +62,7 @@ func Load() Config {
 		MaxBodyMB:        1,
 		PrometheusURL:    os.Getenv("ATTESTA_PROMETHEUS_URL"),
 		ImageRegistry:    env("ATTESTA_IMAGE_REGISTRY", templates.DefaultImageRegistry),
+		ClusterRead:      boolEnv("ATTESTA_CLUSTER_READ"),
 	}
 }
 

@@ -72,19 +72,19 @@ func TestRolesAreEnforcedPerRoute(t *testing.T) {
 	if rec := as(server, "tok-view", http.MethodGet, "/api/v1/services/payments-api", ""); rec.Code != http.StatusOK {
 		t.Fatalf("viewer read: %d", rec.Code)
 	}
-	if rec := as(server, "tok-view", http.MethodPost, svc+"/rollouts", rolloutBody); rec.Code != http.StatusForbidden {
-		t.Fatalf("viewer rollout: %d, want 403", rec.Code)
+	incident := `{"service":"payments-api","severity":"sev2","title":"t"}`
+	if rec := as(server, "tok-view", http.MethodPost, "/api/v1/incidents", incident); rec.Code != http.StatusForbidden {
+		t.Fatalf("viewer opening an incident: %d, want 403", rec.Code)
 	}
-	if rec := as(server, "tok-ops", http.MethodPost, svc+"/rollouts", rolloutBody); rec.Code != http.StatusAccepted {
-		t.Fatalf("operator rollout: %d %s", rec.Code, rec.Body.String())
+	if rec := as(server, "tok-ops", http.MethodPost, "/api/v1/incidents", incident); rec.Code != http.StatusCreated {
+		t.Fatalf("operator opening an incident: %d %s", rec.Code, rec.Body.String())
 	}
 	if rec := as(server, "", http.MethodGet, "/livez", ""); rec.Code != http.StatusOK {
 		t.Fatalf("probes must stay open: %d", rec.Code)
 	}
 }
 
-// Every run, rollout transition, incident and access log line names the
-// caller.
+// Every run, incident and access log line names the caller.
 func TestActorIsRecordedEverywhere(t *testing.T) {
 	logs := &logBuffer{}
 	server, store := tokenServer(t, logs)
@@ -101,16 +101,6 @@ func TestActorIsRecordedEverywhere(t *testing.T) {
 	}
 	if run, err := store.GetWorkflowRun(context.Background(), created.Workflow.ID); err != nil || run.Actor != "gaurav" {
 		t.Fatalf("stored run actor = %q (%v)", run.Actor, err)
-	}
-
-	start := as(server, "tok-ops", http.MethodPost, svc+"/rollouts", rolloutBody)
-	var started rolloutResponse
-	_ = json.Unmarshal(start.Body.Bytes(), &started)
-	pause := as(server, "tok-admin", http.MethodPost, svc+"/rollouts/"+started.Rollout.ID+"/pause", "")
-	var paused rolloutResponse
-	_ = json.Unmarshal(pause.Body.Bytes(), &paused)
-	if ev := paused.Rollout.Events; len(ev) != 2 || ev[0].Actor != "ci-deployer" || ev[1].Actor != "gaurav" {
-		t.Fatalf("rollout events: %+v, want started by ci-deployer and paused by gaurav", ev)
 	}
 
 	inc := as(server, "tok-ops", http.MethodPost, "/api/v1/incidents", `{"service":"payments-api","severity":"sev2","title":"t"}`)

@@ -64,7 +64,7 @@ func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
 }
 
 // routeOf returns the path pattern the request matched, such as
-// /api/v1/services/{name}/rollouts/{id}, or "other" when nothing matched
+// /api/v1/guards/{namespace}/{name}, or "other" when nothing matched
 // (a 404, or a request rejected before routing).
 func routeOf(r *http.Request) string {
 	pattern := r.Pattern

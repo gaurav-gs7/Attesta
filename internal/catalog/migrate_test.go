@@ -159,7 +159,7 @@ func TestSchemaHasNoUnusedTables(t *testing.T) {
 		}
 	}
 	// incidents and incident_events were re-created, in use, by D-5.
-	for _, dropped := range []string{"slo_snapshots", "rollout_events", "readiness_checks", "incident_records"} {
+	for _, dropped := range []string{"slo_snapshots", "rollout_events", "readiness_checks", "incident_records", "rollouts", "deployments"} {
 		for _, table := range tables {
 			if table == dropped {
 				t.Errorf("unused table %s still exists", dropped)

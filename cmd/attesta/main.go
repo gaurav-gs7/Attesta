@@ -60,18 +60,16 @@ func run(args []string) error {
 		return get("/api/v1/services")
 	case "status":
 		return serviceGet(rest, "status", "/api/v1/services/%s/status")
-	case "deployments":
-		return serviceGet(rest, "deployments", "/api/v1/services/%s/deployments")
-	case "rollback":
-		return servicePost(rest, "rollback", "/api/v1/services/%s/rollback", nil)
 	case "check":
 		return serviceGetByArg(rest, "check", "/api/v1/services/%s/readiness")
 	case "score":
 		return serviceGetByArg(rest, "score", "/api/v1/services/%s/score")
 	case "slo":
 		return slo(rest)
-	case "rollout":
-		return rollout(rest)
+	case "guards":
+		return guards(rest)
+	case "guard":
+		return guard(rest)
 	case "incident":
 		return incident(rest)
 	case "workflow", "workflows":
@@ -253,18 +251,6 @@ func serviceGetByArg(args []string, command, path string) error {
 	return get(fmt.Sprintf(path, name))
 }
 
-func servicePost(args []string, command, path string, payload any) error {
-	fs := flag.NewFlagSet(command, flag.ContinueOnError)
-	name := fs.String("name", "", "service name")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *name == "" {
-		return fmt.Errorf("--name is required")
-	}
-	return post(fmt.Sprintf(path, *name), payload)
-}
-
 func slo(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("slo subcommand is required")
@@ -274,22 +260,6 @@ func slo(args []string) error {
 		return serviceGetByArg(args[1:], "slo status", "/api/v1/services/%s/slos")
 	default:
 		return fmt.Errorf("unknown slo subcommand %q", args[0])
-	}
-}
-
-func rollout(args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("rollout subcommand is required")
-	}
-	switch args[0] {
-	case "status":
-		return serviceGetByArg(args[1:], "rollout status", "/api/v1/services/%s/status")
-	case "rollback":
-		return servicePostByArg(args[1:], "rollout rollback", "/api/v1/services/%s/rollback", nil)
-	case "start", "pause":
-		return fmt.Errorf("rollout %s is represented by the local CI/CD runner in this MVP", args[0])
-	default:
-		return fmt.Errorf("unknown rollout subcommand %q", args[0])
 	}
 }
 
@@ -372,20 +342,38 @@ func workflow(args []string) error {
 	}
 }
 
-func servicePostByArg(args []string, command, path string, payload any) error {
-	fs := flag.NewFlagSet(command, flag.ContinueOnError)
-	nameFlag := fs.String("name", "", "service name")
+// guards lists RolloutGuards: a service's, or all of them (in one
+// namespace with --namespace).
+func guards(args []string) error {
+	fs := flag.NewFlagSet("guards", flag.ContinueOnError)
+	namespace := fs.String("namespace", "", "only guards in this namespace")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	name := *nameFlag
-	if name == "" && fs.NArg() > 0 {
-		name = fs.Arg(0)
+	switch {
+	case fs.NArg() > 1, fs.NArg() == 1 && *namespace != "":
+		return errUsage
+	case fs.NArg() == 1:
+		if !serviceName.MatchString(fs.Arg(0)) {
+			return fmt.Errorf("invalid service name %q", fs.Arg(0))
+		}
+		return get("/api/v1/services/" + fs.Arg(0) + "/guards")
+	case *namespace != "":
+		return get("/api/v1/guards?namespace=" + url.QueryEscape(*namespace))
 	}
-	if name == "" {
-		return fmt.Errorf("service name is required")
+	return get("/api/v1/guards")
+}
+
+// guard shows one RolloutGuard, named namespace/name, with its decisions.
+func guard(args []string) error {
+	if len(args) != 1 {
+		return errUsage
 	}
-	return post(fmt.Sprintf(path, name), payload)
+	namespace, name, ok := strings.Cut(args[0], "/")
+	if !ok || !serviceName.MatchString(namespace) || name == "" || strings.Contains(name, "/") {
+		return fmt.Errorf("guard must be namespace/name, got %q", args[0])
+	}
+	return get("/api/v1/guards/" + namespace + "/" + url.PathEscape(name))
 }
 
 func firstArg(args []string, label string) (string, error) {
@@ -474,8 +462,10 @@ Usage:
   attesta check payments-api
   attesta score payments-api
   attesta slo status payments-api
-  attesta rollout status payments-api
-  attesta rollout rollback payments-api
+  attesta guards                      (every RolloutGuard the API can see)
+  attesta guards payments-api         (the service's guards, with their decision chains verified)
+  attesta guards --namespace payments
+  attesta guard payments/payments-api-rollout   (one guard and every decision it recorded)
   attesta incident create --service payments-api --alert HighErrorRate --error-rate 8.2 --latency-p95-ms 850
   attesta incident list
   attesta incident show inc-20260516103000
@@ -484,7 +474,5 @@ Usage:
   kubectl get rolloutguards,rolloutdecisions -n payments -o json | attesta verify
   attesta list
   attesta status --name payments-api
-  attesta rollback --name payments-api
-  attesta deployments --name payments-api
 `)
 }

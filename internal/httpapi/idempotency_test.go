@@ -153,15 +153,12 @@ func TestOnboardingRecoversAfterATransientStoreFailure(t *testing.T) {
 					t.Fatalf("after restart: %d %s, want an idempotent 200", again.Code, again.Body.String())
 				}
 
-				deployments := authorizedRequest(restarted, http.MethodGet, "/api/v1/services/payments-api/deployments", nil)
-				var payload struct {
-					Deployments []models.Deployment `json:"deployments"`
-				}
-				if err := json.Unmarshal(deployments.Body.Bytes(), &payload); err != nil {
+				services, err := base.ListServices(context.Background())
+				if err != nil {
 					t.Fatal(err)
 				}
-				if len(payload.Deployments) != 1 {
-					t.Fatalf("re-driven onboarding recorded %d initial deployments, want 1", len(payload.Deployments))
+				if len(services) != 1 {
+					t.Fatalf("re-driven onboarding left %d services, want 1", len(services))
 				}
 			})
 		}

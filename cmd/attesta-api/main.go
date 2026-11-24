@@ -15,7 +15,10 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
+	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
+
 	"github.com/gaurav-gs7/attesta/internal/catalog"
+	"github.com/gaurav-gs7/attesta/internal/cluster"
 	"github.com/gaurav-gs7/attesta/internal/config"
 	"github.com/gaurav-gs7/attesta/internal/httpapi"
 	"github.com/gaurav-gs7/attesta/internal/prometheus"
@@ -92,6 +95,22 @@ func main() {
 		opts = append(opts, httpapi.WithAuthenticator(authenticator))
 	} else {
 		opts = append(opts, httpapi.WithInsecureNoAuth())
+	}
+	if cfg.ClusterRead {
+		// $KUBECONFIG, then the in-cluster service account. The API only
+		// reads: see deploy/api/cluster-read-rbac.yaml.
+		restCfg, err := ctrlconfig.GetConfig()
+		if err != nil {
+			log.Fatalf("ATTESTA_CLUSTER_READ: %v", err)
+		}
+		restCfg.UserAgent = "attesta-api"
+		reader, err := cluster.New(restCfg)
+		if err != nil {
+			log.Fatalf("ATTESTA_CLUSTER_READ: %v", err)
+		}
+		opts = append(opts, httpapi.WithCluster(reader))
+	} else {
+		log.Printf("ATTESTA_CLUSTER_READ is not set; the API cannot show RolloutGuards or the controller's decisions")
 	}
 	handler := httpapi.NewServer(store, generator, opts...)
 

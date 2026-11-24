@@ -14,14 +14,14 @@ The alert sender reported: error rate 8.20%. Attesta did not verify these values
 
 ## Timeline
 
-- 2026-11-24T09:50:00Z [deployment] deployment record v3: status started, strategy canary
+- 2026-11-24T09:50:00Z [rollout-decision] controller decision Promoted on payments/payments-api revision 4 (trigger AnalysisPassed): revision 4 (template 6b8f7c9d4) is the healthy revision a rollback restores [record payments-api-rollout-0f3c9a2e-000004, hash ab12cd34ef56]
 - 2026-11-24T10:00:00Z [incident-opened] Attesta opened inc-1 from alertmanager alert HighErrorRate, severity page; alert reported error rate 8.20%
 - 2026-11-24T10:00:00Z [slo-evaluation] measured from prometheus over 5m: error rate 8.20% (threshold 1.00%), p95 latency 850ms (target 300ms); deployment gate blocked
-- 2026-11-24T10:00:00Z [correlation] rollout v3 was recorded 10m0s before the alert; it is a rollback candidate. This is a time correlation, not a confirmed cause, and Attesta performed no rollback.
+- 2026-11-24T10:00:00Z [correlation] revision 4 of payments/payments-api was promoted 10m0s before the alert (decision payments-api-rollout-0f3c9a2e-000004, hash ab12cd34ef56); it is a rollback candidate. This is a time correlation, not a confirmed cause.
 
 ## Contributing factors
 
-rollout v3 was recorded 10m0s before the alert; it is a rollback candidate. This is a time correlation, not a confirmed cause, and Attesta performed no rollback.
+revision 4 of payments/payments-api was promoted 10m0s before the alert (decision payments-api-rollout-0f3c9a2e-000004, hash ab12cd34ef56); it is a rollback candidate. This is a time correlation, not a confirmed cause.
 
 TODO: confirm the cause.
 

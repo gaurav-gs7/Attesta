@@ -4,7 +4,7 @@
 // including the ones below it:
 //
 //	viewer    read everything
-//	operator  act on rollouts and incidents, send alerts
+//	operator  open and resolve incidents, send alerts
 //	admin     register services
 //
 // Principals come from an Authenticator: a file of hashed API tokens, each

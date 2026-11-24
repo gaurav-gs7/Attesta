@@ -1,9 +1,19 @@
 # Attesta Architecture
 
-Attesta has two processes that do not depend on each other:
+Attesta has two processes. The controller acts; the API reports what it did. They share the SLO evaluator and the Prometheus query builder, and the cluster is where they meet: the controller writes RolloutDecisions, the API reads them.
 
-- **`attesta-controller`** reconciles `RolloutGuard` resources against Deployments in the cluster. It is the only part of Attesta that changes cluster state, and only when a guard opts in to rollback.
-- **`attesta-api`** is an HTTP service with a catalog of registered services, an SLO gate backed by Prometheus, incident records, a metadata readiness score, a scaffold generator and an in-process workflow runner. It records decisions and requests; it does not change the cluster.
+- **`attesta-controller`** reconciles `RolloutGuard` resources against Deployments in the cluster. It is the only part of Attesta that changes cluster state: it rolls a Deployment back or pauses it, only when a guard opts in and the Deployment consents, and records each decision as a hash-chained `RolloutDecision`.
+- **`attesta-api`** is an HTTP service with a catalog of registered services, SLO status measured from Prometheus, a read-only view of guards and their verified decisions, incident records whose timelines cite those decisions, a metadata readiness score, a scaffold generator and an in-process workflow runner. It never writes to the cluster.
+
+```
+            Prometheus
+            │        │
+  slo.Evaluate     analysis queries
+            │        │
+  attesta-api ◀──read── RolloutGuard / RolloutDecision ◀──write── attesta-controller ──update──▶ Deployment
+  (SLO status,                                                    (rollback, pause,
+   guards, incidents)                                              decision records)
+```
 
 ## Controller
 
@@ -14,7 +24,9 @@ The controller watches `RolloutGuard` resources and the Deployments they referen
 3. If the guard sets `spec.checks` and the controller has `--prometheus-url`, checks the new revision's error rate, p95 latency and availability in Prometheus every interval. Enough consecutive failures block the rollout; inconclusive data never decides.
 4. On `Healthy`, and with analysis only after enough passing checks, records the current ReplicaSet's revision and template hash in the guard's status.
 5. On `Blocked`, with `spec.rollback.enabled: true`, restores the recorded healthy template, at most once per bad template.
-6. Writes status only when it changed and emits an Event only on a phase or reason transition.
+6. With `spec.sloGate`, when a new revision starts while the service is out of its error budget or burning it fast, pauses the Deployment.
+7. Records each promotion, rollback, pause, and skipped or failed action as a `RolloutDecision`, before the status that points at it.
+8. Writes status only when it changed and emits an Event only on a phase or reason transition.
 
 It runs two replicas behind a leader-election Lease and exposes `/healthz`, `/readyz` and Prometheus metrics. The rules and limits are in [controller-operator.md](controller-operator.md).
 
@@ -40,11 +52,11 @@ An admission webhook that runs a SubjectAccessReview for the guard's creator was
 
 ### SLO gate
 
-`GET /slos` queries Prometheus for the service's error rate and p95 latency (5m), burn rates over 5m, 30m, 1h and 6h, and availability and remaining error budget (30d, from `increase()`). Burn rates gate in multi-window pairs: blocked when 1h and 5m are both at or above 14.4x, or 6h and 30m both at or above 6x. The gate is `allowed`, `blocked` or `unknown`. Unknown, which covers no Prometheus, failed queries, no series, `NaN`, and fewer than 20 requests in a window, blocks `POST /rollouts`. Values that could not be measured are omitted, never reported as zero.
+`GET /slos` queries Prometheus for the service's error rate and p95 latency (5m), burn rates over 5m, 30m, 1h and 6h, and availability and remaining error budget (30d, from `increase()`). Burn rates gate in multi-window pairs: blocked when 1h and 5m are both at or above 14.4x, or 6h and 30m both at or above 6x. The gate is `allowed`, `blocked` or `unknown`. Unknown covers no Prometheus, failed queries, no series, `NaN`, and fewer than 20 requests in a window. The controller's `spec.sloGate` applies the same function (`slo.Evaluate`) to the same queries when a new revision starts, and pauses it on `blocked` (and on `unknown` with `onUnknown: Pause`). Values that could not be measured are omitted, never reported as zero.
 
 ### Incidents
 
-Incidents open from Alertmanager's webhook or a JSON call. Opening an incident evaluates the SLO gate, loads deployment records from the previous 2 hours, and builds a timeline from those records, the alert and the evaluation. A rollout recorded in that window is named as a rollback candidate and labelled as a correlation. The postmortem draft marks the cause and follow-ups as TODO.
+Incidents open from Alertmanager's webhook or a JSON call. Opening an incident evaluates the SLOs, reads the controller's decisions for the service's guards from the previous 2 hours, and builds a timeline from those records, the alert and the evaluation. The latest revision the controller promoted in that window is named as a rollback candidate and labelled as a correlation. Without cluster access the timeline says the decisions were not read. The postmortem draft marks the cause and follow-ups as TODO.
 
 ### Rollback requests
 
@@ -81,6 +93,7 @@ The runner does not resume a crashed run from its last step; the next request re
 | CRD | Reconciled | Purpose |
 | --- | --- | --- |
 | `RolloutGuard` | Yes, by `attesta-controller` | Guards one Deployment's rollouts |
+| `RolloutDecision` | Written by `attesta-controller`, never changed | One decision, hash-chained per guard; read by the API |
 | `AttestaService` | No | Declarative record of service metadata, generated by the scaffold |
 | `SLOPolicy` | No | Declarative record of SLO targets and queries, generated by the scaffold |
 
@@ -88,8 +101,10 @@ The Go types in `api/v1` are the source of truth. `make generate` (controller-ge
 
 ## Data
 
-With PostgreSQL, Attesta stores the service catalog, deployment records, workflow runs with their steps and events, and incident records. Without it, everything is kept in memory and lost on restart; the in-memory workflow store keeps the newest 1,000 runs and drops the oldest finished ones beyond that. Every API replica prunes hourly: finished workflow runs (with their steps and events) 30 days after they completed, and resolved incidents (with their timelines) a year after they were resolved. Running runs and active incidents are never pruned. Deletes go in batches of 1,000 with `SKIP LOCKED`, so replicas pruning at once do not block each other. `ATTESTA_WORKFLOW_RETENTION` and `ATTESTA_INCIDENT_RETENTION` take a duration of at least 1h or a number of days (`90d`); `0` keeps records forever. A pruned succeeded run no longer holds its idempotency key: an identical request after that runs again, which onboarding answers as `200 idempotent`.
+With PostgreSQL, Attesta stores the service catalog, workflow runs with their steps and events, and incident records. Without it, everything is kept in memory and lost on restart; the in-memory workflow store keeps the newest 1,000 runs and drops the oldest finished ones beyond that. Every API replica prunes hourly: finished workflow runs (with their steps and events) 30 days after they completed, and resolved incidents (with their timelines) a year after they were resolved. Running runs and active incidents are never pruned. Deletes go in batches of 1,000 with `SKIP LOCKED`, so replicas pruning at once do not block each other. `ATTESTA_WORKFLOW_RETENTION` and `ATTESTA_INCIDENT_RETENTION` take a duration of at least 1h or a number of days (`90d`); `0` keeps records forever. A pruned succeeded run no longer holds its idempotency key: an identical request after that runs again, which onboarding answers as `200 idempotent`.
 
 An incident is a row in `incidents` with its timeline in `incident_events`, one row per event, appended and never rewritten. The SLO evaluation taken when it opened is kept as one JSONB snapshot, since it is never queried by field or changed; the service is not copied but joined from `services`, so an incident shows the service's current owner and pager. Every update carries the `version` it read and applies only if the row is still at that version: two concurrent resolutions cannot both write, and the second request answers `alreadyResolved` with the stored record. A partial unique index allows one active incident per service and Alertmanager fingerprint, so two notifications for one firing alert open one incident and the second reports `duplicate`.
 
-Only operations that change something create workflow runs: onboarding, rollouts, pauses, rollback requests and incidents. Reads (readiness, score, SLOs and error budget, status) compute their answer and write nothing.
+Only operations that change something create workflow runs: onboarding and incidents. Reads (readiness, score, SLOs and error budget, status, guards) compute their answer and write nothing.
+
+Rollouts are not stored in PostgreSQL. Earlier versions recorded rollout and rollback *requests* made to the API, which changed nothing in the cluster; migration 6 drops those tables. What happened is in the cluster: the controller's RolloutDecisions, which the API reads (`ATTESTA_CLUSTER_READ`) and verifies, and which incident timelines cite.

@@ -1,6 +1,7 @@
 // Package incidents builds incident timelines and postmortem drafts from
-// records Attesta holds: deployment records, the SLO evaluation taken when
-// the incident opened, and the alert itself. It does not invent events,
+// records: the decisions the controller recorded in the cluster (hash-chained
+// RolloutDecisions), the SLO evaluation taken when the incident opened, and
+// the alert itself. It does not invent events,
 // offsets or causes; anything it cannot know is marked as unknown or TODO.
 package incidents
 
@@ -15,8 +16,8 @@ import (
 	"github.com/gaurav-gs7/attesta/internal/models"
 )
 
-// CorrelationWindow is how far before an alert deployment records are pulled
-// into the timeline.
+// CorrelationWindow is how far before an alert the controller's decisions
+// are pulled into the timeline.
 const CorrelationWindow = 2 * time.Hour
 
 // Incident sources.
@@ -27,7 +28,8 @@ const (
 
 // Event types written to the timeline.
 const (
-	EventDeployment    = "deployment"
+	EventDecision      = "rollout-decision"
+	EventNoDecisions   = "rollout-decisions-unavailable"
 	EventAlertFiring   = "alert-firing"
 	EventOpened        = "incident-opened"
 	EventSLOEvaluation = "slo-evaluation"
@@ -81,31 +83,65 @@ func AlertFingerprint(alert AlertmanagerAlert) string {
 	return "labels-" + hex.EncodeToString(h.Sum(nil))[:16]
 }
 
-// Timeline orders the recorded evidence around an incident. Deployment
-// records are included when they started within CorrelationWindow before the
-// alert. A correlation event is added only for a recorded rollout start in
-// that window, and it says plainly that it is a correlation.
-func Timeline(incident models.Incident, deployments []models.Deployment, sloStatus models.SLOStatus) []models.IncidentEvent {
+// Decision is one RolloutDecision the controller recorded for a guard of the
+// incident's service, as the timeline cites it.
+type Decision struct {
+	At         time.Time
+	Namespace  string
+	Guard      string
+	Record     string
+	Hash       string
+	Action     string
+	Trigger    string
+	Deployment string
+	Revision   string
+	RestoredTo string
+	Message    string
+}
+
+// Decisions are what the timeline is given about the controller: the
+// records, or why they could not be read.
+type Decisions struct {
+	Records []Decision
+	// Unavailable, when set, says why no records were read (no cluster
+	// access configured, or the read failed). The timeline states it rather
+	// than implying nothing happened.
+	Unavailable string
+}
+
+// Timeline orders the recorded evidence around an incident. The
+// controller's decisions are included when they were made within
+// CorrelationWindow before the alert. A correlation event is added only for
+// a revision the controller promoted in that window that is still the
+// latest promotion, and it says plainly that it is a correlation.
+func Timeline(incident models.Incident, decisions Decisions, sloStatus models.SLOStatus) []models.IncidentEvent {
 	anchor := incident.CreatedAt
 	if incident.AlertStartsAt != nil && !incident.AlertStartsAt.IsZero() {
 		anchor = *incident.AlertStartsAt
 	}
 
 	var events []models.IncidentEvent
-	var lastRollout *models.Deployment
-	for i := range deployments {
-		d := deployments[i]
-		if d.StartedAt.Before(anchor.Add(-CorrelationWindow)) || d.StartedAt.After(anchor) {
+	var lastPromotion *Decision
+	for i := range decisions.Records {
+		d := decisions.Records[i]
+		if d.At.Before(anchor.Add(-CorrelationWindow)) || d.At.After(anchor) {
 			continue
 		}
 		events = append(events, models.IncidentEvent{
-			Timestamp:   d.StartedAt,
-			EventType:   EventDeployment,
-			Description: fmt.Sprintf("deployment record %s: status %s, strategy %s", d.Version, d.Status, d.Strategy),
+			Timestamp:   d.At,
+			EventType:   EventDecision,
+			Description: describeDecision(d),
 		})
-		if d.RolloutID != "" && (lastRollout == nil || d.StartedAt.After(lastRollout.StartedAt)) {
-			lastRollout = &deployments[i]
+		if d.Action == "Promoted" && (lastPromotion == nil || d.At.After(lastPromotion.At)) {
+			lastPromotion = &decisions.Records[i]
 		}
+	}
+	if decisions.Unavailable != "" {
+		events = append(events, models.IncidentEvent{
+			Timestamp:   incident.CreatedAt,
+			EventType:   EventNoDecisions,
+			Description: "the controller's rollout decisions were not read: " + decisions.Unavailable,
+		})
 	}
 	if incident.AlertStartsAt != nil && !incident.AlertStartsAt.IsZero() {
 		events = append(events, models.IncidentEvent{
@@ -124,16 +160,29 @@ func Timeline(incident models.Incident, deployments []models.Deployment, sloStat
 		EventType:   EventSLOEvaluation,
 		Description: DescribeSLO(sloStatus),
 	})
-	if lastRollout != nil {
+	if lastPromotion != nil {
 		events = append(events, models.IncidentEvent{
 			Timestamp: incident.CreatedAt,
 			EventType: EventCorrelation,
-			Description: fmt.Sprintf("rollout %s was recorded %s before the alert; it is a rollback candidate. This is a time correlation, not a confirmed cause, and Attesta performed no rollback.",
-				lastRollout.Version, anchor.Sub(lastRollout.StartedAt).Round(time.Second)),
+			Description: fmt.Sprintf("revision %s of %s/%s was promoted %s before the alert (decision %s, hash %.12s); it is a rollback candidate. "+
+				"This is a time correlation, not a confirmed cause.",
+				lastPromotion.Revision, lastPromotion.Namespace, lastPromotion.Deployment, anchor.Sub(lastPromotion.At).Round(time.Second),
+				lastPromotion.Record, lastPromotion.Hash),
 		})
 	}
 	sort.SliceStable(events, func(i, j int) bool { return events[i].Timestamp.Before(events[j].Timestamp) })
 	return events
+}
+
+func describeDecision(d Decision) string {
+	out := fmt.Sprintf("controller decision %s on %s/%s revision %s (trigger %s)", d.Action, d.Namespace, d.Deployment, d.Revision, d.Trigger)
+	if d.RestoredTo != "" {
+		out += ", restored revision " + d.RestoredTo
+	}
+	if d.Message != "" {
+		out += ": " + d.Message
+	}
+	return out + fmt.Sprintf(" [record %s, hash %.12s]", d.Record, d.Hash)
 }
 
 // DescribeSLO renders an SLO evaluation in one sentence, naming its source
@@ -185,7 +234,7 @@ func Postmortem(record models.IncidentRecord) string {
 	if correlation := findEvent(record.Events, EventCorrelation); correlation != nil {
 		fmt.Fprintf(&b, "%s\n\n", correlation.Description)
 	} else {
-		fmt.Fprintf(&b, "Undetermined. No rollout was recorded in the %s before the alert.\n\n", CorrelationWindow)
+		fmt.Fprintf(&b, "Undetermined. The controller recorded no promotion in the %s before the alert.\n\n", CorrelationWindow)
 	}
 	b.WriteString("TODO: confirm the cause.\n")
 

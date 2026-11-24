@@ -1,0 +1,53 @@
+# What attesta-api needs to show RolloutGuards and the controller's
+# RolloutDecisions (ATTESTA_CLUSTER_READ=true): read access, nothing else.
+# The API never writes to the cluster.
+#
+# Bind it to the service account attesta-api runs as. To limit the API to
+# some namespaces, replace the ClusterRoleBinding with a RoleBinding to this
+# ClusterRole in each of them; listing across all namespaces
+# (GET /api/v1/guards without ?namespace=) then fails with 500 and the
+# per-namespace endpoints keep working.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: attesta-api-cluster-read
+rules:
+  - apiGroups: ["attesta.io"]
+    resources: ["rolloutguards", "rolloutdecisions"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: attesta-api-cluster-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: attesta-api-cluster-read
+subjects:
+  - kind: ServiceAccount
+    name: attesta-api
+    namespace: attesta-system
+---
+# With ATTESTA_AUTH_KUBERNETES=true the API also reviews callers' tokens.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: attesta-api-token-review
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: attesta-api-token-review
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: attesta-api-token-review
+subjects:
+  - kind: ServiceAccount
+    name: attesta-api
+    namespace: attesta-system

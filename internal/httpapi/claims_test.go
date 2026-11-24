@@ -82,13 +82,9 @@ func onboard(t *testing.T, server *Server) {
 	}
 }
 
-func startRollout(server *Server) *httptest.ResponseRecorder {
-	return authorizedRequest(server, http.MethodPost, "/api/v1/services/payments-api/rollouts", []byte(`{"version":"v2","image":"ghcr.io/acme/payments-api:v2"}`))
-}
-
 // Audit T-4: without Prometheus there is no data, so nothing is reported and
 // the gate fails closed.
-func TestSLOWithoutPrometheusIsUnknownAndBlocksRollouts(t *testing.T) {
+func TestSLOWithoutPrometheusIsUnknown(t *testing.T) {
 	server := testServer(t, WithAPIToken("secret"))
 	onboard(t, server)
 	code, out, body := getSLO(t, server)
@@ -99,9 +95,6 @@ func TestSLOWithoutPrometheusIsUnknownAndBlocksRollouts(t *testing.T) {
 		if strings.Contains(body, field) {
 			t.Fatalf("unknown SLO status must not report %s: %s", field, body)
 		}
-	}
-	if rec := startRollout(server); rec.Code != http.StatusConflict {
-		t.Fatalf("rollout with unknown SLO state: got %d, want 409", rec.Code)
 	}
 }
 
@@ -116,27 +109,20 @@ func TestSLOWithNaNLatencyIsUnknownAndValidJSON(t *testing.T) {
 	if out.SLO.DeploymentGate != models.GateUnknown || !strings.Contains(out.SLO.Reason, "p95 latency") {
 		t.Fatalf("expected unknown gate naming p95 latency, got %s", body)
 	}
-	rec := startRollout(server)
-	if rec.Code != http.StatusConflict || rec.Body.Len() == 0 {
-		t.Fatalf("rollout with NaN latency: got %d with %d-byte body, want 409 with a body", rec.Code, rec.Body.Len())
-	}
 }
 
 // Audit S-2: no series for the service used to read as 100% availability.
-func TestSLOWithNoSeriesIsUnknownAndBlocksRollouts(t *testing.T) {
+func TestSLOWithNoSeriesIsUnknown(t *testing.T) {
 	server := testServer(t, WithAPIToken("secret"), WithPrometheusURL(prometheusStub(t, map[string]string{})))
 	onboard(t, server)
 	_, out, body := getSLO(t, server)
 	if out.SLO.DeploymentGate != models.GateUnknown || out.SLO.AvailabilityCurrent != nil {
 		t.Fatalf("expected unknown gate and no availability, got %s", body)
 	}
-	if rec := startRollout(server); rec.Code != http.StatusConflict {
-		t.Fatalf("rollout with no telemetry: got %d, want 409", rec.Code)
-	}
 }
 
 // Audit S-2: a trickle of traffic is not enough to judge a rollout.
-func TestSLOWithTooLittleTrafficBlocksRollouts(t *testing.T) {
+func TestSLOWithTooLittleTrafficIsUnknown(t *testing.T) {
 	values := healthyPrometheus()
 	values["total5m"], values["err5m"] = "0.03", "0" // about 9 requests in 5m
 	server := testServer(t, WithAPIToken("secret"), WithPrometheusURL(prometheusStub(t, values)))
@@ -145,37 +131,34 @@ func TestSLOWithTooLittleTrafficBlocksRollouts(t *testing.T) {
 	if out.SLO.DeploymentGate != models.GateUnknown || out.SLO.ErrorRateCurrentPct != nil || !strings.Contains(out.SLO.Reason, "fewer than the 20 needed") {
 		t.Fatalf("expected an unknown gate that names the volume floor, got %s", body)
 	}
-	if rec := startRollout(server); rec.Code != http.StatusConflict {
-		t.Fatalf("rollout on 9 requests: got %d, want 409", rec.Code)
-	}
 }
 
-func TestSLOWithHealthyMeasurementsAllowsRollout(t *testing.T) {
+func TestSLOWithHealthyMeasurementsIsAllowed(t *testing.T) {
 	server := testServer(t, WithAPIToken("secret"), WithPrometheusURL(prometheusStub(t, healthyPrometheus())))
 	onboard(t, server)
 	_, out, body := getSLO(t, server)
 	if out.SLO.DeploymentGate != models.GateAllowed || out.SLO.ErrorBudgetRemainingPct == nil || out.SLO.BudgetWindow != "30d" {
 		t.Fatalf("expected allowed gate with a 30d budget, got %s", body)
 	}
-	if rec := startRollout(server); rec.Code != http.StatusAccepted {
-		t.Fatalf("rollout with healthy SLOs: got %d %s, want 202", rec.Code, rec.Body.String())
-	}
 }
 
 // Audit T-3: the status endpoint used to return fixed latency and error values.
-func TestStatusReportsEvaluatedSLOAndRecordedDeployment(t *testing.T) {
+func TestStatusReportsEvaluatedSLOAndClusterState(t *testing.T) {
 	server := testServer(t, WithAPIToken("secret"))
 	onboard(t, server)
 	rec := authorizedRequest(server, http.MethodGet, "/api/v1/services/payments-api/status", nil)
-	var status models.ServiceStatus
+	var status struct {
+		SLO               models.SLOStatus `json:"slo"`
+		GuardsUnavailable string           `json:"guardsUnavailable"`
+	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
 		t.Fatal(err)
 	}
 	if status.SLO.DeploymentGate != models.GateUnknown || status.SLO.ErrorRateCurrentPct != nil {
 		t.Fatalf("status must carry the real (unknown) SLO evaluation, got %s", rec.Body.String())
 	}
-	if status.LatestDeployment == nil || status.LatestDeployment.Status != "generated" {
-		t.Fatalf("status must carry the recorded deployment, got %s", rec.Body.String())
+	if !strings.Contains(status.GuardsUnavailable, "not configured") {
+		t.Fatalf("without cluster access, status must say the guards were not read, got %s", rec.Body.String())
 	}
 	if strings.Contains(rec.Body.String(), "p99LatencyMs") || strings.Contains(rec.Body.String(), "healthGate") {
 		t.Fatalf("status still carries the old fixed fields: %s", rec.Body.String())
@@ -214,8 +197,8 @@ func TestIncidentTimelineHoldsOnlyRecordedEvents(t *testing.T) {
 		}
 		types[e.EventType]++
 	}
-	if types["deployment"] != 1 || types["incident-opened"] != 1 || types["slo-evaluation"] != 1 || types["correlation"] != 0 || len(record.Events) != 3 {
-		t.Fatalf("expected exactly the onboarding deployment record, the open event and the SLO evaluation, got %+v", record.Events)
+	if types["rollout-decisions-unavailable"] != 1 || types["incident-opened"] != 1 || types["slo-evaluation"] != 1 || types["correlation"] != 0 || len(record.Events) != 3 {
+		t.Fatalf("expected exactly the note that decisions were not read, the open event and the SLO evaluation, got %+v", record.Events)
 	}
 	if record.Signals.DeploymentGate != models.GateUnknown || record.Signals.BurnRate != nil {
 		t.Fatalf("incident SLO state must be the real (unknown) evaluation, got %+v", record.Signals)
@@ -232,27 +215,6 @@ func TestIncidentTimelineHoldsOnlyRecordedEvents(t *testing.T) {
 	}
 	if strings.Contains(pm, "Recent deployment or configuration change correlated") {
 		t.Fatalf("postmortem still asserts a cause:\n%s", pm)
-	}
-}
-
-func TestIncidentCorrelatesARecordedRollout(t *testing.T) {
-	server := testServer(t, WithAPIToken("secret"), WithPrometheusURL(prometheusStub(t, healthyPrometheus())))
-	onboard(t, server)
-	if rec := startRollout(server); rec.Code != http.StatusAccepted {
-		t.Fatalf("rollout: %d %s", rec.Code, rec.Body.String())
-	}
-	record := openIncident(t, server, `{"service":"payments-api","alertName":"HighErrorRate"}`)
-	var correlation *models.IncidentEvent
-	for i := range record.Events {
-		if record.Events[i].EventType == "correlation" {
-			correlation = &record.Events[i]
-		}
-	}
-	if correlation == nil || !strings.Contains(correlation.Description, "v2") || !strings.Contains(correlation.Description, "not a confirmed cause") {
-		t.Fatalf("expected a labelled correlation with rollout v2, got %+v", record.Events)
-	}
-	if record.Signals.DeploymentGate != models.GateAllowed || record.Signals.ErrorRateCurrentPct == nil {
-		t.Fatalf("incident must carry the measured SLO state, got %+v", record.Signals)
 	}
 }
 

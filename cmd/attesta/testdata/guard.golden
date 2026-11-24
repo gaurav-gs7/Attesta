@@ -1,0 +1,7 @@
+[
+  {
+    "method": "GET",
+    "path": "/api/v1/guards/payments/payments-api-rollout",
+    "token": "test-token"
+  }
+]

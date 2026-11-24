@@ -26,16 +26,17 @@
 
 ## Rollback
 
-Roll back in the cluster:
+First see what the controller already did. If the RolloutGuard has rollback enabled, it may have rolled back on its own; every decision it made is on record:
+
+```bash
+attesta guards {{ .Service.Name }}
+kubectl -n {{ .Service.Namespace }} get rolloutdecisions
+```
+
+If it did not, roll back in the cluster:
 
 ```bash
 kubectl -n {{ .Service.Namespace }} rollout undo deploy/{{ .Service.Name }}
-```
-
-Record the decision in Attesta (this records a request; it does not change the cluster):
-
-```bash
-curl -X POST -H "X-Attesta-Token: $ATTESTA_API_TOKEN" "$ATTESTA_API_URL/api/v1/services/{{ .Service.Name }}/rollback"
 ```
 
 ## Escalation

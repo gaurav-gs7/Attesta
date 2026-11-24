@@ -13,7 +13,6 @@ import (
 	"github.com/gaurav-gs7/attesta/internal/catalog"
 	"github.com/gaurav-gs7/attesta/internal/incidents"
 	"github.com/gaurav-gs7/attesta/internal/models"
-	"github.com/gaurav-gs7/attesta/internal/page"
 	"github.com/gaurav-gs7/attesta/internal/workflows"
 )
 
@@ -68,8 +67,8 @@ func (s *Server) createIncident(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"incident": record, "workflow": run})
 }
 
-// openIncident evaluates the service's SLOs, loads recent deployment
-// records, builds the timeline from them and persists the incident.
+// openIncident evaluates the service's SLOs, reads the controller's recent
+// decisions for the service, builds the timeline from them and persists the incident.
 func (s *Server) openIncident(ctx context.Context, service models.Service, in incidentInput) (models.IncidentRecord, models.WorkflowRun) {
 	if in.severity == "" {
 		in.severity = defaultSeverity
@@ -81,7 +80,7 @@ func (s *Server) openIncident(ctx context.Context, service models.Service, in in
 		in.title = in.alertName
 	}
 	var sloStatus models.SLOStatus
-	var deployments []models.Deployment
+	var decisions incidents.Decisions
 	var record models.IncidentRecord
 	incident := models.Incident{
 		ID:            "inc-" + catalog.NewID(),
@@ -111,16 +110,15 @@ func (s *Server) openIncident(ctx context.Context, service models.Service, in in
 				},
 			},
 			{
-				Name: "load-recent-deployment-records",
+				Name: "load-recent-rollout-decisions",
 				Run: func(ctx context.Context) error {
-					// Every record in the correlation window, however many.
+					// Every decision in the correlation window, however many.
 					anchor := incident.CreatedAt
 					if incident.AlertStartsAt != nil && !incident.AlertStartsAt.IsZero() {
 						anchor = *incident.AlertStartsAt
 					}
-					var err error
-					deployments, err = s.allDeployments(ctx, service.ID, anchor.Add(-incidents.CorrelationWindow))
-					return err
+					decisions = s.decisionsSince(ctx, service.Name, anchor.Add(-incidents.CorrelationWindow))
+					return nil
 				},
 			},
 			{
@@ -130,7 +128,7 @@ func (s *Server) openIncident(ctx context.Context, service models.Service, in in
 						Incident: incident,
 						Service:  service,
 						Signals:  sloStatus,
-						Events:   incidents.Timeline(incident, deployments, sloStatus),
+						Events:   incidents.Timeline(incident, decisions, sloStatus),
 					}
 					return nil
 				},
@@ -360,27 +358,6 @@ func (s *Server) findActiveIncident(ctx context.Context, service, fingerprint st
 		return nil, err
 	}
 	return &record, nil
-}
-
-// allDeployments returns every deployment record of a service since a time,
-// following the store's pages.
-func (s *Server) allDeployments(ctx context.Context, serviceID string, since time.Time) ([]models.Deployment, error) {
-	var all []models.Deployment
-	req := page.Request{Limit: page.MaxLimit, Since: since}
-	for {
-		batch, next, err := s.store.ListDeployments(ctx, serviceID, req)
-		if err != nil {
-			return nil, err
-		}
-		all = append(all, batch...)
-		if next == "" {
-			return all, nil
-		}
-		if req, err = page.Parse("", next); err != nil {
-			return nil, err
-		}
-		req.Limit, req.Since = page.MaxLimit, since
-	}
 }
 
 // failedAlert logs why an alert could not be processed and returns the

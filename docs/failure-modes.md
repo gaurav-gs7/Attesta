@@ -16,7 +16,7 @@ artifacts/failure-modes/<run-id>/
 
 ## Scenarios
 
-- Prometheus unavailable fails closed: when `ATTESTA_PROMETHEUS_URL` is configured but a query fails, the SLO state is `unknown`, no values are reported, and `POST /rollouts` returns 409. The same applies when Prometheus answers with no data or `NaN`.
+- Prometheus unavailable fails closed: when `ATTESTA_PROMETHEUS_URL` is configured but a query fails, the SLO state is `unknown` and no values are reported. A RolloutGuard's SLO gate then lets a new revision through, or pauses it with `onUnknown: Pause`. The same applies when Prometheus answers with no data or `NaN`.
 - PostgreSQL unavailable fails predictably: API startup with an unreachable `DATABASE_URL` exits and records the catalog connection error.
 - Duplicate onboarding is idempotent: submitting the same service spec twice returns `idempotent: true` on the second request.
 - Invalid service metadata is rejected: unsupported language, invalid Kubernetes name, and invalid environment return policy findings.

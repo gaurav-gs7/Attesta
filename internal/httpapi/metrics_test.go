@@ -40,9 +40,9 @@ func TestRequestMetricsHaveBoundedLabels(t *testing.T) {
 		routes.ServeHTTP(rec, httptest.NewRequest(method, path, nil))
 	}
 	for i := 0; i < 2000; i++ {
-		send(http.MethodGet, fmt.Sprintf("/nope/%d", i))                               // unmatched, no token needed
-		send(http.MethodGet, fmt.Sprintf("/api/v1/services/svc-%d/rollouts/%d", i, i)) // unauthenticated, ID-bearing
-		send(fmt.Sprintf("M%d", i), "/livez")                                          // made-up method
+		send(http.MethodGet, fmt.Sprintf("/nope/%d", i))                       // unmatched, no token needed
+		send(http.MethodGet, fmt.Sprintf("/api/v1/guards/ns-%d/svc-%d", i, i)) // unauthenticated, ID-bearing
+		send(fmt.Sprintf("M%d", i), "/livez")                                  // made-up method
 	}
 	body := scrape(t, server)
 	if n := seriesCount(body, "attesta_http_requests_total"); n > 10 {
@@ -59,11 +59,11 @@ func TestRequestMetricsHaveBoundedLabels(t *testing.T) {
 func TestRequestMetricsUseTheMatchedPattern(t *testing.T) {
 	server := newTestServer(t, catalog.NewMemoryStore())
 	authorizedRequest(server, http.MethodPost, "/api/v1/services", onboardingBody)
-	authorizedRequest(server, http.MethodGet, "/api/v1/services/payments-api/rollouts/latest", nil)
+	authorizedRequest(server, http.MethodGet, "/api/v1/guards/payments/payments-api-rollout", nil)
 	body := scrape(t, server)
 	for _, want := range []string{
 		`attesta_http_requests_total{method="POST",route="/api/v1/services",status="201"} 1`,
-		`attesta_http_requests_total{method="GET",route="/api/v1/services/{name}/rollouts/{id}",status="404"} 1`,
+		`attesta_http_requests_total{method="GET",route="/api/v1/guards/{namespace}/{name}",status="503"} 1`,
 		"attesta_http_request_duration_seconds_bucket",
 		"attesta_uptime_seconds",
 		"go_goroutines",

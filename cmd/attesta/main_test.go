@@ -22,6 +22,7 @@ var update = flag.Bool("update", false, "rewrite the golden files")
 type recorded struct {
 	Method string          `json:"method"`
 	Path   string          `json:"path"`
+	Query  string          `json:"query,omitempty"`
 	Token  string          `json:"token,omitempty"`
 	Body   json.RawMessage `json:"body,omitempty"`
 }
@@ -33,7 +34,7 @@ func fakeAPI(t *testing.T) *[]recorded {
 	var got []recorded
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		rec := recorded{Method: r.Method, Path: r.URL.Path, Token: r.Header.Get("X-Attesta-Token")}
+		rec := recorded{Method: r.Method, Path: r.URL.Path, Query: r.URL.RawQuery, Token: r.Header.Get("X-Attesta-Token")}
 		if len(body) > 0 {
 			rec.Body = body
 		}
@@ -96,7 +97,9 @@ func TestCommandsSendTheAPIRequests(t *testing.T) {
 			"--deployment", "canary", "--pager", "payments-oncall", "--output", ""},
 		"incident-create":   {"incident", "create", "--service", "payments-api", "--alert", "HighErrorRate", "--error-rate", "8.2"},
 		"incident-no-flags": {"incident", "create", "payments-api"},
-		"rollback":          {"rollback", "--name", "payments-api"},
+		"guards-service":    {"guards", "payments-api"},
+		"guards-namespace":  {"guards", "--namespace", "payments"},
+		"guard":             {"guard", "payments/payments-api-rollout"},
 		"check":             {"check", "payments-api"},
 	}
 	for name, args := range cases {
@@ -132,6 +135,11 @@ func TestBadInvocationsAreErrors(t *testing.T) {
 		{"nope"},
 		{"service"},
 		{"health-gate", "--name", "x"},
+		{"rollback", "--name", "x"},
+		{"deployments", "--name", "x"},
+		{"guard", "payments-api-rollout"},
+		{"guard", "../x/y"},
+		{"guards", "a", "b"},
 		{"onboard", "--name", "x"},
 		{"service", "scaffold", "../etc"},
 	} {

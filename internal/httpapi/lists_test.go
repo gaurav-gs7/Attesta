@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"testing"
-	"time"
 
 	"github.com/gaurav-gs7/attesta/internal/catalog"
 	"github.com/gaurav-gs7/attesta/internal/models"
@@ -76,20 +75,6 @@ func TestListsPaginateBeyondTheOldCaps(t *testing.T) {
 			if code := authorizedRequest(server, http.MethodPost, "/api/v1/services", onboardingBody).Code; code != http.StatusCreated {
 				t.Fatalf("onboard: %d", code)
 			}
-			service, err := store.GetServiceByName(context.Background(), "payments-api")
-			if err != nil {
-				t.Fatal(err)
-			}
-			base := time.Now().UTC().Add(-time.Hour)
-			for i := 0; i < 120; i++ {
-				// Pairs share a start time to exercise the ID tiebreak.
-				if _, err := store.RecordDeployment(context.Background(), models.Deployment{
-					ServiceID: service.ID, Version: fmt.Sprintf("v%d", i), Environment: "staging",
-					Status: "succeeded", Strategy: "canary", StartedAt: base.Add(time.Duration(i/2) * time.Second),
-				}); err != nil {
-					t.Fatal(err)
-				}
-			}
 			for i := 0; i < 130; i++ {
 				rec := authorizedRequest(server, http.MethodPost, "/api/v1/incidents", []byte(
 					fmt.Sprintf(`{"service":"payments-api","severity":"sev3","title":"t%d"}`, i)))
@@ -98,9 +83,6 @@ func TestListsPaginateBeyondTheOldCaps(t *testing.T) {
 				}
 			}
 
-			if got := walk(t, server, "/api/v1/services/payments-api/deployments", "deployments", "id", 7); len(got) != 121 {
-				t.Fatalf("walked %d deployments, want 121", len(got))
-			}
 			if got := walk(t, server, "/api/v1/incidents", "incidents", "id", 9); len(got) != 130 {
 				t.Fatalf("walked %d incidents, want 130", len(got))
 			}

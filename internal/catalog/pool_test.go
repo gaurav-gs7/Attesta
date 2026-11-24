@@ -80,11 +80,7 @@ func TestReadsNeedOneConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	svc, err := seed.CreateService(ctx, serviceWith("one-conn", []string{"db"}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := seed.RecordDeployment(ctx, models.Deployment{ServiceID: svc.ID, Version: "v1", Environment: "staging", Status: "generated", Strategy: "canary", StartedAt: time.Now().UTC()}); err != nil {
+	if _, err := seed.CreateService(ctx, serviceWith("one-conn", []string{"db"})); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 3; i++ {
@@ -107,16 +103,11 @@ func TestReadsNeedOneConnection(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make(chan error, 12)
 	for i := 0; i < 3; i++ {
-		wg.Add(4)
+		wg.Add(3)
 		go func() { defer wg.Done(); _, err := store.ListServices(ctx); errs <- err }()
 		go func() {
 			defer wg.Done()
 			_, _, err := store.ListWorkflowRuns(ctx, page.Request{Limit: 50})
-			errs <- err
-		}()
-		go func() {
-			defer wg.Done()
-			_, _, err := store.ListDeployments(ctx, svc.ID, page.Request{Limit: 50})
 			errs <- err
 		}()
 		go func() {

@@ -34,8 +34,8 @@ go run ./cmd/attesta service init payments-api \
 
 go run ./cmd/attesta check payments-api
 go run ./cmd/attesta slo status payments-api
-go run ./cmd/attesta rollout status payments-api
-go run ./cmd/attesta deployments --name payments-api
+echo "The API reads RolloutGuards only with ATTESTA_CLUSTER_READ=true; without it this says so"
+go run ./cmd/attesta guards payments-api || true
 echo "SIMULATED: the next call opens an incident from a hand-written alert; its error rate and latency are stored as sender-reported values"
 go run ./cmd/attesta incident create --service payments-api --alert HighErrorRate --error-rate 8.2 --latency-p95-ms 850
 go run ./cmd/attesta incident list

@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/gaurav-gs7/attesta/internal/models"
-	"github.com/gaurav-gs7/attesta/internal/page"
 	"github.com/gaurav-gs7/attesta/internal/workflows"
 )
 
@@ -244,39 +243,6 @@ func TestPostgresAbandonsStaleRuns(t *testing.T) {
 	}
 	if got, _ := store.GetWorkflowRun(ctx, fresh.ID); got.State != workflows.StateRunning {
 		t.Fatalf("fresh run abandoned: %s", got.State)
-	}
-}
-
-// Audit W-8: earlier versions wrote pauses and rollback requests into the
-// deployments table, so the "latest deployment" could be a pause record.
-// Those legacy rows stay, but they are no longer read as deployments.
-func TestPostgresIgnoresLegacyEventRowsInDeploymentHistory(t *testing.T) {
-	store, _ := postgresForTest(t)
-	ctx := context.Background()
-	service, err := store.CreateService(ctx, models.Service{Name: "payments-api", Team: "t", Owner: "o", Language: "go", Environment: "staging"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	base := time.Now().UTC().Add(-time.Hour)
-	real, err := store.RecordDeployment(ctx, models.Deployment{ServiceID: service.ID, Version: "v1", Environment: "staging", Status: "rollout-started", Strategy: "canary", StartedAt: base})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i, legacy := range []models.Deployment{
-		{ServiceID: service.ID, Version: "pause-abc", Environment: "staging", Status: "rollout-paused", Strategy: "canary", StartedAt: base.Add(time.Minute)},
-		{ServiceID: service.ID, Version: "rollback-request-1", Environment: "staging", Status: "rollback-requested", Strategy: "canary", StartedAt: base.Add(2 * time.Minute)},
-	} {
-		if _, err := store.RecordDeployment(ctx, legacy); err != nil {
-			t.Fatalf("legacy row %d: %v", i, err)
-		}
-	}
-	latest, err := store.LatestDeployment(ctx, service.ID)
-	if err != nil || latest.ID != real.ID {
-		t.Fatalf("latest deployment = %+v (%v), want %s", latest, err, real.Version)
-	}
-	history, _, err := store.ListDeployments(ctx, service.ID, page.Request{})
-	if err != nil || len(history) != 1 {
-		t.Fatalf("history = %+v (%v), want only v1", history, err)
 	}
 }
 

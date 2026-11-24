@@ -202,12 +202,10 @@ duplicate_onboarding_idempotent() {
 
 prometheus_unavailable_fails_closed() {
   local output="$run_dir/prometheus-unavailable-slo.json"
-  local rollout="$run_dir/prometheus-unavailable-rollout.json"
-  log "proving an unreachable Prometheus yields an unknown SLO state and a refused rollout"
+  log "proving an unreachable Prometheus yields an unknown SLO state"
   api GET "/api/v1/services/$SERVICE_NAME/slos" "" "$output" 200
   assert_contains "$output" '"deploymentGate"[[:space:]]*:[[:space:]]*"unknown"' "expected Prometheus outage to make the gate unknown"
   assert_contains "$output" 'Prometheus query failed' "expected Prometheus outage reason"
-  api POST "/api/v1/services/$SERVICE_NAME/rollouts" '{"version":"v2"}' "$rollout" 409
   record "prometheus-unavailable-fails-closed" "$output"
 }
 

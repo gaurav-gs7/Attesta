@@ -11,6 +11,9 @@ All notable changes to Attesta. The format follows [Keep a Changelog](https://ke
 - `spec.sloGate` on RolloutGuards: the controller checks the service's SLOs when a new revision starts and pauses it while less than 10% of the error budget remains or the budget is burning fast, recording a `Paused` decision. It uses the API's SLO evaluator and Prometheus client, so both judge a service the same way. See [SLO Gate](docs/controller-operator.md#slo-gate).
 - `--prometheus-requests-metric`, `--prometheus-duration-metric`, `--prometheus-service-label`, `--prometheus-status-label` and `--prometheus-error-status` on the controller, matching the API's `ATTESTA_PROMETHEUS_*` names. Metric analysis used to hard-code the defaults.
 
+- The API reads the cluster: `GET /api/v1/guards`, `GET /api/v1/guards/{namespace}/{name}` (every decision and the chain's verification) and `GET /api/v1/services/{name}/guards`; `GET .../status` includes the service's guards. Enable with `ATTESTA_CLUSTER_READ=true` and `deploy/api/cluster-read-rbac.yaml` (`get`, `list` on guards and decisions only). CLI: `attesta guards [service]`, `attesta guard namespace/name`.
+- Incident timelines cite the controller's decisions in the 2 hours before the alert, by record name and hash, and correlate the latest promoted revision. Without cluster access they say the decisions were not read.
+
 ### Fixed
 
 - `attesta-controller` built from the controller-runtime commit panicked at start-up: it defined `--kubeconfig`, which controller-runtime already registers. The flag still works; it is controller-runtime's.
@@ -21,6 +24,8 @@ All notable changes to Attesta. The format follows [Keep a Changelog](https://ke
 - The controller has an envtest suite: a real API server and etcd with the generated CRDs, run in CI.
 
 ### Removed
+
+- The API's rollout records: `POST /api/v1/services/{name}/rollouts`, `GET .../rollouts/{id}`, its pause, resume, complete and rollback transitions, `POST /api/v1/services/{name}/rollback` and `GET .../deployments`, and the CLI's `rollback`, `deployments` and `rollout` commands. They recorded requests and changed nothing in the cluster, so the API's account of a service could differ from what the controller did. Onboarding no longer writes an invented "v0.1.0 generated" deployment. Migration 6 drops the `rollouts` and `deployments` tables; export them first if you want those request records. The `operator` role now covers incidents and alerts only.
 
 - `POST /api/v1/services/{name}/health-gate` and `attesta health-gate`. No endpoint acts on health numbers sent by a caller; the controller measures canaries from Prometheus.
 
