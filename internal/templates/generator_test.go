@@ -272,7 +272,11 @@ func assertCountsRequests(t *testing.T, cmd *exec.Cmd) {
 		t.Fatalf("metrics still expose made-up database series:\n%s", after)
 	}
 
-	// Audit G-6: SIGTERM drains and exits cleanly.
+	// Audit G-6: SIGTERM drains and exits cleanly. Close the client's idle
+	// connections first: Go's server waits up to 5s for a connection that
+	// was dialled but never sent a request, which the client's pool can
+	// leave behind, and that wait is not what this test measures.
+	http.DefaultClient.CloseIdleConnections()
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
@@ -283,8 +287,8 @@ func assertCountsRequests(t *testing.T, cmd *exec.Cmd) {
 		if err != nil {
 			t.Fatalf("service did not exit cleanly on SIGTERM: %v", err)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("service still running 5s after SIGTERM")
+	case <-time.After(12 * time.Second): // the Go service drains for up to 10s
+		t.Fatal("service still running 12s after SIGTERM")
 	}
 }
 
