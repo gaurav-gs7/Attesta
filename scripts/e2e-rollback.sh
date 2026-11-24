@@ -17,7 +17,12 @@
 #      self-heal would, the guard reports RollbackReverted and the controller
 #      does not roll back again;
 #   8. with metric analysis, a rollout Kubernetes considers healthy is rolled
-#      back after consecutive failed checks of the new revision's metrics.
+#      back after consecutive failed checks of the new revision's metrics;
+#   9. the SLO gate pauses a revision while the service's error budget is
+#      spent, holds it, and resumes it when the SLOs recover;
+#  10. every decision record hashes correctly (checked with jq and sha256sum),
+#      is signed, cannot be edited or deleted even by cluster-admin, reaches
+#      the archive outside the cluster, and the API verifies all of it.
 #
 # Prerequisites: kubectl pointing at a disposable cluster, and the image
 # attesta-controller:e2e loaded into it (see test/e2e/kustomization.yaml).
@@ -47,6 +52,8 @@ dump() {
   kubectl -n "$NS" get replicasets -o wide --show-labels
   kubectl -n "$NS" get rolloutguard app2-rollout -o yaml
   kubectl -n "$NS" describe deployment app2
+  kubectl -n "$NS" get rolloutguard app3-rollout -o yaml
+  kubectl -n "$NS" describe deployment app3
   kubectl -n "$NS" logs deployment/prom-stub --tail=50
   kubectl -n "$NS" get events --sort-by=.lastTimestamp
 }
@@ -355,6 +362,79 @@ triggered="$(leader_metric 'attesta_rolloutguard_rollback_total{outcome="trigger
 # The leader changed after the first rollback, so its counter holds only this one.
 [[ "$triggered" == "1" ]] || fail "new leader reports rollback_total{outcome=\"triggered\"}=${triggered:-absent}, want 1"
 log "ok: app2 rolled back by metric analysis: $message"
+
+log "SLO gate: a guarded service whose error budget is spent"
+APP=app3
+stub_slo() {
+  kubectl -n "$NS" exec deployment/prom-stub -- python -c \
+    "import urllib.request; urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:9090/admin/slo?service=app3&errorRatio=$1', method='POST'))"
+}
+stub_slo 0
+kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app3
+  namespace: $NS
+  annotations:
+    attesta.io/rollback-guards: app3-rollout
+spec:
+  replicas: 4
+  # Slow enough that the gate acts while the revision is still rolling out.
+  minReadySeconds: 20
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: e2e-app3
+  template:
+    metadata:
+      labels:
+        app: e2e-app3
+    spec:
+      containers:
+        - name: app
+          image: $GOOD_IMAGE
+---
+apiVersion: attesta.io/v1
+kind: RolloutGuard
+metadata:
+  name: app3-rollout
+  namespace: $NS
+spec:
+  deploymentRef: app3
+  strategy: rolling
+  sloGate:
+    availabilityTarget: 99.9
+    recheckInterval: 10s
+EOF
+kubectl -n "$NS" rollout status deployment/app3 --timeout=240s
+wait_until "guard records app3's first revision" 120 has_healthy_template
+
+log "SLO gate: 0.5% of requests fail against a 0.1% budget; rolling app3 out to $OTHER_GOOD_IMAGE"
+stub_slo 0.005
+kubectl -n "$NS" set image deployment/app3 app="$OTHER_GOOD_IMAGE"
+paused() { [[ "$(kubectl -n "$NS" get deployment app3 -o 'jsonpath={.spec.paused}')" == "true" ]]; }
+wait_until "the SLO gate pauses app3's new revision" 60 paused
+[[ "$(annotation paused-by-guard)" == "app3-rollout" ]] || fail "app3 paused without the gate's annotation"
+[[ "$(guard reason)" == "SLOGatePaused" ]] || fail "app3 guard reason is $(guard reason), want SLOGatePaused"
+sleep 15
+paused || fail "the gate resumed app3 while its budget was still spent"
+
+log "SLO gate: the errors stop; the gate resumes the rollout on its own"
+stub_slo 0
+resumed() { ! paused && [[ "$(kubectl -n "$NS" get rolloutguard app3-rollout -o 'jsonpath={.status.sloGate.resumed}')" == "true" ]]; }
+wait_until "the SLO gate resumes app3" 60 resumed
+kubectl -n "$NS" rollout status deployment/app3 --timeout=300s
+image_is "$OTHER_GOOD_IMAGE" || fail "app3 is on $(image) after the resumed rollout"
+kubectl -n "$NS" get rolloutdecisions -o json >/tmp/app3-decisions.json
+actions="$(jq -r '[.items[] | select(.spec.guard=="app3-rollout")] | sort_by(.spec.sequence) | map(.spec.action) | join(",")' /tmp/app3-decisions.json)"
+[[ "$actions" == Promoted,Paused,Resumed* ]] || fail "app3 decisions are $actions, want Promoted,Paused,Resumed..."
+budget="$(jq -r '.items[] | select(.spec.guard=="app3-rollout" and .spec.action=="Paused") | .spec.evidence[] | select(.name=="error-budget-remaining") | "\(.value) \(.threshold) \(.passed)"' /tmp/app3-decisions.json)"
+[[ "$budget" == "-400% >= 10% false" ]] || fail "app3's pause carries budget evidence '$budget', want '-400% >= 10% false'"
+log "ok: the gate paused app3 on a spent budget ($budget), held it, and resumed it when the SLOs recovered: $actions"
 
 log "each decision is on record with its evidence, and every record hashes to what it claims"
 kubectl -n "$NS" get rolloutdecisions -o json >/tmp/decisions.json

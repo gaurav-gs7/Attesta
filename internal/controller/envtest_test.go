@@ -59,7 +59,8 @@ func TestEnvtest(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(ctrl.LoggerInto(context.Background(), ctrl.Log))
-	r := &RolloutGuardReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Recorder: mgr.GetEventRecorder("attesta-controller")}
+	gateSLO := &switchableSLO{signals: measured(80)}
+	r := &RolloutGuardReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Recorder: mgr.GetEventRecorder("attesta-controller"), SLO: gateSLO}
 	if err := r.SetupWithManager(ctx, mgr, 1); err != nil {
 		t.Fatal(err)
 	}
@@ -218,6 +219,111 @@ func TestEnvtest(t *testing.T) {
 		edited.Spec.Reason = "NothingToSeeHere"
 		if err := c.Update(ctx, edited); !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), "immutable") {
 			t.Fatalf("editing a decision: %v, want Invalid (immutable)", err)
+		}
+	})
+
+	t.Run("the SLO gate pauses a revision and resumes it when the SLOs recover", func(t *testing.T) {
+		const name = "orders-api"
+		key := types.NamespacedName{Namespace: testNamespace, Name: name + "-rollout"}
+		d := healthyDeployment(0, "orders-api:v1")
+		d.Name, d.UID, d.Generation, d.Status = name, "", 0, appsv1.DeploymentStatus{}
+		d.Annotations[rollbackGuardsAnnotation] = key.Name
+		if err := c.Create(ctx, d); err != nil {
+			t.Fatal(err)
+		}
+		rs := func(rsName string, revision int, hash, image string) *appsv1.ReplicaSet {
+			r := replicaSet(rsName, revision, hash, image)
+			r.UID = ""
+			r.OwnerReferences[0].Name, r.OwnerReferences[0].UID, r.OwnerReferences[0].Controller = name, d.UID, kptr.To(true)
+			return r
+		}
+		if err := c.Create(ctx, rs("orders-api-g1", 1, "g1", "orders-api:v1")); err != nil {
+			t.Fatal(err)
+		}
+		setStatus := func(st func(*appsv1.Deployment) appsv1.DeploymentStatus) {
+			t.Helper()
+			var cur appsv1.Deployment
+			if err := c.Get(ctx, client.ObjectKeyFromObject(d), &cur); err != nil {
+				t.Fatal(err)
+			}
+			cur.Status = st(&cur)
+			if err := c.Status().Update(ctx, &cur); err != nil {
+				t.Fatal(err)
+			}
+		}
+		setStatus(func(d *appsv1.Deployment) appsv1.DeploymentStatus {
+			return appsv1.DeploymentStatus{ObservedGeneration: d.Generation, Replicas: 2, UpdatedReplicas: 2, ReadyReplicas: 2, AvailableReplicas: 2}
+		})
+		guard := &attestav1.RolloutGuard{
+			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: testNamespace},
+			Spec: attestav1.RolloutGuardSpec{ServiceRef: name, Strategy: "rolling",
+				SLOGate: &attestav1.SLOGate{AvailabilityTarget: 99.9, RecheckInterval: "10s"}},
+		}
+		if err := c.Create(ctx, guard); err != nil {
+			t.Fatal(err)
+		}
+		waitFor := func(what string, ok func(*attestav1.RolloutGuard, *appsv1.Deployment) bool) {
+			t.Helper()
+			deadline := time.Now().Add(40 * time.Second)
+			for {
+				var g attestav1.RolloutGuard
+				var dep appsv1.Deployment
+				if c.Get(ctx, key, &g) == nil && c.Get(ctx, client.ObjectKeyFromObject(d), &dep) == nil && ok(&g, &dep) {
+					return
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("timed out waiting until %s; guard status %+v", what, g.Status)
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
+		}
+		waitFor("the first revision is recorded", func(g *attestav1.RolloutGuard, _ *appsv1.Deployment) bool {
+			return g.Status.HealthyTemplateHash == "g1"
+		})
+
+		// The budget is spent, and revision 2 starts rolling out.
+		gateSLO.set(measured(4))
+		var cur appsv1.Deployment
+		if err := c.Get(ctx, client.ObjectKeyFromObject(d), &cur); err != nil {
+			t.Fatal(err)
+		}
+		cur.Annotations[revisionAnnotation] = "2"
+		cur.Spec.Template.Spec.Containers[0].Image = "orders-api:v2"
+		if err := c.Update(ctx, &cur); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Create(ctx, rs("orders-api-g2", 2, "g2", "orders-api:v2")); err != nil {
+			t.Fatal(err)
+		}
+		setStatus(func(d *appsv1.Deployment) appsv1.DeploymentStatus {
+			return appsv1.DeploymentStatus{ObservedGeneration: d.Generation, Replicas: 3, UpdatedReplicas: 1, ReadyReplicas: 2, AvailableReplicas: 2}
+		})
+		waitFor("the gate pauses revision 2", func(g *attestav1.RolloutGuard, dep *appsv1.Deployment) bool {
+			return dep.Spec.Paused && g.Status.SLOGate != nil && g.Status.SLOGate.Paused
+		})
+
+		// The budget recovers; within one recheck interval the rollout goes on.
+		gateSLO.set(measured(70))
+		waitFor("the gate resumes revision 2", func(g *attestav1.RolloutGuard, dep *appsv1.Deployment) bool {
+			return !dep.Spec.Paused && g.Status.SLOGate != nil && g.Status.SLOGate.Resumed
+		})
+		var g attestav1.RolloutGuard
+		if err := c.Get(ctx, key, &g); err != nil {
+			t.Fatal(err)
+		}
+		var list attestav1.RolloutDecisionList
+		if err := c.List(ctx, &list, client.InNamespace(testNamespace), client.MatchingLabels{attestav1.DecisionGuardUIDLabel: string(g.UID)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := attestav1.VerifyChain(g.Name, string(g.UID), list.Items, g.Status.LastDecision); err != nil {
+			t.Fatal(err)
+		}
+		var actions []string
+		for _, item := range list.Items {
+			actions = append(actions, item.Spec.Action)
+		}
+		if strings.Join(actions, ",") != "Promoted,Paused,Resumed" {
+			t.Fatalf("decisions %v, want Promoted, Paused, Resumed", actions)
 		}
 	})
 }

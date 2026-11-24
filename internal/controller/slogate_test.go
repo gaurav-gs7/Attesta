@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -306,4 +307,22 @@ func TestSLOGateLeavesResumingToAPersonWhenAskedTo(t *testing.T) {
 	if !strings.Contains(h.field("message"), "kubectl rollout resume") {
 		t.Fatalf("message does not say how to resume: %s", h.field("message"))
 	}
+}
+
+// switchableSLO is a fakeSLO whose signals change while a manager runs.
+type switchableSLO struct {
+	mu      sync.Mutex
+	signals slo.Signals
+}
+
+func (s *switchableSLO) set(signals slo.Signals) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.signals = signals
+}
+
+func (s *switchableSLO) Signals(context.Context, models.Service) (slo.Signals, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.signals, nil
 }
