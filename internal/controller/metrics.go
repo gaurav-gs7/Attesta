@@ -32,6 +32,13 @@ var (
 		Help:      "RolloutDecision records written, by action (Promoted, RolledBack, RollbackFailed, RollbackSkipped, Paused).",
 	}, []string{"action"})
 
+	decisionsRecoveredTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "attesta",
+		Subsystem: "rolloutguard",
+		Name:      "decisions_recovered_total",
+		Help:      "Decisions recorded from the Deployment they were carried on, because the controller stopped between acting and recording.",
+	})
+
 	sloGateTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "attesta",
 		Subsystem: "rolloutguard",
@@ -53,6 +60,6 @@ var registerOnce sync.Once
 // controller-runtime's metrics.Registry. Only the first call has an effect.
 func RegisterMetrics(reg prometheus.Registerer) {
 	registerOnce.Do(func() {
-		reg.MustRegister(rollbackTotal, phaseTransitions, analysisTotal, decisionsTotal, sloGateTotal)
+		reg.MustRegister(rollbackTotal, phaseTransitions, analysisTotal, decisionsTotal, sloGateTotal, decisionsRecoveredTotal)
 	})
 }

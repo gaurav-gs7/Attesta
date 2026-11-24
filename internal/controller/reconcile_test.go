@@ -63,6 +63,8 @@ type harness struct {
 	updateDeployment func() error
 	// updateStatus, when set, answers guard status writes the same way.
 	updateStatus func() error
+	// createDecision, when set, answers RolloutDecision creates the same way.
+	createDecision func() error
 }
 
 // newHarness starts with a healthy Deployment on revision 1 (image v1) and a
@@ -97,6 +99,19 @@ func newHarness(t *testing.T, rollback map[string]any, extraGuardFields map[stri
 		WithIndex(&appsv1.ReplicaSet{}, OwnerIndex, replicaSetOwnerIndex).
 		Build()
 	h.c = interceptor.NewClient(base, interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if _, ok := obj.(*attestav1.RolloutDecision); ok {
+				h.mu.Lock()
+				inject := h.createDecision
+				h.mu.Unlock()
+				if inject != nil {
+					if err := inject(); err != nil {
+						return err
+					}
+				}
+			}
+			return c.Create(ctx, obj, opts...)
+		},
 		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
 			if _, ok := obj.(*appsv1.Deployment); ok {
 				h.mu.Lock()

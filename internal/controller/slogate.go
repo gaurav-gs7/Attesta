@@ -140,6 +140,11 @@ func (r *RolloutGuardReconciler) applySLOGate(ctx context.Context, guard *attest
 	updated.Annotations[pausedByAnnotation] = guard.Name
 	updated.Annotations[pausedAtAnnotation] = at
 	updated.Annotations[pausedReasonAnnotation] = verdict.Reason
+	message := pausedMessage(deployment.Name, revision, verdict.Reason)
+	d.action, d.reason, d.message = attestav1.ActionPaused, reasonSLOGatePaused, message
+	if err := r.writeAhead(guard, deployment, updated, status, d); err != nil {
+		return nil, err
+	}
 	if err := r.Update(ctx, updated); err != nil {
 		// Decided on a view that may be stale; decide again.
 		return nil, fmt.Errorf("pause deployment %s/%s: %w", deployment.Namespace, deployment.Name, err)
@@ -147,8 +152,7 @@ func (r *RolloutGuardReconciler) applySLOGate(ctx context.Context, guard *attest
 	result.Paused = true
 	status.Phase = PhasePaused
 	status.Reason = reasonSLOGatePaused
-	status.Message = pausedMessage(deployment.Name, revision, verdict.Reason)
-	d.action, d.reason, d.message = attestav1.ActionPaused, reasonSLOGatePaused, status.Message
+	status.Message = message
 	return d, nil
 }
 

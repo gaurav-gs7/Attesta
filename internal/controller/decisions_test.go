@@ -232,3 +232,80 @@ func TestEditedRecordFailsVerification(t *testing.T) {
 		t.Fatalf("VerifyChain = %v, want record 1 reported altered", err)
 	}
 }
+
+// The controller stops between rolling back and creating the record (here,
+// the create fails). The rollback carried its sealed record on the
+// Deployment, so the next pass records exactly that decision.
+func TestARollbackIsNeverLeftWithoutItsRecord(t *testing.T) {
+	h := newHarness(t, map[string]any{"enabled": true}, nil)
+	h.mustReconcile()
+	h.startBadRollout()
+	failures := 1
+	h.createDecision = func() error {
+		if failures > 0 {
+			failures--
+			return errors.New("connection reset by peer")
+		}
+		return nil
+	}
+	if err := h.reconcile(); err == nil {
+		t.Fatal("the failed record create was not reported")
+	}
+	if h.image() != "payments-api:v1" {
+		t.Fatal("the rollback did not happen")
+	}
+	carried := h.deployment().Annotations[decisionAnnotation]
+	if !strings.Contains(carried, `"action":"RolledBack"`) {
+		t.Fatalf("the rollback update does not carry its decision: %q", carried)
+	}
+	if n := len(h.decisions()); n != 1 {
+		t.Fatalf("%d records after the failed create, want only the promotion", n)
+	}
+
+	if h.field("phase") != PhaseRolledBack {
+		t.Fatalf("phase %s: the rollback must reach the status even when its record does not", h.field("phase"))
+	}
+	// The Deployment controller adopts the healthy ReplicaSet as revision 3.
+	rs1 := h.replicaSet("payments-api-h1")
+	rs1.Annotations[revisionAnnotation] = "3"
+	h.updateReplicaSet(rs1)
+	h.setDeployment(func(d *appsv1.Deployment) {
+		d.Generation = 3
+		d.Annotations[revisionAnnotation] = "3"
+		d.Status = appsv1.DeploymentStatus{ObservedGeneration: 3, Replicas: 2, UpdatedReplicas: 2, ReadyReplicas: 2, AvailableReplicas: 2}
+	})
+
+	h.mustReconcile()
+	records := h.verifyChain()
+	if len(records) != 2 {
+		t.Fatalf("%d records after recovery, want 2", len(records))
+	}
+	rolledBack := bySequence(records)[2]
+	if rolledBack.Action != attestav1.ActionRolledBack || !strings.Contains(carried, rolledBack.Hash) {
+		t.Fatalf("recovered record %s (%s) is not the one the Deployment carried", rolledBack.Action, rolledBack.Hash)
+	}
+	h.mustReconcile()
+	if n := len(h.decisions()); n != 2 {
+		t.Fatalf("recovery recorded the decision again: %d records", n)
+	}
+}
+
+// A decision annotation edited by hand does not hash to what it claims and
+// is never recorded as the controller's.
+func TestAnEditedCarriedDecisionIsNotRecorded(t *testing.T) {
+	h := newHarness(t, map[string]any{"enabled": true}, nil)
+	h.mustReconcile()
+	h.startBadRollout()
+	h.createDecision = func() error { return errors.New("down") }
+	_ = h.reconcile()
+	h.createDecision = nil
+	h.setDeployment(func(d *appsv1.Deployment) {
+		d.Annotations[decisionAnnotation] = strings.Replace(d.Annotations[decisionAnnotation], `"RolledBack"`, `"Promoted"`, 1)
+	})
+	h.mustReconcile()
+	for _, r := range h.decisions() {
+		if r.Spec.Sequence == 2 && r.Spec.Action == attestav1.ActionPromoted {
+			t.Fatal("an edited annotation was recorded as a decision")
+		}
+	}
+}

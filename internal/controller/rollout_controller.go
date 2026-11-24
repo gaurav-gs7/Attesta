@@ -301,6 +301,9 @@ func (r *RolloutGuardReconciler) reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
+	if err := r.recoverDecision(ctx, &guard, &deployment, &prev); err != nil {
+		return ctrl.Result{}, err
+	}
 	evaluation := EvaluateDeploymentRollout(&deployment)
 	status := nextStatus(prev, &guard, spec, &deployment, evaluation)
 	if spec.RollbackEnabled {
@@ -345,7 +348,10 @@ func (r *RolloutGuardReconciler) reconcile(ctx context.Context, req ctrl.Request
 	if decision.worthRecording(prev, status) && !decision.matches(adopted, &deployment) {
 		// The record goes in before the status that points at it.
 		if err := r.recordDecision(ctx, &guard, &deployment, &status, decision); err != nil {
-			return ctrl.Result{}, errors.Join(actionErr, err)
+			// Write what was done anyway: a rollback that is not in the
+			// status would be decided again. The decision itself is not
+			// lost: it travels on the Deployment and is recorded next pass.
+			return ctrl.Result{}, r.finish(ctx, &guard, prev, status, errors.Join(actionErr, err))
 		}
 	}
 	if err := r.finish(ctx, &guard, prev, status, actionErr); err != nil {
@@ -659,7 +665,18 @@ func (r *RolloutGuardReconciler) rollback(ctx context.Context, guard *attestav1.
 	updated.Annotations[rollbackGuardAnnotation] = guard.Name
 	updated.Annotations[rollbackReasonAnnotation] = cause
 
+	// The decision is sealed now and travels on the update itself, so a
+	// rollback can never happen without its record.
+	rolledBackMessage := fmt.Sprintf("restored deployment %s from revision %s to healthy revision %s after %s: %s", deployment.Name, fromRevision, toRevision, cause, causeMessage)
+	d.restoredTo = &attestav1.DecisionRevision{Revision: toRevision, TemplateHash: status.HealthyTemplateHash}
+	d.action, d.reason, d.message = attestav1.ActionRolledBack, reasonRollbackTriggered, rolledBackMessage
+	d.evidence = append(analysisEvidence(status, d.templateHash), deploymentEvidence(deployment, at)...)
+	if err := r.writeAhead(guard, deployment, updated, status, d); err != nil {
+		return nil, err
+	}
+
 	if err := r.Update(ctx, updated); err != nil {
+		d.sealed = nil
 		if apierrors.IsConflict(err) {
 			// The Deployment changed after the cached read this decision was
 			// made on. Leave the status as evaluated and decide again on the
@@ -676,7 +693,7 @@ func (r *RolloutGuardReconciler) rollback(ctx context.Context, guard *attestav1.
 
 	status.Phase = PhaseRolledBack
 	status.Reason = reasonRollbackTriggered
-	status.Message = fmt.Sprintf("restored deployment %s from revision %s to healthy revision %s after %s: %s", deployment.Name, fromRevision, toRevision, cause, causeMessage)
+	status.Message = rolledBackMessage
 	status.RollbackRevision = toRevision
 	status.RollbackTemplateHash = status.HealthyTemplateHash
 	if current != nil {
@@ -684,8 +701,7 @@ func (r *RolloutGuardReconciler) rollback(ctx context.Context, guard *attestav1.
 	}
 	status.SetCondition(ConditionRolledBack, metav1.ConditionTrue, reasonRollbackTriggered, status.Message)
 	rollbackTotal.WithLabelValues("triggered").Inc()
-	d.restoredTo = &attestav1.DecisionRevision{Revision: toRevision, TemplateHash: status.HealthyTemplateHash}
-	return decide(attestav1.ActionRolledBack), nil
+	return d, nil
 }
 
 // ownedReplicaSets returns the Deployment's ReplicaSets that carry a revision,

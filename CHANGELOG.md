@@ -16,6 +16,8 @@ All notable changes to Attesta. The format follows [Keep a Changelog](https://ke
 
 ### Fixed
 
+- A rollback or pause can no longer happen without its record. The sealed decision is written on the Deployment update that carries it out (`attesta.io/decision`), and the next pass records it if the controller stopped before creating the record.
+
 - `attesta-controller` built from the controller-runtime commit panicked at start-up: it defined `--kubeconfig`, which controller-runtime already registers. The flag still works; it is controller-runtime's.
 
 ### Changed

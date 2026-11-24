@@ -2,9 +2,11 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
+	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -26,6 +28,9 @@ type decisionDraft struct {
 	revision, templateHash string
 	restoredTo             *attestav1.DecisionRevision
 	evidence               []attestav1.DecisionEvidence
+	// sealed is the record, already sealed, when the action that the draft
+	// describes carried it on the Deployment update (see writeAhead).
+	sealed *attestav1.RolloutDecisionSpec
 }
 
 // worthRecording reports whether the draft is a new decision. A rollback, a
@@ -128,6 +133,17 @@ func adopt(guard *attestav1.RolloutGuard, status *RolloutGuardStatus, record *at
 func (r *RolloutGuardReconciler) recordDecision(ctx context.Context, guard *attestav1.RolloutGuard, deployment *appsv1.Deployment,
 	status *RolloutGuardStatus, d *decisionDraft) error {
 
+	spec := r.decisionSpec(guard, deployment, d)
+	if d.sealed != nil {
+		spec = *d.sealed
+	}
+	return r.createRecord(ctx, guard, status, spec, d.action, func(existing *attestav1.RolloutDecision) bool {
+		return existing.Spec.Hash == spec.Hash || d.matches(existing, deployment)
+	})
+}
+
+// decisionSpec is the record of the draft, not yet sealed.
+func (r *RolloutGuardReconciler) decisionSpec(guard *attestav1.RolloutGuard, deployment *appsv1.Deployment, d *decisionDraft) attestav1.RolloutDecisionSpec {
 	evidence := d.evidence
 	if len(evidence) > maxEvidence {
 		evidence = evidence[:maxEvidence]
@@ -156,9 +172,21 @@ func (r *RolloutGuardReconciler) recordDecision(ctx context.Context, guard *atte
 		RestoredTo: d.restoredTo,
 		Evidence:   evidence,
 	}
+	return spec
+}
+
+// createRecord writes spec as the next record of the guard's chain,
+// resealing it if the chain moved, and points status.lastDecision at it.
+// ours reports whether a record found at the position is this decision,
+// written by an earlier attempt.
+func (r *RolloutGuardReconciler) createRecord(ctx context.Context, guard *attestav1.RolloutGuard, status *RolloutGuardStatus,
+	spec attestav1.RolloutDecisionSpec, action string, ours func(*attestav1.RolloutDecision) bool) error {
+
 	for range 3 {
-		if err := spec.Seal(status.LastDecision); err != nil {
-			return fmt.Errorf("seal decision: %w", err)
+		if !sealedAfter(spec, status.LastDecision) {
+			if err := spec.Seal(status.LastDecision); err != nil {
+				return fmt.Errorf("seal decision: %w", err)
+			}
 		}
 		record := &attestav1.RolloutDecision{
 			ObjectMeta: metav1.ObjectMeta{
@@ -174,7 +202,7 @@ func (r *RolloutGuardReconciler) recordDecision(ctx context.Context, guard *atte
 		err := r.Create(ctx, record)
 		if err == nil {
 			status.LastDecision = &attestav1.DecisionRef{Name: record.Name, Sequence: spec.Sequence, Hash: spec.Hash}
-			decisionsTotal.WithLabelValues(d.action).Inc()
+			decisionsTotal.WithLabelValues(action).Inc()
 			return nil
 		}
 		if !apierrors.IsAlreadyExists(err) {
@@ -190,12 +218,91 @@ func (r *RolloutGuardReconciler) recordDecision(ctx context.Context, guard *atte
 		if err := adopt(guard, status, &existing); err != nil {
 			return err
 		}
-		if d.matches(&existing, deployment) {
+		if ours(&existing) {
 			return nil
 		}
 	}
 	return fmt.Errorf("decision chain of guard %s/%s keeps moving under this controller; is a second controller running without leader election?",
 		guard.Namespace, guard.Name)
+}
+
+// sealedAfter reports whether spec is already sealed as the record after
+// head.
+func sealedAfter(spec attestav1.RolloutDecisionSpec, head *attestav1.DecisionRef) bool {
+	if spec.Hash == "" {
+		return false
+	}
+	if head == nil {
+		return spec.Sequence == 1 && spec.PreviousHash == ""
+	}
+	return spec.Sequence == head.Sequence+1 && spec.PreviousHash == head.Hash
+}
+
+// decisionAnnotation carries a sealed decision on the Deployment update
+// that carries out the decision, so the action and its record are written
+// together: if the controller stops before creating the record, the next
+// pass finds the decision on the Deployment and records it.
+const decisionAnnotation = "attesta.io/decision"
+
+// writeAhead seals d as the guard's next record and puts it on the update
+// that will carry the action out. The record is created after the update
+// succeeds; recoverDecision creates it if the controller stops in between.
+func (r *RolloutGuardReconciler) writeAhead(guard *attestav1.RolloutGuard, deployment, updated *appsv1.Deployment,
+	status *RolloutGuardStatus, d *decisionDraft) error {
+
+	spec := r.decisionSpec(guard, deployment, d)
+	if err := spec.Seal(status.LastDecision); err != nil {
+		return fmt.Errorf("seal decision: %w", err)
+	}
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		return fmt.Errorf("encode decision: %w", err)
+	}
+	if updated.Annotations == nil {
+		updated.Annotations = map[string]string{}
+	}
+	updated.Annotations[decisionAnnotation] = string(raw)
+	d.sealed = &spec
+	return nil
+}
+
+// recoverDecision records a decision that a Deployment update carried out
+// but whose record was never created, because the controller stopped or the
+// create failed after the update.
+func (r *RolloutGuardReconciler) recoverDecision(ctx context.Context, guard *attestav1.RolloutGuard, deployment *appsv1.Deployment,
+	status *RolloutGuardStatus) error {
+
+	raw := deployment.Annotations[decisionAnnotation]
+	if raw == "" {
+		return nil
+	}
+	var spec attestav1.RolloutDecisionSpec
+	if err := json.Unmarshal([]byte(raw), &spec); err != nil || spec.GuardUID != string(guard.UID) {
+		// Malformed, or written for another guard of the same Deployment.
+		return nil
+	}
+	if hash, err := spec.ComputeHash(); err != nil || hash != spec.Hash {
+		return nil // edited by hand; never record it as the controller's
+	}
+	head := status.LastDecision
+	if head != nil && spec.Sequence <= head.Sequence {
+		// Recorded already, unless the chain moved on without it, which
+		// takes a record created by something other than this controller.
+		var existing attestav1.RolloutDecision
+		key := types.NamespacedName{Namespace: guard.Namespace, Name: attestav1.DecisionName(guard.Name, string(guard.UID), spec.Sequence)}
+		if err := r.Get(ctx, key, &existing); err == nil && existing.Spec.Hash == spec.Hash {
+			return nil
+		}
+		if spec.Sequence < head.Sequence {
+			return nil
+		}
+	}
+	logr.FromContextOrDiscard(ctx).Info("recording a decision the Deployment carries but no record holds",
+		"deployment", deployment.Name, "action", spec.Action, "sequence", spec.Sequence)
+	decisionsRecoveredTotal.Inc()
+	return r.createRecord(ctx, guard, status, spec, spec.Action, func(existing *attestav1.RolloutDecision) bool {
+		return existing.Spec.Hash == spec.Hash
+	})
 }
 
 func images(pod *corev1.PodSpec) []string {
