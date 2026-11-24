@@ -27,7 +27,7 @@ patches:
           name: archive-token
           secret:
             secretName: attesta-archive-token
-            defaultMode: 0400
+            defaultMode: 0440
       - op: add
         path: /spec/template/spec/containers/0/volumeMounts/-
         value:

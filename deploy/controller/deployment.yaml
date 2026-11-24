@@ -26,6 +26,9 @@ spec:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
+        # Mounted Secrets (signing key, archive token) are group-readable
+        # by this group only.
+        fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
       topologySpreadConstraints:

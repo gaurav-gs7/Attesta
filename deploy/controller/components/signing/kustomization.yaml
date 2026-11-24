@@ -25,7 +25,7 @@ patches:
           name: decision-signing-key
           secret:
             secretName: attesta-decision-signing-key
-            defaultMode: 0400
+            defaultMode: 0440
       - op: add
         path: /spec/template/spec/containers/0/volumeMounts/-
         value:
