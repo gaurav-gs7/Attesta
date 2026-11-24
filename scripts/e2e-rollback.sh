@@ -20,7 +20,11 @@
 #      back after consecutive failed checks of the new revision's metrics;
 #   9. the SLO gate pauses a revision while the service's error budget is
 #      spent, holds it, and resumes it when the SLOs recover;
-#  10. every decision record hashes correctly (checked with jq and sha256sum),
+#  10. a canary without a router gets its share of real traffic as a share
+#      of pods, steps through and is promoted into <deployment>-primary;
+#  11. a canary routed by Gateway API gets its HTTPRoute weight, fails its
+#      metric checks and is taken out of traffic;
+#  12. every decision record hashes correctly (checked with jq and sha256sum),
 #      is signed, cannot be edited or deleted even by cluster-admin, reaches
 #      the archive outside the cluster, and the API verifies all of it.
 #
@@ -54,6 +58,8 @@ dump() {
   kubectl -n "$NS" describe deployment app2
   kubectl -n "$NS" get rolloutguard app3-rollout -o yaml
   kubectl -n "$NS" describe deployment app3
+  kubectl -n "$NS" get rolloutguard app4-rollout app5-rollout -o yaml
+  kubectl -n "$NS" get deployments,services,httproutes -o wide
   kubectl -n "$NS" logs deployment/prom-stub --tail=50
   kubectl -n "$NS" get events --sort-by=.lastTimestamp
 }
@@ -435,6 +441,178 @@ actions="$(jq -r '[.items[] | select(.spec.guard=="app3-rollout")] | sort_by(.sp
 budget="$(jq -r '.items[] | select(.spec.guard=="app3-rollout" and .spec.action=="Paused") | .spec.evidence[] | select(.name=="error-budget-remaining") | "\(.value) \(.threshold) \(.passed)"' /tmp/app3-decisions.json)"
 [[ "$budget" == "-400% >= 10% false" ]] || fail "app3's pause carries budget evidence '$budget', want '-400% >= 10% false'"
 log "ok: the gate paused app3 on a spent budget ($budget), held it, and resumed it when the SLOs recovered: $actions"
+
+log "canary: replica-based traffic split, checked with real requests"
+AGNHOST_IMAGE="${AGNHOST_IMAGE:-registry.k8s.io/e2e-test-images/agnhost:2.52}"
+APP=app4
+kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app4
+  namespace: $NS
+  annotations:
+    attesta.io/rollback-guards: app4-rollout
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: e2e-app4
+  template:
+    metadata:
+      labels:
+        app: e2e-app4
+    spec:
+      containers:
+        - name: app
+          image: $AGNHOST_IMAGE
+          args: ["serve-hostname"]
+          ports:
+            - containerPort: 9376
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: app4
+  namespace: $NS
+spec:
+  selector:
+    app: e2e-app4
+  ports:
+    - port: 80
+      targetPort: 9376
+---
+apiVersion: attesta.io/v1
+kind: RolloutGuard
+metadata:
+  name: app4-rollout
+  namespace: $NS
+spec:
+  deploymentRef: app4
+  canary:
+    steps:
+      - weight: 33
+        pause: 60s
+EOF
+canary_phase() { kubectl -n "$NS" get rolloutguard "$APP-rollout" -o 'jsonpath={.status.canary.phase}'; }
+canary_phase_is() { [[ "$(canary_phase)" == "$1" ]]; }
+replicas_of() { kubectl -n "$NS" get deployment "$1" -o 'jsonpath={.spec.replicas}'; }
+available_of() { kubectl -n "$NS" get deployment "$1" -o 'jsonpath={.status.availableReplicas}'; }
+wait_until "app4's primary is created and serves, and app4 is at rest" 180 \
+  bash -c "[[ \"\$(kubectl -n $NS get rolloutguard app4-rollout -o 'jsonpath={.status.canary.phase}')\" == Idle && \"\$(kubectl -n $NS get deployment app4 -o 'jsonpath={.spec.replicas}')\" == 0 ]]"
+# share_from_canary <service>: the fraction of 300 requests served by pods
+# that are not the primary's, in percent.
+share_from_canary() {
+  kubectl -n "$NS" exec deployment/prom-stub -- python -c "
+import urllib.request
+hits = [urllib.request.urlopen('http://$1.$NS.svc', timeout=5).read().decode() for _ in range(300)]
+print(round(100 * sum(1 for h in hits if '-primary-' not in h) / len(hits)))"
+}
+at_rest="$(share_from_canary app4)"
+[[ "$at_rest" == "0" ]] || fail "at rest, $at_rest% of app4's traffic reached non-primary pods"
+
+kubectl -n "$NS" set env deployment/app4 REVISION=2
+wait_until "app4's new revision gets one pod beside the primary's two" 120 \
+  bash -c "[[ \"\$(kubectl -n $NS get rolloutguard app4-rollout -o 'jsonpath={.status.canary.phase}')\" == Progressing && \"\$(kubectl -n $NS get deployment app4 -o 'jsonpath={.status.availableReplicas}')\" == 1 ]]"
+sleep 5
+share="$(share_from_canary app4)"
+((share >= 15 && share <= 55)) || fail "the canary served $share% of 300 requests at a 33% step"
+log "ok: the canary served $share% of 300 real requests at its 33% step"
+wait_until "app4's canary is promoted into the primary" 240 canary_phase_is Idle
+[[ "$(replicas_of app4)" == "0" ]] || fail "app4 is not back at zero after promotion"
+kubectl -n "$NS" rollout status deployment/app4-primary --timeout=120s
+kubectl -n "$NS" get deployment app4-primary -o jsonpath='{.spec.template.spec.containers[0].env}' | grep -q REVISION ||
+  fail "the promoted template did not reach app4-primary"
+[[ "$(share_from_canary app4)" == "0" ]] || fail "after promotion, traffic reached non-primary pods"
+app4_actions="$(kubectl -n "$NS" get rolloutdecisions -o json |
+  jq -r '[.items[] | select(.spec.guard=="app4-rollout")] | sort_by(.spec.sequence) | map(.spec.action) | join(",")')"
+[[ "$app4_actions" == "Promoted,CanaryStarted,Promoted" ]] || fail "app4 decisions are $app4_actions"
+log "ok: app4 stepped through its canary and was promoted: $app4_actions"
+
+log "canary: Gateway API weights, and an abort on failed metric checks"
+kubectl apply --server-side -f "${GATEWAY_API_CRDS:-https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml}"
+kubectl wait --for=condition=Established crd/httproutes.gateway.networking.k8s.io --timeout=60s
+APP=app5
+kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app5
+  namespace: $NS
+  annotations:
+    attesta.io/rollback-guards: app5-rollout
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: e2e-app5
+  template:
+    metadata:
+      labels:
+        app: e2e-app5
+    spec:
+      containers:
+        - name: app
+          image: $AGNHOST_IMAGE
+          args: ["serve-hostname"]
+          ports:
+            - containerPort: 9376
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: app5
+  namespace: $NS
+spec:
+  parentRefs:
+    - name: e2e-gateway
+  rules:
+    - backendRefs:
+        - name: app5-primary
+          port: 80
+        - name: app5-canary
+          port: 80
+---
+apiVersion: attesta.io/v1
+kind: RolloutGuard
+metadata:
+  name: app5-rollout
+  namespace: $NS
+spec:
+  deploymentRef: app5
+  canary:
+    steps:
+      - weight: 10
+        pause: 30s
+      - weight: 50
+        pause: 30s
+    trafficRouting:
+      gatewayAPI:
+        httpRoute: app5
+  checks:
+    errorRateThreshold: 1
+    window: 1m
+    interval: 5s
+    minRequests: 10
+    successfulChecks: 1
+  rollback:
+    consecutiveFailures: 2
+EOF
+weights() { kubectl -n "$NS" get httproute app5 -o 'jsonpath={.spec.rules[0].backendRefs[*].weight}'; }
+wait_until "app5 is at rest with all traffic routed to its primary" 180 \
+  bash -c "[[ \"\$(kubectl -n $NS get httproute app5 -o 'jsonpath={.spec.rules[0].backendRefs[*].weight}')\" == '100 0' ]]"
+[[ "$(kubectl -n "$NS" get service app5-primary -o 'jsonpath={.spec.selector.attesta\.io/track}')" == "primary" ]] ||
+  fail "app5-primary does not select the primary's pods"
+# The stub reports 20% errors for every revision but app2's healthy one.
+kubectl -n "$NS" set env deployment/app5 REVISION=2
+wait_until "the route sends app5's canary 10%" 60 bash -c "[[ \"\$(kubectl -n $NS get httproute app5 -o 'jsonpath={.spec.rules[0].backendRefs[*].weight}')\" == '90 10' ]]"
+wait_until "app5's canary is aborted on its failed checks" 120 canary_phase_is Aborted
+[[ "$(weights)" == "100 0" ]] || fail "after the abort the route sends $(weights)"
+[[ "$(replicas_of app5)" == "0" ]] || fail "app5's aborted canary still has $(replicas_of app5) pods"
+aborted="$(kubectl -n "$NS" get rolloutdecisions -o json |
+  jq -r '.items[] | select(.spec.guard=="app5-rollout" and .spec.action=="CanaryAborted") | "\(.spec.trigger) \(.spec.evidence[] | select(.name=="error-rate") | .value)"')"
+[[ "$aborted" == "AnalysisFailed 20%" ]] || fail "app5's abort record reads '$aborted', want 'AnalysisFailed 20%'"
+log "ok: app5 got 10% through the HTTPRoute, failed its checks at 20% errors, and was taken out of traffic"
 
 log "each decision is on record with its evidence, and every record hashes to what it claims"
 kubectl -n "$NS" get rolloutdecisions -o json >/tmp/decisions.json

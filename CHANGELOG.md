@@ -6,6 +6,8 @@ All notable changes to Attesta. The format follows [Keep a Changelog](https://ke
 
 ### Added
 
+- Canaries with real traffic splitting: `spec.canary` runs the last promoted revision in a controller-managed `<deployment>-primary` and steps the new one through `steps` (weight and pause), with traffic split by a Gateway API HTTPRoute's backendRef weights (`trafficRouting.gatewayAPI`) or, without a router, by the share of pods. Each step waits for the canary's pods and, with `spec.checks`, a passing check of its metrics; a failing canary is taken out of traffic (`CanaryAborted`), a passing one promoted into the primary. Recorded as `CanaryStarted`, `StepAdvanced`, `Promoted` and `CanaryAborted` decisions. Apply `deploy/controller/canary-rbac.yaml`. The generated scaffold uses it for `strategy: canary`, with an Argo CD Application that ignores the canary's replica count.
+
 - `RolloutDecision`: an immutable, hash-chained record of every promotion, rollback and skipped or failed rollback, with the PromQL queries and values and the Deployment conditions it was decided on. Apply the new CRD (`kubectl apply -k deploy/crds`) and the updated controller RBAC (`get` and `create` on `rolloutdecisions`) before upgrading the controller. `status.lastDecision` points at a guard's chain; `attesta verify` checks chains from `kubectl ... -o json`. See [Decision Records](docs/controller-operator.md#decision-records).
 - `status.analysis.lastEvidence` on RolloutGuards, and the `attesta_rolloutguard_decisions_recorded_total{action}` metric.
 - `spec.sloGate` on RolloutGuards: the controller checks the service's SLOs when a new revision starts and pauses it while less than 10% of the error budget remains or the budget is burning fast, recording a `Paused` decision. It uses the API's SLO evaluator and Prometheus client, so both judge a service the same way. See [SLO Gate](docs/controller-operator.md#slo-gate).
@@ -29,7 +31,7 @@ All notable changes to Attesta. The format follows [Keep a Changelog](https://ke
 
 ### Deprecated
 
-- `RolloutGuard.spec.steps`. It is ignored, as it always was, and will be removed. Attesta does not shift traffic; `spec.strategy` is a label. The generated `rollout.yaml` no longer writes steps.
+- `RolloutGuard.spec.steps`. It is ignored, as it always was, and will be removed; `spec.canary.steps` shifts traffic. Without `spec.canary`, `spec.strategy` is a label.
 
 ### Removed
 

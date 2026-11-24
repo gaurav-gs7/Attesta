@@ -76,6 +76,9 @@ spec:
                 - Paused
                 - PauseSkipped
                 - Resumed
+                - CanaryStarted
+                - StepAdvanced
+                - CanaryAborted
                 type: string
               actor:
                 description: Actor is the controller instance that decided.

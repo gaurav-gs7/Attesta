@@ -24,6 +24,7 @@ The controller watches `RolloutGuard` resources and the Deployments they referen
 3. If the guard sets `spec.checks` and the controller has `--prometheus-url`, checks the new revision's error rate, p95 latency and availability in Prometheus every interval. Enough consecutive failures block the rollout; inconclusive data never decides.
 4. On `Healthy`, and with analysis only after enough passing checks, records the current ReplicaSet's revision and template hash in the guard's status.
 5. On `Blocked`, with `spec.rollback.enabled: true`, restores the recorded healthy template, at most once per bad template.
+   With `spec.canary` instead, it runs the last promoted revision in `<deployment>-primary`, steps the new one through its traffic weights (an HTTPRoute's, or a share of pods), checks it at each step, and promotes it into the primary or takes it out of traffic.
 6. With `spec.sloGate`, when a new revision starts while the service is out of its error budget or burning it fast, pauses the Deployment.
 7. Records each promotion, rollback, pause, and skipped or failed action as a `RolloutDecision`, before the status that points at it.
 8. Writes status only when it changed and emits an Event only on a phase or reason transition.

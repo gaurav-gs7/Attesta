@@ -1,0 +1,33 @@
+# What a guard with spec.canary needs beyond rollback (rollback-rbac.yaml):
+# create the <deployment>-primary Deployment, the <deployment>-primary and
+# -canary Services for Gateway API routing, and set the weights of an
+# HTTPRoute's backendRefs. Like rollback, every one of these acts only for a
+# Deployment that names the guard in attesta.io/rollback-guards. Bind it per
+# namespace, as rollback-rbac.yaml describes, to limit where canaries run.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: attesta-controller-canary
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "create", "update"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes"]
+    verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: attesta-controller-canary
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: attesta-controller-canary
+subjects:
+  - kind: ServiceAccount
+    name: attesta-controller
+    namespace: attesta-system

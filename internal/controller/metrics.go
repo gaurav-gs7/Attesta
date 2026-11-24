@@ -46,6 +46,13 @@ var (
 		Help:      "Decisions the archive refused, typically because it holds a different record at that position: alert on any increase.",
 	})
 
+	canaryAbortedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "attesta",
+		Subsystem: "rolloutguard",
+		Name:      "canary_aborted_total",
+		Help:      "Canaries taken out of traffic because they failed a step.",
+	})
+
 	sloGateTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "attesta",
 		Subsystem: "rolloutguard",
@@ -67,6 +74,6 @@ var registerOnce sync.Once
 // controller-runtime's metrics.Registry. Only the first call has an effect.
 func RegisterMetrics(reg prometheus.Registerer) {
 	registerOnce.Do(func() {
-		reg.MustRegister(rollbackTotal, phaseTransitions, analysisTotal, decisionsTotal, sloGateTotal, decisionsRecoveredTotal, archiveRefusedTotal)
+		reg.MustRegister(rollbackTotal, phaseTransitions, analysisTotal, decisionsTotal, sloGateTotal, decisionsRecoveredTotal, archiveRefusedTotal, canaryAbortedTotal)
 	})
 }

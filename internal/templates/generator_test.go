@@ -17,6 +17,8 @@ import (
 
 	"sigs.k8s.io/yaml"
 
+	attestav1 "github.com/gaurav-gs7/attesta/api/v1"
+
 	"github.com/gaurav-gs7/attesta/internal/models"
 	"github.com/gaurav-gs7/attesta/internal/scaffold"
 )
@@ -332,13 +334,17 @@ func get(t *testing.T, url string) string {
 }
 
 // Audit C-12: with controller rollback on, Argo CD self-heal would re-apply
-// the bad template from Git and undo the rollback.
+// the bad template from Git and undo the rollback. A canary never rewrites
+// the template, so self-heal stays on and only the replica count, which the
+// controller sets, is ignored.
 func TestArgoSelfHealIsOffWhenTheControllerOwnsRollback(t *testing.T) {
 	for _, tc := range []struct {
+		strategy     string
 		rollback     bool
 		wantSelfHeal bool
-	}{{true, false}, {false, true}} {
+	}{{"rolling", true, false}, {"rolling", false, true}, {"canary", true, true}} {
 		service := testService("go")
+		service.DeploymentStrategy = tc.strategy
 		service.RollbackOnFailure = tc.rollback
 		raw := read(t, generate(t, service), "infra/argocd/application.yaml")
 		var app struct {
@@ -348,7 +354,13 @@ func TestArgoSelfHealIsOffWhenTheControllerOwnsRollback(t *testing.T) {
 						Prune    bool `json:"prune"`
 						SelfHeal bool `json:"selfHeal"`
 					} `json:"automated"`
+					SyncOptions []string `json:"syncOptions"`
 				} `json:"syncPolicy"`
+				IgnoreDifferences []struct {
+					Kind         string   `json:"kind"`
+					Name         string   `json:"name"`
+					JSONPointers []string `json:"jsonPointers"`
+				} `json:"ignoreDifferences"`
 			} `json:"spec"`
 		}
 		if err := yaml.Unmarshal([]byte(raw), &app); err != nil {
@@ -359,6 +371,12 @@ func TestArgoSelfHealIsOffWhenTheControllerOwnsRollback(t *testing.T) {
 		}
 		if !app.Spec.SyncPolicy.Automated.Prune {
 			t.Fatalf("rollbackOnFailure=%v: automated sync lost prune", tc.rollback)
+		}
+		ignored := len(app.Spec.IgnoreDifferences) == 1 && app.Spec.IgnoreDifferences[0].Kind == "Deployment" &&
+			app.Spec.IgnoreDifferences[0].Name == service.Name && strings.Join(app.Spec.IgnoreDifferences[0].JSONPointers, ",") == "/spec/replicas" &&
+			strings.Contains(strings.Join(app.Spec.SyncPolicy.SyncOptions, ","), "RespectIgnoreDifferences=true")
+		if ignored != (tc.strategy == "canary") {
+			t.Fatalf("strategy %s: replicas ignored = %v\n%s", tc.strategy, ignored, raw)
 		}
 	}
 }
@@ -544,6 +562,26 @@ func TestImageRegistryIsConfigured(t *testing.T) {
 	for _, bad := range []string{"https://ghcr.io/acme", "GHCR.io/acme", "ghcr.io/acme/../x", ""} {
 		if err := ValidateImageRegistry(bad); err == nil {
 			t.Errorf("registry %q accepted", bad)
+		}
+	}
+}
+
+// strategy canary generates a guard that shifts traffic in steps; rolling
+// generates one that does not.
+func TestGeneratedGuardShiftsTrafficOnlyForCanaries(t *testing.T) {
+	for _, strategy := range []string{"canary", "rolling"} {
+		service := testService("go")
+		service.DeploymentStrategy = strategy
+		raw := read(t, generate(t, service), "rollout.yaml")
+		var guard attestav1.RolloutGuard
+		if err := yaml.UnmarshalStrict([]byte(raw), &guard); err != nil {
+			t.Fatalf("%s: rollout.yaml does not decode as a RolloutGuard: %v\n%s", strategy, err, raw)
+		}
+		if guard.Spec.Steps != nil {
+			t.Fatalf("%s: the deprecated spec.steps is still generated", strategy)
+		}
+		if got := guard.Spec.Canary != nil && len(guard.Spec.Canary.Steps) == 3; got != (strategy == "canary") {
+			t.Fatalf("%s: canary steps generated = %v\n%s", strategy, got, raw)
 		}
 	}
 }

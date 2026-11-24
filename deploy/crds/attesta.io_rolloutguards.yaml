@@ -57,6 +57,63 @@ spec:
             type: object
           spec:
             properties:
+              canary:
+                description: |-
+                  Canary shifts traffic to a new revision in steps, checking it at
+                  each, and promotes or aborts it. Without it, the Deployment does a
+                  standard rolling update and the guard rolls it back if it fails.
+                properties:
+                  steps:
+                    description: |-
+                      Steps are the canary's share of traffic, in percent, in increasing
+                      order. Each is held for its pause and until a metric check passes.
+                    items:
+                      description: CanaryStep is one share of traffic.
+                      properties:
+                        pause:
+                          description: Pause is how long the step is held at least
+                            (default 1m).
+                          pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                          type: string
+                        weight:
+                          format: int32
+                          maximum: 99
+                          minimum: 1
+                          type: integer
+                      required:
+                      - weight
+                      type: object
+                    maxItems: 20
+                    minItems: 1
+                    type: array
+                  trafficRouting:
+                    description: |-
+                      TrafficRouting is how the share is set. Without gatewayAPI, the share
+                      is the canary's fraction of the pods behind the Service that selects
+                      both: approximate, and no finer than one pod.
+                    properties:
+                      gatewayAPI:
+                        description: GatewayAPI splits traffic with an HTTPRoute's
+                          backendRef weights.
+                        properties:
+                          httpRoute:
+                            minLength: 1
+                            type: string
+                          port:
+                            description: |-
+                              Port is the Services' port (default 80); it forwards to the pods'
+                              first container port.
+                            format: int32
+                            maximum: 65535
+                            minimum: 1
+                            type: integer
+                        required:
+                        - httpRoute
+                        type: object
+                    type: object
+                required:
+                - steps
+                type: object
               checks:
                 description: |-
                   Checks are metric checks of each new revision. Analysis runs when at
@@ -213,9 +270,8 @@ spec:
                 - availabilityTarget
                 type: object
               steps:
-                description: |-
-                  Steps are ignored. Deprecated: they described traffic shifting that
-                  Attesta does not do, and will be removed from the API.
+                description: 'Steps are ignored. Deprecated: use canary.steps, which
+                  shift traffic.'
                 items:
                   properties:
                     duration:
@@ -335,6 +391,50 @@ spec:
               availableReplicas:
                 format: int32
                 type: integer
+              canary:
+                description: Canary is the state of a progressive rollout, with spec.canary.
+                properties:
+                  abortedTemplateHash:
+                    description: |-
+                      AbortedTemplateHash is the last revision aborted; it gets no traffic
+                      until the template changes again.
+                    type: string
+                  canaryRevision:
+                    type: string
+                  canaryTemplateHash:
+                    description: CanaryTemplateHash is the revision being stepped
+                      through.
+                    type: string
+                  message:
+                    type: string
+                  phase:
+                    description: |-
+                      Phase is Initializing, Idle, Waiting (for the SLO gate), Progressing,
+                      Promoting or Aborted.
+                    type: string
+                  primaryRevision:
+                    type: string
+                  primaryTemplateHash:
+                    description: |-
+                      PrimaryTemplateHash is the guarded Deployment's template hash the
+                      primary runs.
+                    type: string
+                  step:
+                    description: Step is the index in spec.canary.steps, -1 before
+                      the first.
+                    format: int32
+                    type: integer
+                  stepStartedAt:
+                    type: string
+                  weight:
+                    description: |-
+                      Weight is the canary's share of traffic now, in percent; with
+                      replica-based routing, the share of pods.
+                    format: int32
+                    type: integer
+                required:
+                - phase
+                type: object
               conditions:
                 items:
                   description: Condition contains details for one aspect of the current

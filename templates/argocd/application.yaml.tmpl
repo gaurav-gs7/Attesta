@@ -19,7 +19,12 @@ spec:
   syncPolicy:
     automated:
       prune: true
-{{- if .Service.RollbackOnFailure }}
+{{- if eq .Service.DeploymentStrategy "canary" }}
+      # On: in a canary the Attesta controller never rewrites the Deployment's
+      # template. It sets its replicas (zero between rollouts), which Argo CD
+      # ignores below, and runs {{ .Service.Name }}-primary, which is not in Git.
+      selfHeal: true
+{{- else if .Service.RollbackOnFailure }}
       # Off because the Attesta controller may roll this service's Deployment
       # back to its last healthy template. Self-heal would re-apply the bad
       # version from Git and undo the rollback. After a rollback the app shows
@@ -35,7 +40,19 @@ spec:
     # declares it.
     syncOptions:
       - CreateNamespace=true
+{{- if eq .Service.DeploymentStrategy "canary" }}
+      - RespectIgnoreDifferences=true
+{{- end }}
     managedNamespaceMetadata:
       labels:
         attesta.dev/team: {{ quote .Service.Team }}
         attesta.dev/environment: {{ .Service.Environment }}
+{{- if eq .Service.DeploymentStrategy "canary" }}
+  # The canary's replica count is the Attesta controller's to set.
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      name: {{ .Service.Name }}
+      jsonPointers:
+        - /spec/replicas
+{{- end }}

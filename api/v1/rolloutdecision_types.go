@@ -59,6 +59,13 @@ const (
 	// ActionResumed: the SLO gate resumed a rollout it had paused, because
 	// the service is within its SLOs again.
 	ActionResumed = "Resumed"
+	// ActionCanaryStarted: a new revision got its first share of traffic.
+	ActionCanaryStarted = "CanaryStarted"
+	// ActionStepAdvanced: the canary passed a step and got a larger share.
+	ActionStepAdvanced = "StepAdvanced"
+	// ActionCanaryAborted: the canary failed and was taken out of traffic;
+	// the primary serves everything.
+	ActionCanaryAborted = "CanaryAborted"
 )
 
 // RolloutDecisionSpec is the decision. Every field is covered by Hash.
@@ -100,7 +107,7 @@ type RolloutDecisionSpec struct {
 	// ErrorBudgetExhausted.
 	// +kubebuilder:validation:MinLength=1
 	Trigger string `json:"trigger"`
-	// +kubebuilder:validation:Enum=Promoted;RolledBack;RollbackFailed;RollbackSkipped;Paused;PauseSkipped;Resumed
+	// +kubebuilder:validation:Enum=Promoted;RolledBack;RollbackFailed;RollbackSkipped;Paused;PauseSkipped;Resumed;CanaryStarted;StepAdvanced;CanaryAborted
 	Action string `json:"action"`
 	// Reason is the machine-readable outcome, as on the guard's status.
 	// +kubebuilder:validation:MinLength=1

@@ -50,8 +50,7 @@ type RolloutGuardSpec struct {
 	// +optional
 	// +kubebuilder:validation:Enum=rolling;canary;blue-green
 	Strategy string `json:"strategy,omitempty"`
-	// Steps are ignored. Deprecated: they described traffic shifting that
-	// Attesta does not do, and will be removed from the API.
+	// Steps are ignored. Deprecated: use canary.steps, which shift traffic.
 	// +optional
 	// +kubebuilder:validation:MaxItems=20
 	Steps []RolloutStep `json:"steps,omitempty"`
@@ -59,6 +58,11 @@ type RolloutGuardSpec struct {
 	// least one threshold is set and the controller has --prometheus-url.
 	// +optional
 	Checks *RolloutChecks `json:"checks,omitempty"`
+	// Canary shifts traffic to a new revision in steps, checking it at
+	// each, and promotes or aborts it. Without it, the Deployment does a
+	// standard rolling update and the guard rolls it back if it fails.
+	// +optional
+	Canary *CanarySpec `json:"canary,omitempty"`
 	// +optional
 	Rollback *RollbackPolicy `json:"rollback,omitempty"`
 	// SLOGate checks the service's SLOs when a new revision starts rolling
@@ -66,6 +70,60 @@ type RolloutGuardSpec struct {
 	// rollout when they are breached.
 	// +optional
 	SLOGate *SLOGate `json:"sloGate,omitempty"`
+}
+
+// CanarySpec is a progressive rollout. The controller runs the last
+// promoted revision in a Deployment it manages, <deployment>-primary, and
+// uses the guarded Deployment itself as the canary: scaled to zero between
+// rollouts, scaled up and given a share of traffic when its template
+// changes. A revision that passes every step is copied to the primary; one
+// that fails is scaled back to zero and gets no traffic. The guarded
+// Deployment's replica count is then the controller's to set; tell a GitOps
+// tool to ignore it.
+type CanarySpec struct {
+	// Steps are the canary's share of traffic, in percent, in increasing
+	// order. Each is held for its pause and until a metric check passes.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=20
+	Steps []CanaryStep `json:"steps"`
+	// TrafficRouting is how the share is set. Without gatewayAPI, the share
+	// is the canary's fraction of the pods behind the Service that selects
+	// both: approximate, and no finer than one pod.
+	// +optional
+	TrafficRouting *TrafficRouting `json:"trafficRouting,omitempty"`
+}
+
+// CanaryStep is one share of traffic.
+type CanaryStep struct {
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=99
+	Weight int32 `json:"weight"`
+	// Pause is how long the step is held at least (default 1m).
+	// +optional
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$`
+	Pause string `json:"pause,omitempty"`
+}
+
+// TrafficRouting names what splits traffic.
+type TrafficRouting struct {
+	// GatewayAPI splits traffic with an HTTPRoute's backendRef weights.
+	// +optional
+	GatewayAPI *GatewayAPIRouting `json:"gatewayAPI,omitempty"`
+}
+
+// GatewayAPIRouting is an HTTPRoute, in the guard's namespace, whose rules
+// send traffic to the Services <deployment>-primary and <deployment>-canary.
+// The controller creates those Services and sets only the weights of the
+// backendRefs that name them; the route is yours.
+type GatewayAPIRouting struct {
+	// +kubebuilder:validation:MinLength=1
+	HTTPRoute string `json:"httpRoute"`
+	// Port is the Services' port (default 80); it forwards to the pods'
+	// first container port.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Port *int32 `json:"port,omitempty"`
 }
 
 // SLOGate pauses a new revision while the service is out of its error
@@ -247,6 +305,10 @@ type RolloutGuardStatus struct {
 	// +optional
 	Analysis *AnalysisStatus `json:"analysis,omitempty"`
 
+	// Canary is the state of a progressive rollout, with spec.canary.
+	// +optional
+	Canary *CanaryStatus `json:"canary,omitempty"`
+
 	// SLOGate is the gate's verdict on the latest revision it checked.
 	// +optional
 	SLOGate *SLOGateStatus `json:"sloGate,omitempty"`
@@ -265,6 +327,39 @@ type RolloutGuardStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// CanaryStatus is where a progressive rollout stands.
+type CanaryStatus struct {
+	// Phase is Initializing, Idle, Waiting (for the SLO gate), Progressing,
+	// Promoting or Aborted.
+	Phase string `json:"phase"`
+	// PrimaryTemplateHash is the guarded Deployment's template hash the
+	// primary runs.
+	// +optional
+	PrimaryTemplateHash string `json:"primaryTemplateHash,omitempty"`
+	// +optional
+	PrimaryRevision string `json:"primaryRevision,omitempty"`
+	// CanaryTemplateHash is the revision being stepped through.
+	// +optional
+	CanaryTemplateHash string `json:"canaryTemplateHash,omitempty"`
+	// +optional
+	CanaryRevision string `json:"canaryRevision,omitempty"`
+	// Step is the index in spec.canary.steps, -1 before the first.
+	// +optional
+	Step int32 `json:"step"`
+	// Weight is the canary's share of traffic now, in percent; with
+	// replica-based routing, the share of pods.
+	// +optional
+	Weight int32 `json:"weight"`
+	// +optional
+	StepStartedAt string `json:"stepStartedAt,omitempty"`
+	// AbortedTemplateHash is the last revision aborted; it gets no traffic
+	// until the template changes again.
+	// +optional
+	AbortedTemplateHash string `json:"abortedTemplateHash,omitempty"`
+	// +optional
+	Message string `json:"message,omitempty"`
 }
 
 // SLOGateStatus is the SLO gate's verdict on one revision. The gate checks

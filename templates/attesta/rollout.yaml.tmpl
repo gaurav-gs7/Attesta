@@ -5,11 +5,27 @@ metadata:
   namespace: {{ .Service.Namespace }}
 spec:
   serviceRef: {{ .Service.Name }}
-  # strategy is a label: Attesta does not shift traffic. The Deployment does
-  # a standard rolling update; the controller judges the new revision's pods
-  # on the checks below (with --prometheus-url) and on the progress deadline,
-  # and rolls back when they fail. See docs/controller-operator.md.
   strategy: {{ .Service.DeploymentStrategy }}
+{{- if eq .Service.DeploymentStrategy "canary" }}
+  # The controller runs the last promoted revision in {{ .Service.Name }}-primary
+  # and uses this Deployment as the canary: scaled to zero between rollouts,
+  # given a share of the pods behind the Service at each step, checked, then
+  # promoted into the primary or taken out of traffic. For exact weights, add
+  # trafficRouting.gatewayAPI with an HTTPRoute. See docs/controller-operator.md.
+  canary:
+    steps:
+      - weight: 10
+        pause: 2m
+      - weight: 25
+        pause: 5m
+      - weight: 50
+        pause: 5m
+{{- else }}
+  # No traffic shifting: the Deployment does a standard rolling update; the
+  # controller judges the new revision's pods on the checks below (with
+  # --prometheus-url) and on the progress deadline, and rolls back when they
+  # fail. Use strategy canary for stepped traffic. See docs/controller-operator.md.
+{{- end }}
   checks:
     # Thresholds from the service's registered SLO, applied to the new
     # revision only (its pod_template_hash label, added by the ServiceMonitor).

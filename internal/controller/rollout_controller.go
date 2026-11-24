@@ -204,6 +204,11 @@ func replicaSetIdentityPredicate() predicate.Funcs {
 // guardsForDeployment maps a Deployment event to the guards targeting it,
 // through the cache index; event handling never calls the API server.
 func (r *RolloutGuardReconciler) guardsForDeployment(ctx context.Context, obj client.Object) []reconcile.Request {
+	if of := obj.GetAnnotations()[primaryOfAnnotation]; of != "" {
+		// A canary's primary: its progress moves the guard of the
+		// Deployment it was made from.
+		return r.guardsFor(ctx, obj.GetNamespace(), of)
+	}
 	return r.guardsFor(ctx, obj.GetNamespace(), obj.GetName())
 }
 
@@ -308,6 +313,9 @@ func (r *RolloutGuardReconciler) reconcile(ctx context.Context, req ctrl.Request
 
 	if err := r.recoverDecision(ctx, &guard, &deployment, &prev); err != nil {
 		return ctrl.Result{}, err
+	}
+	if guard.Spec.Canary != nil {
+		return r.reconcileCanary(ctx, &guard, spec, &deployment, prev, adopted)
 	}
 	evaluation := EvaluateDeploymentRollout(&deployment)
 	status := nextStatus(prev, &guard, spec, &deployment, evaluation)

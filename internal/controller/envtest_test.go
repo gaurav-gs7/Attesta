@@ -51,7 +51,7 @@ func TestEnvtest(t *testing.T) {
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                 testScheme(),
-		Client:                 client.Options{Cache: &client.CacheOptions{DisableFor: []client.Object{&attestav1.RolloutDecision{}}}},
+		Client:                 client.Options{Cache: &client.CacheOptions{DisableFor: []client.Object{&attestav1.RolloutDecision{}, &corev1.Service{}}}},
 		Metrics:                metricsserver.Options{BindAddress: "0"},
 		HealthProbeBindAddress: "0",
 	})
@@ -219,6 +219,115 @@ func TestEnvtest(t *testing.T) {
 		edited.Spec.Reason = "NothingToSeeHere"
 		if err := c.Update(ctx, edited); !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), "immutable") {
 			t.Fatalf("editing a decision: %v, want Invalid (immutable)", err)
+		}
+	})
+
+	t.Run("a canary steps through and is promoted into the primary", func(t *testing.T) {
+		const name = "billing-api"
+		key := types.NamespacedName{Namespace: testNamespace, Name: name + "-rollout"}
+		d := healthyDeployment(0, "billing-api:v1")
+		d.Name, d.UID, d.Generation, d.Status = name, "", 0, appsv1.DeploymentStatus{}
+		d.Annotations[rollbackGuardsAnnotation] = key.Name
+		if err := c.Create(ctx, d); err != nil {
+			t.Fatal(err)
+		}
+		rs := func(rsName string, revision int, hash, image string) *appsv1.ReplicaSet {
+			r := replicaSet(rsName, revision, hash, image)
+			r.UID = ""
+			r.OwnerReferences[0].Name, r.OwnerReferences[0].UID, r.OwnerReferences[0].Controller = name, d.UID, kptr.To(true)
+			return r
+		}
+		if err := c.Create(ctx, rs("billing-api-b1", 1, "b1", "billing-api:v1")); err != nil {
+			t.Fatal(err)
+		}
+		// complete stands in for the Deployment controller.
+		complete := func(depName string) {
+			t.Helper()
+			var cur appsv1.Deployment
+			if err := c.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: depName}, &cur); err != nil {
+				t.Fatal(err)
+			}
+			n := *cur.Spec.Replicas
+			cur.Status = appsv1.DeploymentStatus{ObservedGeneration: cur.Generation, Replicas: n, UpdatedReplicas: n, ReadyReplicas: n, AvailableReplicas: n}
+			if err := c.Status().Update(ctx, &cur); err != nil {
+				t.Fatal(err)
+			}
+		}
+		guard := &attestav1.RolloutGuard{
+			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: testNamespace},
+			Spec: attestav1.RolloutGuardSpec{ServiceRef: name,
+				Canary: &attestav1.CanarySpec{Steps: []attestav1.CanaryStep{{Weight: 50, Pause: "1s"}}}},
+		}
+		if err := c.Create(ctx, guard); err != nil {
+			t.Fatal(err)
+		}
+		canary := func(what string, ok func(*attestav1.CanaryStatus, *appsv1.Deployment) bool) {
+			t.Helper()
+			deadline := time.Now().Add(30 * time.Second)
+			for {
+				var g attestav1.RolloutGuard
+				var dep appsv1.Deployment
+				if c.Get(ctx, key, &g) == nil && c.Get(ctx, client.ObjectKeyFromObject(d), &dep) == nil && g.Status.Canary != nil && ok(g.Status.Canary, &dep) {
+					return
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("timed out waiting until %s; guard status %+v", what, g.Status)
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
+		}
+		// The API server accepts the primary: its selector matches its
+		// template, and it does not select the canary's pods.
+		canary("the primary is created", func(cs *attestav1.CanaryStatus, _ *appsv1.Deployment) bool { return cs.Phase == CanaryInitializing })
+		var primary appsv1.Deployment
+		if err := c.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: name + "-primary"}, &primary); err != nil {
+			t.Fatal(err)
+		}
+		complete(name + "-primary")
+		canary("the canary is at rest", func(cs *attestav1.CanaryStatus, dep *appsv1.Deployment) bool {
+			return cs.Phase == CanaryIdle && *dep.Spec.Replicas == 0
+		})
+
+		var cur appsv1.Deployment
+		if err := c.Get(ctx, client.ObjectKeyFromObject(d), &cur); err != nil {
+			t.Fatal(err)
+		}
+		cur.Annotations[revisionAnnotation] = "2"
+		cur.Spec.Template.Spec.Containers[0].Image = "billing-api:v2"
+		if err := c.Update(ctx, &cur); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Create(ctx, rs("billing-api-b2", 2, "b2", "billing-api:v2")); err != nil {
+			t.Fatal(err)
+		}
+		canary("revision 2 gets half the pods", func(cs *attestav1.CanaryStatus, dep *appsv1.Deployment) bool {
+			return cs.Phase == CanaryProgressing && *dep.Spec.Replicas == 2 && cs.Weight == 50
+		})
+		complete(name)
+		canary("revision 2 is promoted into the primary", func(cs *attestav1.CanaryStatus, _ *appsv1.Deployment) bool { return cs.Phase == CanaryPromoting })
+		if err := c.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: name + "-primary"}, &primary); err != nil {
+			t.Fatal(err)
+		}
+		if img := primary.Spec.Template.Spec.Containers[0].Image; img != "billing-api:v2" || primary.Generation < 2 {
+			t.Fatalf("primary on %s at generation %d", img, primary.Generation)
+		}
+		complete(name + "-primary")
+		canary("the canary is back at rest on revision 2", func(cs *attestav1.CanaryStatus, dep *appsv1.Deployment) bool {
+			return cs.Phase == CanaryIdle && cs.PrimaryTemplateHash == "b2" && *dep.Spec.Replicas == 0
+		})
+		var g attestav1.RolloutGuard
+		if err := c.Get(ctx, key, &g); err != nil {
+			t.Fatal(err)
+		}
+		var list attestav1.RolloutDecisionList
+		if err := c.List(ctx, &list, client.InNamespace(testNamespace), client.MatchingLabels{attestav1.DecisionGuardUIDLabel: string(g.UID)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := attestav1.VerifyChain(g.Name, string(g.UID), list.Items, g.Status.LastDecision); err != nil {
+			t.Fatal(err)
+		}
+		if got := actions(list.Items); got != "Promoted,CanaryStarted,Promoted" {
+			t.Fatalf("decisions %s", got)
 		}
 	})
 

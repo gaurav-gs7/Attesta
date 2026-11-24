@@ -68,9 +68,43 @@ spec:
 
 `ProgressDeadlineExceeded` still blocks a rollout with or without analysis. It is debounced by the Deployment's `progressDeadlineSeconds` (600 s by default).
 
-**Not a canary.** Attesta does not shift traffic. `spec.strategy` (`rolling`, `canary`, `blue-green`) is a label the controller records and reports; it behaves the same for each. The Deployment does a standard rolling update, analysis judges the new revision's pods as they take their share of traffic, and a failing revision is rolled back. That share is whatever the rolling update has reached, not a chosen percentage, so with `maxSurge: 1` on ten replicas the first checks see about a tenth of traffic, and a fast rollout can finish before `successfulChecks` passes: the revision then stays `Verifying` until it does, and is rolled back if it fails. For weighted steps and traffic splitting, use Argo Rollouts or Flagger; `spec.steps` is ignored and deprecated.
+**Rolling, not stepped.** Without `spec.canary`, `spec.strategy` is a label and the Deployment does a standard rolling update: analysis judges the new revision's pods as they take whatever share of traffic the rollout has reached, and a failing revision is rolled back. For a chosen share at each step, use `spec.canary` (next section).
 
 If an Argo CD Application with `selfHeal: true` manages the same Deployment, Argo CD reverts the controller's rollback to the version in Git; the controller then reports `RollbackReverted` and stands down. The Argo CD Application that `attesta service init` generates turns self-heal off when rollback is enabled. See [Who owns the pod template](architecture.md#who-owns-the-pod-template).
+
+## Canary
+
+With `spec.canary`, a new revision gets traffic in steps, is checked at each, and is promoted or taken out of traffic:
+
+```yaml
+spec:
+  deploymentRef: payments-api
+  canary:
+    steps:
+      - weight: 10        # percent of traffic
+        pause: 2m         # held at least this long, and until a check passes
+      - weight: 50
+        pause: 5m
+    trafficRouting:       # optional; without it, the share is a share of pods
+      gatewayAPI:
+        httpRoute: payments-api
+        port: 80
+  checks:                 # optional; judge each step on the canary's metrics
+    errorRateThreshold: 1
+    interval: 30s
+  rollback:
+    consecutiveFailures: 2
+```
+
+- **Primary and canary.** The controller creates `<deployment>-primary`, a copy of the guarded Deployment whose pods also carry `attesta.io/track: primary`, and once it is available scales the guarded Deployment to zero. From then on the primary serves the last promoted revision and the guarded Deployment is the canary. Your manifests and Git still describe only the guarded Deployment: a new template there starts a canary.
+- **Steps.** At each step the canary gets the step's weight. It moves on when the pause has passed, its pods are available, and, with `spec.checks`, the last check of its pods (by `pod_template_hash`) passed. After the last step its template is copied into the primary; once the primary has rolled it out, all traffic goes to the primary and the canary is scaled to zero. That is a `Promoted` decision.
+- **Abort.** `consecutiveFailures` failed checks in a row, or `ProgressDeadlineExceeded` on the canary, takes it out of traffic and back to zero: a `CanaryAborted` decision. The primary never stopped serving the last promoted revision, so nothing is rolled back, and the guarded Deployment's template is not touched, so a GitOps tool has nothing to undo. The aborted revision gets no traffic until the template changes again. An inconclusive check holds the step; it never advances it.
+- **Routing.** With `trafficRouting.gatewayAPI`, the controller creates the Services `<deployment>-primary` (the primary's pods) and `<deployment>-canary` (the canary revision's pods, by `pod_template_hash`) and sets the weights of your HTTPRoute's `backendRefs` that name them; the route is yours, and must name both. The canary gets enough pods for its share, at least one. Without a router, the Service that selects the guarded Deployment's pods selects the primary's too, and the share is the canary's fraction of those pods: at 10% with four primary pods it gets one pod, 20% of traffic. `status.canary.weight` and every decision's `traffic-weight` evidence report the share actually set.
+- **SLO gate.** With `spec.sloGate`, a new revision waits (phase `Waiting`, a `Paused` decision) until the gate allows it, measured every `recheckInterval`, then starts.
+- **GitOps.** The controller sets the guarded Deployment's `spec.replicas` (zero between rollouts); tell your GitOps tool to ignore it. The generated Argo CD Application for a `canary` service does (`ignoreDifferences` on `/spec/replicas`, `RespectIgnoreDifferences=true`), and keeps self-heal on, since a canary never rewrites the template. The primary and the Services carry only the controller's labels, so a tool that tracks resources by label does not prune them; they are owned by the guarded Deployment and go with it.
+- **Decisions.** `CanaryStarted`, `StepAdvanced`, `Promoted` and `CanaryAborted`, each carried on the Deployment update that made it (see Decision Records).
+- **RBAC.** `deploy/controller/canary-rbac.yaml`: create Deployments, get, create and update Services, get and update HTTPRoutes. Every change needs the guarded Deployment's consent (`attesta.io/rollback-guards`), as rollback does.
+- **Limits.** One canary per Deployment; HPA should target the primary; header- or cookie-based routing and mirroring are not supported.
 
 ## SLO Gate
 
@@ -110,6 +144,8 @@ Every decision the controller makes is written as a `RolloutDecision` (short nam
 | `RollbackSkipped` | A rollback was due and the controller declined: the Deployment did not consent, no healthy template was recorded, the healthy template is itself failing, or the bad template was re-applied by GitOps. Recorded once per reason. |
 | `Paused` | The SLO gate paused a new revision. |
 | `PauseSkipped` | The SLO gate would have paused a revision, but the Deployment did not consent. |
+| `Resumed` | The SLO gate resumed a revision it had paused. |
+| `CanaryStarted`, `StepAdvanced`, `CanaryAborted` | A canary got its first share of traffic, a larger one, or was taken out of traffic. |
 
 A record holds the trigger (`ProgressDeadlineExceeded`, `AnalysisFailed`, `AnalysisPassed`, `RolloutComplete`, `SLOGateBlocked`, `SLOGateUnknown`), the Deployment's UID, generation, revision, template hash and images, the revision restored, the controller version and pod that decided, and the evidence: every PromQL query sent with its value, threshold and verdict, and the Deployment's `Progressing` condition and replica counts. A failed metric check's evidence reads like `error-rate 20% <= 1% false`.
 

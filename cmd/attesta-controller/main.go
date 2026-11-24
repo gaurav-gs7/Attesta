@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -144,9 +145,10 @@ func run(ctx context.Context, o options) error {
 		Scheme: Scheme(),
 		Cache:  cacheOpts,
 		// Decision records only accumulate, and the controller reads one by
-		// name only when a status write was lost. Reading them live keeps
-		// them out of memory and the controller's rights at get and create.
-		Client:                  client.Options{Cache: &client.CacheOptions{DisableFor: []client.Object{&attestav1.RolloutDecision{}}}},
+		// name only when a status write was lost; Services are read only for
+		// canaries routed by Gateway API. Reading them live keeps them out of
+		// memory and the controller's rights at get and create.
+		Client:                  client.Options{Cache: &client.CacheOptions{DisableFor: []client.Object{&attestav1.RolloutDecision{}, &corev1.Service{}}}},
 		Metrics:                 metricsserver.Options{BindAddress: o.metricsAddr},
 		HealthProbeBindAddress:  o.healthAddr,
 		LeaderElection:          o.leaderElect,
