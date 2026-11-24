@@ -68,6 +68,10 @@ type Signals struct {
 	ErrorBudgetRemainingPct *float64
 	// Missing explains each nil field, for example "no requests in the last 5m".
 	Missing []string
+	// Queries is the PromQL each value came from, by key: "p95",
+	// "total:<window>" and "errors:<window>" (rates for the burn windows,
+	// counts for the budget window). Decision records quote them.
+	Queries map[string]string
 }
 
 // Unknown returns a status with no measurements and an unknown gate.

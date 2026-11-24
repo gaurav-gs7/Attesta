@@ -93,6 +93,12 @@ func TestEnvtest(t *testing.T) {
 			"zero failures": func(g *attestav1.RolloutGuard) {
 				g.Spec.Rollback = &attestav1.RollbackPolicy{ConsecutiveFailures: kptr.To[int32](0)}
 			},
+			"an SLO of 100% leaves no error budget": func(g *attestav1.RolloutGuard) {
+				g.Spec.SLOGate = &attestav1.SLOGate{AvailabilityTarget: 100}
+			},
+			"unknown onUnknown": func(g *attestav1.RolloutGuard) {
+				g.Spec.SLOGate = &attestav1.SLOGate{AvailabilityTarget: 99.9, OnUnknown: "Maybe"}
+			},
 		} {
 			g := &attestav1.RolloutGuard{ObjectMeta: metav1.ObjectMeta{Name: "bad", Namespace: testNamespace}}
 			mutate(g)

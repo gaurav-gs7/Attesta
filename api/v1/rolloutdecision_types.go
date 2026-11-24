@@ -51,8 +51,11 @@ const (
 	// ActionRollbackSkipped: a rollback was due and deliberately not done;
 	// Reason says why (not authorized, no healthy template, reverted, ...).
 	ActionRollbackSkipped = "RollbackSkipped"
-	// ActionPaused: the controller paused the Deployment's rollout.
+	// ActionPaused: the SLO gate paused the Deployment's rollout.
 	ActionPaused = "Paused"
+	// ActionPauseSkipped: the SLO gate would have paused the rollout and did
+	// not, because the Deployment does not name the guard.
+	ActionPauseSkipped = "PauseSkipped"
 )
 
 // RolloutDecisionSpec is the decision. Every field is covered by Hash.
@@ -88,7 +91,7 @@ type RolloutDecisionSpec struct {
 	// ErrorBudgetExhausted.
 	// +kubebuilder:validation:MinLength=1
 	Trigger string `json:"trigger"`
-	// +kubebuilder:validation:Enum=Promoted;RolledBack;RollbackFailed;RollbackSkipped;Paused
+	// +kubebuilder:validation:Enum=Promoted;RolledBack;RollbackFailed;RollbackSkipped;Paused;PauseSkipped
 	Action string `json:"action"`
 	// Reason is the machine-readable outcome, as on the guard's status.
 	// +kubebuilder:validation:MinLength=1

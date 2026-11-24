@@ -28,10 +28,10 @@ type decisionDraft struct {
 	evidence               []attestav1.DecisionEvidence
 }
 
-// worthRecording reports whether the draft is a new decision. A rollback or
-// a promotion always is. A rollback that was skipped or failed is recorded
-// when its reason first appears, not on every pass that reaches the same
-// conclusion.
+// worthRecording reports whether the draft is a new decision. A rollback, a
+// promotion and an SLO gate verdict (made once per revision) always are. A
+// rollback that was skipped or failed is recorded when its reason first
+// appears, not on every pass that reaches the same conclusion.
 func (d *decisionDraft) worthRecording(prev, status RolloutGuardStatus) bool {
 	if d == nil {
 		return false

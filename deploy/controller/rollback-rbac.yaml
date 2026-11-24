@@ -1,5 +1,6 @@
-# The only write the controller makes outside its own resources: updating a
-# Deployment's pod template to roll it back. A Deployment must also opt in by
+# The only writes the controller makes outside its own resources: updating a
+# Deployment's pod template to roll it back, and setting spec.paused when a
+# guard's SLO gate blocks a new revision. A Deployment must also opt in by
 # naming the guard in its attesta.io/rollback-guards annotation; the
 # controller refuses otherwise.
 #

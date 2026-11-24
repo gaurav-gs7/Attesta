@@ -136,6 +136,46 @@ spec:
                   carry, and the Deployment's name when DeploymentRef is empty.
                 maxLength: 63
                 type: string
+              sloGate:
+                description: |-
+                  SLOGate checks the service's SLOs when a new revision starts rolling
+                  out, with the same evaluator as the API's SLO status, and pauses the
+                  rollout when they are breached.
+                properties:
+                  availabilityTarget:
+                    description: |-
+                      AvailabilityTarget is the SLO, as a percentage of requests that
+                      succeed over 30 days. It sets the error budget.
+                    exclusiveMaximum: true
+                    exclusiveMinimum: true
+                    maximum: 100
+                    minimum: 0
+                    type: number
+                  errorRateThreshold:
+                    description: |-
+                      ErrorRateThreshold is the 5-minute error rate, in percent, above
+                      which a rollout is not started (default 1).
+                    maximum: 100
+                    minimum: 0
+                    type: number
+                  latencyP95TargetMs:
+                    description: LatencyP95TargetMs is the p95 latency objective (default
+                      300).
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  onUnknown:
+                    description: |-
+                      OnUnknown is what happens when the SLOs cannot be measured (too
+                      little traffic, no data, Prometheus unreachable): Proceed (default) or
+                      Pause.
+                    enum:
+                    - Proceed
+                    - Pause
+                    type: string
+                required:
+                - availabilityTarget
+                type: object
               steps:
                 description: |-
                   Steps are recorded for planned traffic shifting. The controller does
@@ -374,6 +414,30 @@ spec:
                 type: string
               serviceRef:
                 type: string
+              sloGate:
+                description: SLOGate is the gate's verdict on the latest revision
+                  it checked.
+                properties:
+                  evaluatedAt:
+                    type: string
+                  gate:
+                    description: Gate is allowed, blocked or unknown.
+                    type: string
+                  paused:
+                    description: Paused reports whether the controller paused the
+                      rollout.
+                    type: boolean
+                  reason:
+                    type: string
+                  revision:
+                    type: string
+                  templateHash:
+                    type: string
+                required:
+                - evaluatedAt
+                - gate
+                - templateHash
+                type: object
               strategy:
                 type: string
               updatedReplicas:

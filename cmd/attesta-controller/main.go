@@ -23,6 +23,7 @@ import (
 
 	attestav1 "github.com/gaurav-gs7/attesta/api/v1"
 	"github.com/gaurav-gs7/attesta/internal/controller"
+	"github.com/gaurav-gs7/attesta/internal/prometheus"
 	"github.com/gaurav-gs7/attesta/internal/promql"
 )
 
@@ -47,6 +48,7 @@ type options struct {
 	promTokenFile    string
 	promCAFile       string
 	promTimeout      time.Duration
+	metrics          prometheus.Metrics
 }
 
 func main() {
@@ -85,10 +87,16 @@ func registerFlags(fs *flag.FlagSet) *options {
 	fs.DurationVar(&o.renewDeadline, "renew-deadline", 10*time.Second, "leader election renew deadline")
 	fs.DurationVar(&o.retryPeriod, "retry-period", 2*time.Second, "leader election retry period")
 	fs.DurationVar(&o.shutdownTimeout, "shutdown-timeout", 30*time.Second, "time reconciles get to finish on shutdown before the lease is released")
-	fs.StringVar(&o.prometheusURL, "prometheus-url", "", "Prometheus base URL for metric analysis of guards that set spec.checks; empty disables analysis")
+	fs.StringVar(&o.prometheusURL, "prometheus-url", "", "Prometheus base URL for guards that set spec.checks or spec.sloGate; empty disables both")
 	fs.StringVar(&o.promTokenFile, "prometheus-bearer-token-file", "", "file holding a bearer token for Prometheus (for example a mounted Secret)")
 	fs.StringVar(&o.promCAFile, "prometheus-ca-file", "", "PEM bundle to trust for Prometheus's TLS certificate")
 	fs.DurationVar(&o.promTimeout, "prometheus-query-timeout", promql.DefaultQueryTimeout, "timeout for each Prometheus query")
+	d := prometheus.DefaultMetrics
+	fs.StringVar(&o.metrics.Requests, "prometheus-requests-metric", d.Requests, "counter of HTTP requests (as ATTESTA_PROMETHEUS_REQUESTS_METRIC for the API)")
+	fs.StringVar(&o.metrics.Duration, "prometheus-duration-metric", d.Duration, "histogram of request durations in seconds")
+	fs.StringVar(&o.metrics.ServiceLabel, "prometheus-service-label", d.ServiceLabel, "label holding the service name")
+	fs.StringVar(&o.metrics.StatusLabel, "prometheus-status-label", d.StatusLabel, "label holding the HTTP status code")
+	fs.StringVar(&o.metrics.ErrorStatus, "prometheus-error-status", d.ErrorStatus, "regular expression matching failed requests' status label")
 	fs.BoolVar(&o.showVersion, "version", false, "print the version and exit")
 	return &o
 }
@@ -173,7 +181,12 @@ func run(ctx context.Context, o options) error {
 		if err != nil {
 			return fmt.Errorf("configure Prometheus: %w", err)
 		}
-		reconciler.Prometheus = prom
+		// The SLO gate measures with the API's client and metric names.
+		slos, err := prometheus.New(prometheus.Config{URL: o.prometheusURL, Options: promOpts, Metrics: o.metrics})
+		if err != nil {
+			return fmt.Errorf("configure Prometheus: %w", err)
+		}
+		reconciler.Prometheus, reconciler.SLO, reconciler.Metrics = prom, slos, o.metrics
 	}
 	if err := reconciler.SetupWithManager(ctx, mgr, o.workers); err != nil {
 		return fmt.Errorf("set up the RolloutGuard controller: %w", err)

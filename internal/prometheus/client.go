@@ -67,6 +67,57 @@ func (m Metrics) Validate() error {
 	return nil
 }
 
+// WithDefaults fills every empty name from DefaultMetrics.
+func (m Metrics) WithDefaults() Metrics {
+	fill := func(v *string, def string) {
+		if *v == "" {
+			*v = def
+		}
+	}
+	fill(&m.Requests, DefaultMetrics.Requests)
+	fill(&m.Duration, DefaultMetrics.Duration)
+	fill(&m.ServiceLabel, DefaultMetrics.ServiceLabel)
+	fill(&m.StatusLabel, DefaultMetrics.StatusLabel)
+	fill(&m.ErrorStatus, DefaultMetrics.ErrorStatus)
+	return m
+}
+
+// The PromQL every Attesta measurement is built from: the API's SLO status,
+// the controller's SLO gate and its analysis of a rolling-out revision all
+// count requests, errors and latency with these, so they agree on what an
+// error and a request are.
+
+// Selector matches the service's series, and each extra label (label,
+// value pairs) exactly. Values are quoted; labels must be valid names.
+func (m Metrics) Selector(service string, extra ...string) string {
+	sel := fmt.Sprintf("%s=%q", m.ServiceLabel, service)
+	for i := 0; i+1 < len(extra); i += 2 {
+		sel += fmt.Sprintf(",%s=%q", extra[i], extra[i+1])
+	}
+	return sel
+}
+
+// ErrorSelector narrows a selector to failed requests.
+func (m Metrics) ErrorSelector(sel string) string {
+	return fmt.Sprintf("%s,%s=~%q", sel, m.StatusLabel, m.ErrorStatus)
+}
+
+// RequestRate is requests per second over window.
+func (m Metrics) RequestRate(sel, window string) string {
+	return fmt.Sprintf(`sum(rate(%s{%s}[%s]))`, m.Requests, sel, window)
+}
+
+// RequestIncrease is the number of requests over window.
+func (m Metrics) RequestIncrease(sel, window string) string {
+	return fmt.Sprintf(`sum(increase(%s{%s}[%s]))`, m.Requests, sel, window)
+}
+
+// LatencyP95Ms is the 95th percentile request duration over window, in
+// milliseconds.
+func (m Metrics) LatencyP95Ms(sel, window string) string {
+	return fmt.Sprintf(`histogram_quantile(0.95, sum by (le) (rate(%s_bucket{%s}[%s]))) * 1000`, m.Duration, sel, window)
+}
+
 // Config configures the client.
 type Config struct {
 	URL string
@@ -88,17 +139,7 @@ func New(cfg Config) (*Client, error) {
 	if strings.TrimSpace(cfg.URL) == "" {
 		return nil, errors.New("prometheus URL is empty")
 	}
-	m := cfg.Metrics
-	fill := func(v *string, def string) {
-		if *v == "" {
-			*v = def
-		}
-	}
-	fill(&m.Requests, DefaultMetrics.Requests)
-	fill(&m.Duration, DefaultMetrics.Duration)
-	fill(&m.ServiceLabel, DefaultMetrics.ServiceLabel)
-	fill(&m.StatusLabel, DefaultMetrics.StatusLabel)
-	fill(&m.ErrorStatus, DefaultMetrics.ErrorStatus)
+	m := cfg.Metrics.WithDefaults()
 	if err := m.Validate(); err != nil {
 		return nil, err
 	}
@@ -147,16 +188,11 @@ type sample struct {
 // All queries run concurrently, each with its own timeout, so one slow
 // query does not use up the time of the others.
 func (c *Client) Signals(ctx context.Context, service models.Service) (slo.Signals, error) {
-	sel := fmt.Sprintf("%s=%q", c.m.ServiceLabel, service.Name)
-	errSel := fmt.Sprintf(`%s=%q,%s=~%q`, c.m.ServiceLabel, service.Name, c.m.StatusLabel, c.m.ErrorStatus)
-	rate := func(selector, window string) string {
-		return fmt.Sprintf(`sum(rate(%s{%s}[%s]))`, c.m.Requests, selector, window)
-	}
-	increase := func(selector, window string) string {
-		return fmt.Sprintf(`sum(increase(%s{%s}[%s]))`, c.m.Requests, selector, window)
-	}
+	sel := c.m.Selector(service.Name)
+	errSel := c.m.ErrorSelector(sel)
+	rate, increase := c.m.RequestRate, c.m.RequestIncrease
 	queries := map[string]string{
-		"p95":                        fmt.Sprintf(`histogram_quantile(0.95, sum by (le) (rate(%s_bucket{%s}[%s]))) * 1000`, c.m.Duration, sel, slo.SignalWindow),
+		"p95":                        c.m.LatencyP95Ms(sel, slo.SignalWindow),
 		"total:" + slo.BudgetWindow:  increase(sel, slo.BudgetWindow),
 		"errors:" + slo.BudgetWindow: increase(errSel, slo.BudgetWindow),
 	}
@@ -175,7 +211,7 @@ func (c *Client) Signals(ctx context.Context, service models.Service) (slo.Signa
 		return slo.Signals{}, err
 	}
 
-	var out slo.Signals
+	out := slo.Signals{Queries: queries}
 	// Request rate and error rate over the signal window.
 	total := results["total:"+slo.SignalWindow]
 	if total.found {

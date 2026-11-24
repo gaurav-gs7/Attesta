@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	attestav1 "github.com/gaurav-gs7/attesta/api/v1"
+	"github.com/gaurav-gs7/attesta/internal/prometheus"
 	"github.com/gaurav-gs7/attesta/internal/promql"
 )
 
@@ -72,6 +73,12 @@ const (
 // pick the wrong candidate or rollback target.
 var errCacheBehind = errors.New("replicaset cache is behind the deployment revision")
 
+// errGuardStale means the cached guard is older than the API server's. The
+// key is requeued rather than acting on a status the controller has already
+// moved past; after the action, the status write would fail and the record
+// of what was done would be lost with it.
+var errGuardStale = errors.New("rollout guard cache is behind the API server")
+
 // RolloutGuardReconciler reconciles RolloutGuards against their Deployments.
 // Every read goes through the manager's cache; every write carries the
 // resourceVersion it was decided on, so a decision made on a stale view
@@ -82,6 +89,12 @@ type RolloutGuardReconciler struct {
 	// Prometheus enables metric analysis for guards that set spec.checks.
 	// Nil disables it; guards then rely on ProgressDeadlineExceeded only.
 	Prometheus promql.Querier
+	// Metrics names the request and latency series; empty names take the
+	// defaults the API uses too.
+	Metrics prometheus.Metrics
+	// SLO measures a service's SLOs for guards that set spec.sloGate. Nil
+	// disables the gate.
+	SLO SLOSource
 	// Actor identifies this controller in the decision records it writes.
 	Actor attestav1.DecisionActor
 	// APIReader reads around the cache. It is used only to adopt a decision
@@ -245,7 +258,24 @@ func (r *RolloutGuardReconciler) Reconcile(ctx context.Context, req ctrl.Request
 // optimistic-concurrency conflict on a write, or a ReplicaSet cache that has
 // not caught up with the Deployment.
 func isStaleRead(err error) bool {
-	return err != nil && (apierrors.IsConflict(err) || errors.Is(err, errCacheBehind))
+	return err != nil && (apierrors.IsConflict(err) || errors.Is(err, errCacheBehind) || errors.Is(err, errGuardStale))
+}
+
+// ensureCurrent reads the guard from the API server, past the cache, before
+// the controller changes a Deployment. Acting is rare, so the extra read is
+// cheap; deciding on a stale status (an old healthy template, a missing
+// rollback) is not.
+func (r *RolloutGuardReconciler) ensureCurrent(ctx context.Context, guard *attestav1.RolloutGuard) error {
+	var live metav1.PartialObjectMetadata
+	live.SetGroupVersionKind(attestav1.GroupVersion.WithKind("RolloutGuard"))
+	if err := r.apiReader().Get(ctx, client.ObjectKeyFromObject(guard), &live); err != nil {
+		return fmt.Errorf("read rollout guard %s/%s: %w", guard.Namespace, guard.Name, err)
+	}
+	if live.ResourceVersion != guard.ResourceVersion {
+		return fmt.Errorf("guard %s/%s is at resourceVersion %s, cache has %s: %w",
+			guard.Namespace, guard.Name, live.ResourceVersion, guard.ResourceVersion, errGuardStale)
+	}
+	return nil
 }
 
 func (r *RolloutGuardReconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -290,9 +320,20 @@ func (r *RolloutGuardReconciler) reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
+	decision, err := r.applySLOGate(ctx, &guard, spec, &deployment, promote || blocked, &status)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if deployment.Spec.Paused && deployment.Annotations[pausedByAnnotation] == guard.Name && status.SLOGate != nil && status.SLOGate.Paused {
+		status.Reason = reasonSLOGatePaused
+		status.Message = pausedMessage(deployment.Name, status.SLOGate.Revision, status.SLOGate.Reason)
+	}
+
 	var actionErr error
-	var decision *decisionDraft
 	switch {
+	case decision != nil:
+		// The gate paused the rollout, or would have; nothing else acts on
+		// this pass.
 	case promote:
 		if err := r.recordHealthyRevision(ctx, &deployment, &status); err != nil {
 			return ctrl.Result{}, err
@@ -323,6 +364,7 @@ func (r *RolloutGuardReconciler) applyAnalysis(ctx context.Context, guard *attes
 	deployment *appsv1.Deployment, evaluation RolloutEvaluation, status *RolloutGuardStatus, promote, blocked *bool) (time.Duration, error) {
 
 	cfg := analysisConfigFrom(guard, spec.ServiceLabel(deployment.Name))
+	cfg.Metrics = r.Metrics
 	switch {
 	case !cfg.Enabled():
 		status.Analysis = nil
@@ -592,6 +634,9 @@ func (r *RolloutGuardReconciler) rollback(ctx context.Context, guard *attestav1.
 		return decide(attestav1.ActionRollbackFailed), nil
 	}
 
+	if err := r.ensureCurrent(ctx, guard); err != nil {
+		return nil, err
+	}
 	fromRevision := deployment.Annotations[revisionAnnotation]
 	if current != nil {
 		fromRevision = current.Annotations[revisionAnnotation]

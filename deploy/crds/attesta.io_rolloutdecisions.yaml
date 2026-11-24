@@ -74,6 +74,7 @@ spec:
                 - RollbackFailed
                 - RollbackSkipped
                 - Paused
+                - PauseSkipped
                 type: string
               actor:
                 description: Actor is the controller instance that decided.

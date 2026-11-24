@@ -59,6 +59,44 @@ type RolloutGuardSpec struct {
 	Checks *RolloutChecks `json:"checks,omitempty"`
 	// +optional
 	Rollback *RollbackPolicy `json:"rollback,omitempty"`
+	// SLOGate checks the service's SLOs when a new revision starts rolling
+	// out, with the same evaluator as the API's SLO status, and pauses the
+	// rollout when they are breached.
+	// +optional
+	SLOGate *SLOGate `json:"sloGate,omitempty"`
+}
+
+// SLOGate pauses a new revision while the service is out of its error
+// budget or burning it fast. The service is measured service-wide from
+// Prometheus (all revisions) over 5m for error rate and p95, the 5m, 30m,
+// 1h and 6h burn-rate windows and the 30-day budget. The gate blocks when
+// less than 10% of the budget remains, when p95 or the error rate exceeds
+// its target, or when the 1h and 5m burn rates are both at least 14.4x or
+// the 6h and 30m ones both at least 6x.
+type SLOGate struct {
+	// AvailabilityTarget is the SLO, as a percentage of requests that
+	// succeed over 30 days. It sets the error budget.
+	// +kubebuilder:validation:ExclusiveMinimum=true
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:ExclusiveMaximum=true
+	// +kubebuilder:validation:Maximum=100
+	AvailabilityTarget float64 `json:"availabilityTarget"`
+	// LatencyP95TargetMs is the p95 latency objective (default 300).
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	LatencyP95TargetMs *int32 `json:"latencyP95TargetMs,omitempty"`
+	// ErrorRateThreshold is the 5-minute error rate, in percent, above
+	// which a rollout is not started (default 1).
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	ErrorRateThreshold *float64 `json:"errorRateThreshold,omitempty"`
+	// OnUnknown is what happens when the SLOs cannot be measured (too
+	// little traffic, no data, Prometheus unreachable): Proceed (default) or
+	// Pause.
+	// +optional
+	// +kubebuilder:validation:Enum=Proceed;Pause
+	OnUnknown string `json:"onUnknown,omitempty"`
 }
 
 type RolloutStep struct {
@@ -178,6 +216,10 @@ type RolloutGuardStatus struct {
 	// +optional
 	Analysis *AnalysisStatus `json:"analysis,omitempty"`
 
+	// SLOGate is the gate's verdict on the latest revision it checked.
+	// +optional
+	SLOGate *SLOGateStatus `json:"sloGate,omitempty"`
+
 	// LastDecision is the head of the guard's chain of RolloutDecisions:
 	// the next decision links to it.
 	// +optional
@@ -187,6 +229,23 @@ type RolloutGuardStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// SLOGateStatus is the SLO gate's verdict on one revision. The gate checks
+// each new revision once: a rollout the gate paused and someone resumed is
+// not paused again.
+type SLOGateStatus struct {
+	TemplateHash string `json:"templateHash"`
+	// +optional
+	Revision string `json:"revision,omitempty"`
+	// Gate is allowed, blocked or unknown.
+	Gate string `json:"gate"`
+	// +optional
+	Reason      string `json:"reason,omitempty"`
+	EvaluatedAt string `json:"evaluatedAt"`
+	// Paused reports whether the controller paused the rollout.
+	// +optional
+	Paused bool `json:"paused,omitempty"`
 }
 
 // AnalysisStatus is the state of metric analysis for one candidate revision.

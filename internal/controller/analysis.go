@@ -10,6 +10,7 @@ import (
 	"time"
 
 	attestav1 "github.com/gaurav-gs7/attesta/api/v1"
+	"github.com/gaurav-gs7/attesta/internal/prometheus"
 	"github.com/gaurav-gs7/attesta/internal/promql"
 )
 
@@ -51,6 +52,8 @@ type AnalysisConfig struct {
 	// RevisionLabel is the metric label holding the pod-template-hash, so
 	// queries see only the candidate revision. Empty means service-wide.
 	RevisionLabel string
+	// Metrics names the series queried; empty names take the defaults.
+	Metrics prometheus.Metrics
 	// Err is set when spec.checks is invalid; analysis is then not run.
 	Err error
 }
@@ -154,18 +157,17 @@ func formatValue(v float64) string { return strconv.FormatFloat(v, 'g', 6, 64) }
 
 func boolPtr(b bool) *bool { return &b }
 
-// queries returns the request, error and p95 queries for a candidate.
+// queries returns the request, error and p95 queries for a candidate, built
+// by the same functions as the API's SLO status and the SLO gate.
 func (c AnalysisConfig) queries(candidateHash string) (requests, errs, p95 string) {
-	labels := []string{fmt.Sprintf("service=%q", c.ServiceLabel)}
+	m := c.Metrics.WithDefaults()
+	var extra []string
 	if c.RevisionLabel != "" {
-		labels = append(labels, fmt.Sprintf("%s=%q", c.RevisionLabel, candidateHash))
+		extra = []string{c.RevisionLabel, candidateHash}
 	}
-	sel := strings.Join(labels, ",")
+	sel := m.Selector(c.ServiceLabel, extra...)
 	window := fmt.Sprintf("%ds", int(c.Window.Seconds()))
-	requests = fmt.Sprintf(`sum(increase(http_requests_total{%s}[%s]))`, sel, window)
-	errs = fmt.Sprintf(`sum(increase(http_requests_total{%s,status=~"5.."}[%s]))`, sel, window)
-	p95 = fmt.Sprintf(`histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{%s}[%s]))) * 1000`, sel, window)
-	return requests, errs, p95
+	return m.RequestIncrease(sel, window), m.RequestIncrease(m.ErrorSelector(sel), window), m.LatencyP95Ms(sel, window)
 }
 
 // analyze checks the candidate revision once. It never fails on missing

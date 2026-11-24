@@ -8,6 +8,8 @@ All notable changes to Attesta. The format follows [Keep a Changelog](https://ke
 
 - `RolloutDecision`: an immutable, hash-chained record of every promotion, rollback and skipped or failed rollback, with the PromQL queries and values and the Deployment conditions it was decided on. Apply the new CRD (`kubectl apply -k deploy/crds`) and the updated controller RBAC (`get` and `create` on `rolloutdecisions`) before upgrading the controller. `status.lastDecision` points at a guard's chain; `attesta verify` checks chains from `kubectl ... -o json`. See [Decision Records](docs/controller-operator.md#decision-records).
 - `status.analysis.lastEvidence` on RolloutGuards, and the `attesta_rolloutguard_decisions_recorded_total{action}` metric.
+- `spec.sloGate` on RolloutGuards: the controller checks the service's SLOs when a new revision starts and pauses it while less than 10% of the error budget remains or the budget is burning fast, recording a `Paused` decision. It uses the API's SLO evaluator and Prometheus client, so both judge a service the same way. See [SLO Gate](docs/controller-operator.md#slo-gate).
+- `--prometheus-requests-metric`, `--prometheus-duration-metric`, `--prometheus-service-label`, `--prometheus-status-label` and `--prometheus-error-status` on the controller, matching the API's `ATTESTA_PROMETHEUS_*` names. Metric analysis used to hard-code the defaults.
 
 ### Fixed
 
