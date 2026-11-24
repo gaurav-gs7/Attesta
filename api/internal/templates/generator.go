@@ -137,7 +137,6 @@ func (g *Generator) Render(service models.Service) (Scaffold, error) {
 		{source: filepath.Join(g.templateDir, "alertmanager"), target: "observability"},
 		{source: filepath.Join(g.templateDir, "opentelemetry"), target: "observability"},
 		{source: filepath.Join(g.templateDir, "runbooks"), target: "runbooks"},
-		{source: filepath.Join(g.templateDir, "terraform"), target: "infra/terraform"},
 		{source: filepath.Join(g.templateDir, "argocd"), target: "infra/argocd"},
 	} {
 		files, err := renderSection(section, d)

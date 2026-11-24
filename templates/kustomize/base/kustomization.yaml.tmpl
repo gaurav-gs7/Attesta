@@ -1,7 +1,9 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
+# No Namespace: Argo CD creates it (see infra/argocd/application.yaml).
+# Several services can share a namespace; an object here would make each
+# of their Applications its owner, and deleting one would delete it.
 resources:
-  - namespace.yaml
   - serviceaccount.yaml
   - deployment.yaml
   - service.yaml

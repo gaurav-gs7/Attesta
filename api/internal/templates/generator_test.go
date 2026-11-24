@@ -433,7 +433,7 @@ func TestTemplatesQuoteUserValues(t *testing.T) {
 	root := filepath.Clean("../../..")
 	evil := testService("go")
 	evil.Team = "platform\n    pod-security.kubernetes.io/enforce: privileged"
-	source := filepath.Join(root, "templates/kustomize/base/namespace.yaml.tmpl")
+	source := filepath.Join(root, "templates/argocd/application.yaml.tmpl")
 	tmpl, err := os.ReadFile(source)
 	if err != nil {
 		t.Fatal(err)
@@ -442,17 +442,28 @@ func TestTemplatesQuoteUserValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var ns struct {
+	var app struct {
 		Metadata struct {
 			Labels map[string]string `json:"labels"`
 		} `json:"metadata"`
+		Spec struct {
+			SyncPolicy struct {
+				ManagedNamespaceMetadata struct {
+					Labels map[string]string `json:"labels"`
+				} `json:"managedNamespaceMetadata"`
+			} `json:"syncPolicy"`
+		} `json:"spec"`
 	}
-	if err := yaml.Unmarshal(raw, &ns); err != nil {
-		t.Fatalf("namespace.yaml does not parse: %v\n%s", err, raw)
+	if err := yaml.Unmarshal(raw, &app); err != nil {
+		t.Fatalf("application.yaml does not parse: %v\n%s", err, raw)
 	}
-	if _, injected := ns.Metadata.Labels["pod-security.kubernetes.io/enforce"]; injected || len(ns.Metadata.Labels) != 2 ||
-		ns.Metadata.Labels["attesta.dev/team"] != evil.Team {
-		t.Fatalf("team value escaped its scalar: labels %v\n%s", ns.Metadata.Labels, raw)
+	for name, labels := range map[string]map[string]string{
+		"application": app.Metadata.Labels,
+		"namespace":   app.Spec.SyncPolicy.ManagedNamespaceMetadata.Labels,
+	} {
+		if _, injected := labels["pod-security.kubernetes.io/enforce"]; injected || labels["attesta.dev/team"] != evil.Team {
+			t.Fatalf("team value escaped its scalar in the %s labels: %v\n%s", name, labels, raw)
+		}
 	}
 
 	// And the generator refuses such input outright.

@@ -1,7 +1,0 @@
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: {{ .Service.Namespace }}
-  labels:
-    attesta.dev/team: {{ quote .Service.Team }}
-    attesta.dev/environment: {{ .Service.Environment }}

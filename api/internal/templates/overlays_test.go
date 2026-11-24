@@ -126,3 +126,24 @@ func TestRenderedDeploymentProbesAndDrains(t *testing.T) {
 		t.Fatal("no preStop delay before SIGTERM")
 	}
 }
+
+// Audit G-7: the namespace was declared by the Kustomize base, a Terraform
+// module and Argo CD's CreateNamespace at once.
+func TestNamespaceHasOneOwner(t *testing.T) {
+	result := generate(t, testService("go"))
+	for _, f := range result.Files {
+		rel, _ := filepath.Rel(result.OutputPath, f)
+		if strings.HasPrefix(rel, "infra/terraform") {
+			t.Errorf("%s: Terraform still ships", rel)
+		}
+	}
+	for _, env := range []string{"dev", "staging", "prod"} {
+		if ns := renderOverlay(t, result.OutputPath, env)["Namespace"]; len(ns) != 0 {
+			t.Errorf("%s overlay renders a Namespace", env)
+		}
+	}
+	app := read(t, result, "infra/argocd/application.yaml")
+	if !strings.Contains(app, "CreateNamespace=true") || !strings.Contains(app, "managedNamespaceMetadata:") {
+		t.Fatalf("Argo CD does not own the namespace:\n%s", app)
+	}
+}

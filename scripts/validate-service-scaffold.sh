@@ -39,7 +39,6 @@ require_file "observability/otel-collector.yaml"
 require_file "observability/jaeger.yaml"
 require_file "runbooks/incident-runbook.md"
 require_file "infra/argocd/application.yaml"
-require_file "infra/terraform/main.tf"
 
 require_grep "readinessProbe:" "k8s/base/deployment.yaml" "readiness probe is required"
 require_grep "path: /livez" "k8s/base/deployment.yaml" "liveness probe must use /livez"
@@ -59,6 +58,10 @@ if grep -En '^[[:space:]-]*uses:' "$service_dir/.github/workflows/ci.yml" | grep
   failures+=("every CI action must be pinned to a full commit SHA in .github/workflows/ci.yml")
 fi
 require_grep "Application" "infra/argocd/application.yaml" "Argo CD application is required"
+require_grep "CreateNamespace=true" "infra/argocd/application.yaml" "Argo CD must own the namespace"
+if grep -rlq "^kind: Namespace" "$service_dir/k8s" || [[ -d "$service_dir/infra/terraform" ]]; then
+  failures+=("the namespace must have one owner, the Argo CD Application: no Namespace under k8s/, no Terraform")
+fi
 if grep -Eq 'image: .*:latest|imagePullPolicy: Always' "$service_dir/k8s/base/deployment.yaml"; then
   failures+=("the Deployment must not run a moving tag (:latest) in k8s/base/deployment.yaml")
 fi

@@ -29,5 +29,13 @@ spec:
 {{- else }}
       selfHeal: true
 {{- end }}
+    # The namespace's one owner. Argo CD creates it if it is missing and
+    # never deletes it, so services sharing it do not lose it when one
+    # Application is removed. Neither the Kustomize base nor Terraform
+    # declares it.
     syncOptions:
       - CreateNamespace=true
+    managedNamespaceMetadata:
+      labels:
+        attesta.dev/team: {{ quote .Service.Team }}
+        attesta.dev/environment: {{ .Service.Environment }}
