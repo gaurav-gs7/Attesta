@@ -15,15 +15,16 @@
 5. If the guard sets `spec.checks` and the controller has `--prometheus-url`, analyse the revision rolling out. See Metric Analysis.
 6. On `Healthy` (and, with analysis, after enough passing checks), record the current ReplicaSet's revision and `pod-template-hash` as the last healthy template.
 7. On `Blocked` (a progress deadline, or too many consecutive failed checks), if `spec.rollback.enabled` is true, restore the last healthy template. See Rollback Rules.
-8. Patch `status` only when it changed, and emit an Event only when the phase or reason changed. client-go rate-limits events per object (a burst of 25, then one every five minutes); the controller keys that limit by reason as well, so a run of `ProgressDeadlineExceeded` or `RollbackFailed` warnings cannot use up the budget and cause a `RollbackTriggered` event to be dropped.
+8. Write `status` only when it changed, and emit an Event (events.k8s.io/v1) only when the phase or reason changed.
 
-### Reads Come From The Cache
+### Built On controller-runtime
 
-The controller watches RolloutGuards, Deployments and ReplicaSets once, at startup, and serves every read from the informer caches after that. Event handlers and reconciles make no GET or LIST calls, so API load does not grow with the number of Deployments or with how often they change; the only steady-state requests are status patches when something changed and the Deployment update of a rollback.
+The controller is a controller-runtime manager: typed `attesta.io/v1` objects from `api/v1`, the manager's shared cache, leader election, health probes and metrics. It watches RolloutGuards, Deployments and ReplicaSets once, at startup, and serves every read from the cache after that. Event mapping and reconciles make no direct GET or LIST calls, so API load does not grow with the number of Deployments or with how often they change; the only steady-state requests are status patches when something changed and the Deployment update of a rollback.
 
 - A Deployment or ReplicaSet event finds its guards through an index on each guard's target Deployment. ReplicaSet updates enqueue only when the revision, template hash or owner changes, not on every replica count change.
 - A reconcile finds a Deployment's ReplicaSets through an index on the owning Deployment's UID.
-- A cache can trail the API server. Writes carry the cached `resourceVersion` as a precondition: the status patch and the rollback update fail with a conflict if the object changed after the read, and the guard is requeued on a fresher view. If a Deployment reports a revision that the ReplicaSet cache has not seen yet, the reconcile is requeued too, so the controller never picks a candidate or rollback target from an outdated ReplicaSet list. Both cases count as `reconcile_total{result="requeue"}`, not as errors.
+- A cache can trail the API server. Writes carry the cached `resourceVersion`: the status update and the rollback update fail with a conflict if the object changed after the read, and the guard is requeued a second later on a fresher view. If a Deployment reports a revision that the ReplicaSet cache has not seen yet, the reconcile is requeued too, so the controller never picks a candidate or rollback target from an outdated ReplicaSet list. Neither case is reported as a reconcile error.
+- Guard updates reconcile only when the spec's generation changes or on the periodic resync (`--resync`), not on the controller's own status writes.
 - Memory grows with the number of Deployments and ReplicaSets in the watched namespaces. Use `--namespace` to bound it.
 
 ## Rollback Rules
@@ -86,7 +87,7 @@ kubectl apply -k deploy/controller
 
 RBAC is split. `rbac.yaml` grants read access, status writes on RolloutGuards and Events. `rollback-rbac.yaml` holds the one other write, `update` on Deployments, in its own ClusterRole, `attesta-controller-rollback`. The default binds it cluster-wide; the file shows how to replace that with a RoleBinding in each namespace where rollback is allowed.
 
-`deploy/controller` runs two replicas with leader election (a Lease named `attesta-controller` in `attesta-system`), so one replica reconciles and the other takes over if it goes away. Handover never overlaps: on shutdown the leader stops its workers, waits for in-flight reconciles to finish (up to `--renew-deadline`), and only then releases the Lease. client-go's own release-on-cancel does not wait, which would let the standby start while the old leader was still mid-rollback. A leader that loses the Lease without shutting down exits and restarts with fresh caches. Rollback state lives in the guard's status, not in memory, so a new leader does not repeat a rollback it inherits. Pods run as UID 65532 from a distroless image with a read-only root filesystem.
+`deploy/controller` runs two replicas with leader election (a Lease named `attesta-controller` in `attesta-system`), so one replica reconciles and the other takes over if it goes away. Handover never overlaps: on shutdown, controller-runtime stops the reconcilers, waits for in-flight reconciles to finish (up to `--shutdown-timeout`), and only then releases the Lease, so the standby cannot start while the old leader is mid-rollback. A leader that loses the Lease without shutting down exits and restarts with fresh caches. Rollback state lives in the guard's status, not in memory, so a new leader does not repeat a rollback it inherits. Pods run as UID 65532 from a distroless image with a read-only root filesystem.
 
 Images are published to `ghcr.io/gaurav-gs7/attesta-controller` by `.github/workflows/release.yml`: `main` on every push to main, and a version tag for every `v*` git tag. The kustomization defaults to `main`; pin a version or digest for anything that matters:
 
@@ -106,19 +107,18 @@ docker build -f cmd/attesta-controller/Dockerfile --build-arg VERSION=$(git desc
 | Endpoint | Port | Purpose |
 | --- | --- | --- |
 | `/healthz` | 8081 | Liveness. |
-| `/readyz` | 8081 | Readiness. A standby replica reports ready; the leader reports ready once its caches have synced. |
+| `/readyz` | 8081 | Readiness, once the caches have synced. Standby replicas sync their caches too, so they report ready and a rolling update of the controller can proceed. |
 | `/metrics` | 8080 | Prometheus metrics, exposed by the `attesta-controller-metrics` Service. |
 
 Metrics:
 
-- `attesta_rolloutguard_reconcile_total{result}`: `success`, `error`, or `requeue` after a stale read, and `attesta_rolloutguard_reconcile_duration_seconds`
 - `attesta_rolloutguard_rollback_total{outcome}`: `triggered`, `failed`, or the reason a rollback was skipped
 - `attesta_rolloutguard_phase_transitions_total{phase}`
 - `attesta_rolloutguard_analysis_total{result}`: `Passed`, `Failed` or `Inconclusive` metric checks
-- client-go workqueue metrics (`workqueue_depth`, `workqueue_retries_total`, ...) for the `rolloutguard` queue, under the same names controller-runtime uses
+- controller-runtime's own: `controller_runtime_reconcile_total{controller="rolloutguard",result}`, `controller_runtime_reconcile_time_seconds`, `controller_runtime_reconcile_errors_total`, and the `workqueue_*` metrics
 - Go runtime and process metrics
 
-Useful flags: `--prometheus-url` to enable metric analysis (with `--prometheus-bearer-token-file`, `--prometheus-ca-file` and `--prometheus-query-timeout` for a secured Prometheus), `--namespace` to watch one namespace, `--workers`, `--resync`, `--leader-elect=false` for a single local process, and `--version`.
+Useful flags: `--prometheus-url` to enable metric analysis (with `--prometheus-bearer-token-file`, `--prometheus-ca-file` and `--prometheus-query-timeout` for a secured Prometheus), `--namespace` to watch one namespace, `--workers`, `--resync`, `--leader-elect=false` for a single local process, `--shutdown-timeout` (how long in-flight reconciles get before the Lease is released), and `--version`.
 
 ## Status Contract
 

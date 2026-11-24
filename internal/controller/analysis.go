@@ -8,8 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-
+	attestav1 "github.com/gaurav-gs7/attesta/api/v1"
 	"github.com/gaurav-gs7/attesta/internal/promql"
 )
 
@@ -59,7 +58,7 @@ func (c AnalysisConfig) Enabled() bool {
 	return c.ErrorRateThresholdPct != nil || c.LatencyP95ThresholdMs != nil || c.MinAvailabilityPct != nil
 }
 
-func analysisConfigFrom(guard *unstructured.Unstructured, serviceLabel string) AnalysisConfig {
+func analysisConfigFrom(guard *attestav1.RolloutGuard, serviceLabel string) AnalysisConfig {
 	cfg := AnalysisConfig{
 		Window:              defaultAnalysisWindow,
 		Interval:            defaultAnalysisInterval,
@@ -70,55 +69,40 @@ func analysisConfigFrom(guard *unstructured.Unstructured, serviceLabel string) A
 		RevisionLabel:       defaultRevisionLabel,
 	}
 	var problems []string
-	number := func(path ...string) *float64 {
-		raw, found, _ := unstructured.NestedFieldNoCopy(guard.Object, path...)
-		if !found || raw == nil {
-			return nil
-		}
-		switch v := raw.(type) {
-		case int64:
-			f := float64(v)
-			return &f
-		case float64:
-			return &v
-		case int:
-			f := float64(v)
-			return &f
-		}
-		problems = append(problems, fmt.Sprintf("spec.%s must be a number", strings.Join(path[1:], ".")))
-		return nil
-	}
-	duration := func(fallback, minimum time.Duration, path ...string) time.Duration {
-		raw, found, _ := unstructured.NestedString(guard.Object, path...)
-		if !found || raw == "" {
+	duration := func(raw string, fallback, minimum time.Duration, field string) time.Duration {
+		if raw == "" {
 			return fallback
 		}
 		d, err := time.ParseDuration(raw)
 		if err != nil || d < minimum {
-			problems = append(problems, fmt.Sprintf("spec.%s must be a duration of at least %s", strings.Join(path[1:], "."), minimum))
+			problems = append(problems, fmt.Sprintf("spec.%s must be a duration of at least %s", field, minimum))
 			return fallback
 		}
 		return d
 	}
 
-	cfg.ErrorRateThresholdPct = number("spec", "checks", "errorRateThreshold")
-	cfg.LatencyP95ThresholdMs = number("spec", "checks", "latencyP95ThresholdMs")
-	cfg.MinAvailabilityPct = number("spec", "checks", "minAvailability")
-	cfg.Window = duration(defaultAnalysisWindow, minAnalysisWindow, "spec", "checks", "window")
-	cfg.Interval = duration(defaultAnalysisInterval, minAnalysisInterval, "spec", "checks", "interval")
-	if v := number("spec", "checks", "minRequests"); v != nil {
-		cfg.MinRequests = *v
+	if checks := guard.Spec.Checks; checks != nil {
+		cfg.ErrorRateThresholdPct = checks.ErrorRateThreshold
+		cfg.LatencyP95ThresholdMs = checks.LatencyP95ThresholdMs
+		cfg.MinAvailabilityPct = checks.MinAvailability
+		cfg.Window = duration(checks.Window, defaultAnalysisWindow, minAnalysisWindow, "checks.window")
+		cfg.Interval = duration(checks.Interval, defaultAnalysisInterval, minAnalysisInterval, "checks.interval")
+		if checks.MinRequests != nil {
+			cfg.MinRequests = *checks.MinRequests
+		}
+		if checks.SuccessfulChecks != nil {
+			cfg.SuccessfulChecks = int(*checks.SuccessfulChecks)
+		}
+		if checks.RevisionLabel != nil {
+			cfg.RevisionLabel = *checks.RevisionLabel
+		}
 	}
-	if v := number("spec", "checks", "successfulChecks"); v != nil {
-		cfg.SuccessfulChecks = int(*v)
-	}
-	if v := number("spec", "rollback", "consecutiveFailures"); v != nil {
-		cfg.ConsecutiveFailures = int(*v)
-	}
-	if label, found, _ := unstructured.NestedString(guard.Object, "spec", "checks", "revisionLabel"); found {
-		cfg.RevisionLabel = label
+	if rb := guard.Spec.Rollback; rb != nil && rb.ConsecutiveFailures != nil {
+		cfg.ConsecutiveFailures = int(*rb.ConsecutiveFailures)
 	}
 
+	// The CRD schema enforces these ranges; they are checked again so a guard
+	// stored before the schema existed is reported rather than acted on.
 	inRange := func(v *float64, name string, lo, hi float64) {
 		if v != nil && (*v < lo || *v > hi) {
 			problems = append(problems, fmt.Sprintf("spec.checks.%s must be between %g and %g", name, lo, hi))

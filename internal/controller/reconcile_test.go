@@ -4,64 +4,121 @@ import (
 	"context"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
-	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	dynamicfake "k8s.io/client-go/dynamic/fake"
-	kubefake "k8s.io/client-go/kubernetes/fake"
-	k8stesting "k8s.io/client-go/testing"
-	"k8s.io/client-go/tools/record"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/events"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+
+	attestav1 "github.com/gaurav-gs7/attesta/api/v1"
 )
 
 const (
 	testNamespace = "platform"
-	testGuardKey  = testNamespace + "/payments-api-rollout"
+	testGuardName = "payments-api-rollout"
 	testUID       = types.UID("deployment-uid")
 )
 
+var testGuardKey = types.NamespacedName{Namespace: testNamespace, Name: testGuardName}
+
+func testScheme() *runtime.Scheme {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		panic(err)
+	}
+	if err := attestav1.AddToScheme(scheme); err != nil {
+		panic(err)
+	}
+	return scheme
+}
+
+// harness runs the reconciler against controller-runtime's fake client,
+// which stands in for the manager's cache and the API server: it enforces
+// resourceVersion preconditions, the status subresource and the field
+// indexes the reconciler reads by.
 type harness struct {
 	t      *testing.T
 	ctx    context.Context
-	ctrl   *RolloutGuardController
-	kube   *kubefake.Clientset
-	dyn    *dynamicfake.FakeDynamicClient
-	events *record.FakeRecorder
+	r      *RolloutGuardReconciler
+	c      client.Client
+	events *events.FakeRecorder
+
+	mu                    sync.Mutex
+	deploymentUpdateCount int
+	statusUpdates         int
+	// updateDeployment, when set, answers every Deployment update instead of
+	// the fake API server (nil passes the update through).
+	updateDeployment func() error
 }
 
 // newHarness starts with a healthy Deployment on revision 1 (image v1) and a
-// guard. spec is the guard's spec; nil rollback means rollback is not set.
+// guard. rollback is the guard's spec.rollback (nil leaves it unset), and
+// extraGuardFields are merged into the guard object.
 func newHarness(t *testing.T, rollback map[string]any, extraGuardFields map[string]any) *harness {
 	t.Helper()
 	spec := map[string]any{"serviceRef": "payments-api", "strategy": "canary"}
 	if rollback != nil {
 		spec["rollback"] = rollback
 	}
-	guard := &unstructured.Unstructured{Object: map[string]any{
+	obj := map[string]any{
 		"apiVersion": "attesta.io/v1",
 		"kind":       "RolloutGuard",
-		"metadata":   map[string]any{"name": "payments-api-rollout", "namespace": testNamespace, "generation": int64(1)},
+		"metadata":   map[string]any{"name": testGuardName, "namespace": testNamespace, "generation": int64(1)},
 		"spec":       spec,
-	}}
-	for k, v := range extraGuardFields {
-		guard.Object[k] = v
 	}
-	kube := kubefake.NewSimpleClientset(
-		healthyDeployment(1, "payments-api:v1"),
-		replicaSet("payments-api-h1", 1, "h1", "payments-api:v1"),
-	)
-	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
-		map[schema.GroupVersionResource]string{rolloutGuardGVR: "RolloutGuardList"}, guard)
-	events := record.NewFakeRecorder(100)
-	ctrl := NewRolloutGuardControllerWithClients(kube, dyn, Options{Recorder: events})
-	return &harness{t: t, ctx: context.Background(), ctrl: ctrl, kube: kube, dyn: dyn, events: events}
+	for k, v := range extraGuardFields {
+		obj[k] = v
+	}
+	guard := &attestav1.RolloutGuard{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj, guard); err != nil {
+		t.Fatal(err)
+	}
+
+	h := &harness{t: t, ctx: ctrl.LoggerInto(context.Background(), ctrl.Log), events: events.NewFakeRecorder(100)}
+	base := fake.NewClientBuilder().
+		WithScheme(testScheme()).
+		WithObjects(guard, healthyDeployment(1, "payments-api:v1"), replicaSet("payments-api-h1", 1, "h1", "payments-api:v1")).
+		WithStatusSubresource(&attestav1.RolloutGuard{}).
+		WithIndex(&attestav1.RolloutGuard{}, TargetDeploymentIndex, guardTargetIndex).
+		WithIndex(&appsv1.ReplicaSet{}, OwnerIndex, replicaSetOwnerIndex).
+		Build()
+	h.c = interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if _, ok := obj.(*appsv1.Deployment); ok {
+				h.mu.Lock()
+				h.deploymentUpdateCount++
+				inject := h.updateDeployment
+				h.mu.Unlock()
+				if inject != nil {
+					if err := inject(); err != nil {
+						return err
+					}
+				}
+			}
+			return c.Update(ctx, obj, opts...)
+		},
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if sub == "status" {
+				h.mu.Lock()
+				h.statusUpdates++
+				h.mu.Unlock()
+			}
+			return c.SubResource(sub).Update(ctx, obj, opts...)
+		},
+	})
+	h.r = &RolloutGuardReconciler{Client: h.c, Recorder: h.events}
+	return h
 }
 
 func healthyDeployment(generation int64, image string) *appsv1.Deployment {
@@ -69,7 +126,7 @@ func healthyDeployment(generation int64, image string) *appsv1.Deployment {
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "payments-api", Namespace: testNamespace, UID: testUID, Generation: generation,
-			Annotations: map[string]string{revisionAnnotation: "1", rollbackGuardsAnnotation: "payments-api-rollout"},
+			Annotations: map[string]string{revisionAnnotation: "1", rollbackGuardsAnnotation: testGuardName},
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
@@ -105,53 +162,12 @@ func replicaSet(name string, revision int, hash, image string) *appsv1.ReplicaSe
 	}
 }
 
+// reconcile runs one pass and returns its raw error, before Reconcile turns
+// stale reads into a quiet requeue.
 func (h *harness) reconcile() error {
 	h.t.Helper()
-	h.syncCaches()
-	return h.ctrl.Reconcile(h.ctx, testGuardKey)
-}
-
-// syncCaches stands in for the informers: it loads the fake API server's
-// current objects into the controller's caches, through the same indexers the
-// informers use. Reconcile reads only from these caches.
-func (h *harness) syncCaches() {
-	h.t.Helper()
-	guards, err := h.dyn.Resource(rolloutGuardGVR).Namespace(testNamespace).List(h.ctx, metav1.ListOptions{})
-	if err != nil {
-		h.t.Fatal(err)
-	}
-	var guardObjs []any
-	for i := range guards.Items {
-		guardObjs = append(guardObjs, &guards.Items[i])
-	}
-	deployments, err := h.kube.AppsV1().Deployments(testNamespace).List(h.ctx, metav1.ListOptions{})
-	if err != nil {
-		h.t.Fatal(err)
-	}
-	var deploymentObjs []any
-	for i := range deployments.Items {
-		deploymentObjs = append(deploymentObjs, &deployments.Items[i])
-	}
-	replicaSets, err := h.kube.AppsV1().ReplicaSets(testNamespace).List(h.ctx, metav1.ListOptions{})
-	if err != nil {
-		h.t.Fatal(err)
-	}
-	var rsObjs []any
-	for i := range replicaSets.Items {
-		rsObjs = append(rsObjs, &replicaSets.Items[i])
-	}
-	for _, step := range []struct {
-		indexer interface{ Replace([]any, string) error }
-		objs    []any
-	}{
-		{h.ctrl.informer.GetIndexer(), guardObjs},
-		{h.ctrl.deployments.GetIndexer(), deploymentObjs},
-		{h.ctrl.replicaSets.GetIndexer(), rsObjs},
-	} {
-		if err := step.indexer.Replace(step.objs, ""); err != nil {
-			h.t.Fatal(err)
-		}
-	}
+	_, err := h.r.reconcile(h.ctx, ctrl.Request{NamespacedName: testGuardKey})
+	return err
 }
 
 func (h *harness) mustReconcile() {
@@ -163,11 +179,11 @@ func (h *harness) mustReconcile() {
 
 func (h *harness) deployment() *appsv1.Deployment {
 	h.t.Helper()
-	d, err := h.kube.AppsV1().Deployments(testNamespace).Get(h.ctx, "payments-api", metav1.GetOptions{})
-	if err != nil {
+	var d appsv1.Deployment
+	if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: testNamespace, Name: "payments-api"}, &d); err != nil {
 		h.t.Fatal(err)
 	}
-	return d
+	return &d
 }
 
 func (h *harness) image() string {
@@ -180,14 +196,36 @@ func (h *harness) setDeployment(mutate func(*appsv1.Deployment)) {
 	h.t.Helper()
 	d := h.deployment()
 	mutate(d)
-	if _, err := h.kube.AppsV1().Deployments(testNamespace).Update(h.ctx, d, metav1.UpdateOptions{}); err != nil {
+	status := d.Status
+	if err := h.c.Update(h.ctx, d); err != nil {
+		h.t.Fatal(err)
+	}
+	// The fake API server, like a real one, ignores status on update.
+	d.Status = status
+	if err := h.c.Status().Update(h.ctx, d); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+func (h *harness) replicaSet(name string) *appsv1.ReplicaSet {
+	h.t.Helper()
+	var rs appsv1.ReplicaSet
+	if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: testNamespace, Name: name}, &rs); err != nil {
+		h.t.Fatal(err)
+	}
+	return &rs
+}
+
+func (h *harness) updateReplicaSet(rs *appsv1.ReplicaSet) {
+	h.t.Helper()
+	if err := h.c.Update(h.ctx, rs); err != nil {
 		h.t.Fatal(err)
 	}
 }
 
 func (h *harness) addReplicaSet(rs *appsv1.ReplicaSet) {
 	h.t.Helper()
-	if _, err := h.kube.AppsV1().ReplicaSets(testNamespace).Create(h.ctx, rs, metav1.CreateOptions{}); err != nil {
+	if err := h.c.Create(h.ctx, rs); err != nil {
 		h.t.Fatal(err)
 	}
 }
@@ -205,14 +243,44 @@ func (h *harness) startBadRollout() {
 	})
 }
 
-func (h *harness) status() map[string]any {
+func (h *harness) guard() *attestav1.RolloutGuard {
 	h.t.Helper()
-	g, err := h.dyn.Resource(rolloutGuardGVR).Namespace(testNamespace).Get(h.ctx, "payments-api-rollout", metav1.GetOptions{})
+	var g attestav1.RolloutGuard
+	if err := h.c.Get(h.ctx, testGuardKey, &g); err != nil {
+		h.t.Fatal(err)
+	}
+	return &g
+}
+
+// updateGuard edits the guard's spec as a map, the way a user's manifest
+// would set it, and stores it with a new generation.
+func (h *harness) updateGuard(mutate func(obj map[string]any)) {
+	h.t.Helper()
+	g := h.guard()
+	obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(g)
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	s, _, _ := unstructured.NestedMap(g.Object, "status")
-	return s
+	mutate(obj)
+	var next attestav1.RolloutGuard
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj, &next); err != nil {
+		h.t.Fatal(err)
+	}
+	next.Generation = g.Generation + 1
+	if err := h.c.Update(h.ctx, &next); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+// status is the stored status as the API server would serve it.
+func (h *harness) status() map[string]any {
+	h.t.Helper()
+	g := h.guard()
+	m, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&g.Status)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return m
 }
 
 func (h *harness) field(name string) string {
@@ -233,23 +301,15 @@ func (h *harness) condition(conditionType string) map[string]any {
 }
 
 func (h *harness) deploymentUpdates() int {
-	n := 0
-	for _, a := range h.kube.Actions() {
-		if a.GetVerb() == "update" && a.GetResource().Resource == "deployments" {
-			n++
-		}
-	}
-	return n
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.deploymentUpdateCount
 }
 
 func (h *harness) statusPatches() int {
-	n := 0
-	for _, a := range h.dyn.Actions() {
-		if a.GetVerb() == "patch" && a.GetSubresource() == "status" {
-			n++
-		}
-	}
-	return n
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.statusUpdates
 }
 
 func (h *harness) drainEvents() []string {
@@ -323,14 +383,9 @@ func TestReconcileDoesNotRollBackTwice(t *testing.T) {
 		t.Fatalf("expected exactly one rollback update, got %d deployment updates", h.deploymentUpdates()-1)
 	}
 
-	rs1, err := h.kube.AppsV1().ReplicaSets(testNamespace).Get(h.ctx, "payments-api-h1", metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rs1 := h.replicaSet("payments-api-h1")
 	rs1.Annotations[revisionAnnotation] = "3"
-	if _, err := h.kube.AppsV1().ReplicaSets(testNamespace).Update(h.ctx, rs1, metav1.UpdateOptions{}); err != nil {
-		t.Fatal(err)
-	}
+	h.updateReplicaSet(rs1)
 	h.setDeployment(func(d *appsv1.Deployment) {
 		d.Generation = 3
 		d.Annotations[revisionAnnotation] = "3"
@@ -444,9 +499,9 @@ func TestReconcileReturnsErrorWhenRollbackFails(t *testing.T) {
 	h := newHarness(t, map[string]any{"enabled": true}, nil)
 	h.mustReconcile()
 	h.startBadRollout()
-	h.kube.PrependReactor("update", "deployments", func(k8stesting.Action) (bool, runtime.Object, error) {
-		return true, nil, apierrors.NewForbidden(schema.GroupResource{Group: "apps", Resource: "deployments"}, "payments-api", nil)
-	})
+	h.updateDeployment = func() error {
+		return apierrors.NewForbidden(schema.GroupResource{Group: "apps", Resource: "deployments"}, "payments-api", nil)
+	}
 	err := h.reconcile()
 	if err == nil {
 		t.Fatal("expected an error so the workqueue retries the rollback")
@@ -466,9 +521,9 @@ func TestReconcileRetriesRollbackOnConflict(t *testing.T) {
 	h := newHarness(t, map[string]any{"enabled": true}, nil)
 	h.mustReconcile()
 	h.startBadRollout()
-	h.kube.PrependReactor("update", "deployments", func(k8stesting.Action) (bool, runtime.Object, error) {
-		return true, nil, apierrors.NewConflict(schema.GroupResource{Group: "apps", Resource: "deployments"}, "payments-api", nil)
-	})
+	h.updateDeployment = func() error {
+		return apierrors.NewConflict(schema.GroupResource{Group: "apps", Resource: "deployments"}, "payments-api", nil)
+	}
 	err := h.reconcile()
 	if !isStaleRead(err) {
 		t.Fatalf("expected a stale-read error to requeue, got %v", err)
@@ -547,7 +602,7 @@ func TestReconcileRemovesLegacyStatusFields(t *testing.T) {
 
 func TestReconcileReportsMissingDeployment(t *testing.T) {
 	h := newHarness(t, map[string]any{"enabled": true}, nil)
-	if err := h.kube.AppsV1().Deployments(testNamespace).Delete(h.ctx, "payments-api", metav1.DeleteOptions{}); err != nil {
+	if err := h.c.Delete(h.ctx, h.deployment()); err != nil {
 		t.Fatal(err)
 	}
 	h.mustReconcile()
@@ -559,54 +614,59 @@ func TestReconcileReportsMissingDeployment(t *testing.T) {
 	}
 }
 
-// Audit C-11, through the workqueue: a failed rollback is requeued with
-// backoff, not forgotten, and the retry completes it.
-func TestFailedRollbackIsRetriedByTheWorkqueue(t *testing.T) {
+// Audit C-11: a failed rollback is returned as an error, so
+// controller-runtime requeues it with backoff, and the retry completes it. A
+// conflict is not an error: Reconcile requeues it quietly.
+func TestFailedRollbackIsRetried(t *testing.T) {
 	h := newHarness(t, map[string]any{"enabled": true}, nil)
 	h.mustReconcile()
 	h.startBadRollout()
 	failures := 1
-	h.kube.PrependReactor("update", "deployments", func(k8stesting.Action) (bool, runtime.Object, error) {
+	h.updateDeployment = func() error {
 		if failures > 0 {
 			failures--
-			return true, nil, apierrors.NewServiceUnavailable("apiserver is restarting")
+			return apierrors.NewServiceUnavailable("apiserver is restarting")
 		}
-		return false, nil, nil
-	})
-
-	process := func() {
-		t.Helper()
-		h.syncCaches()
-		done := make(chan struct{})
-		go func() { h.ctrl.processNext(h.ctx); close(done) }()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Fatal("no queued key to process")
-		}
+		return nil
 	}
-
-	h.ctrl.queue.Add(testGuardKey)
-	process()
+	if _, err := h.r.Reconcile(h.ctx, ctrl.Request{NamespacedName: testGuardKey}); err == nil {
+		t.Fatal("a failed rollback returned no error, so it would not be retried")
+	}
 	if got := h.field("phase"); got != PhaseRollbackFailed {
 		t.Fatalf("phase = %s after a failed update, want %s", got, PhaseRollbackFailed)
 	}
-	if got := h.ctrl.queue.NumRequeues(testGuardKey); got != 1 {
-		t.Fatalf("failed rollback requeued %d times, want 1 (rate limited, not forgotten)", got)
+	if _, err := h.r.Reconcile(h.ctx, ctrl.Request{NamespacedName: testGuardKey}); err != nil {
+		t.Fatalf("retry: %v", err)
 	}
-
-	process() // the rate-limited retry, a few milliseconds later
 	if h.image() != "payments-api:v1" {
 		t.Fatalf("retry did not roll back: image = %s", h.image())
 	}
 	if got := h.field("phase"); got != PhaseRolledBack {
 		t.Fatalf("phase = %s after the retry, want %s", got, PhaseRolledBack)
 	}
-	if got := h.ctrl.queue.NumRequeues(testGuardKey); got != 0 {
-		t.Fatalf("backoff not reset after success: %d requeues", got)
-	}
 	events := strings.Join(h.drainEvents(), "\n")
 	if !strings.Contains(events, reasonRollbackFailed) || !strings.Contains(events, reasonRollbackTriggered) {
 		t.Fatalf("expected RollbackFailed then RollbackTriggered events, got:\n%s", events)
 	}
+
+	h.startBadRolloutAgain()
+	h.updateDeployment = func() error {
+		return apierrors.NewConflict(schema.GroupResource{Group: "apps", Resource: "deployments"}, "payments-api", nil)
+	}
+	res, err := h.r.Reconcile(h.ctx, ctrl.Request{NamespacedName: testGuardKey})
+	if err != nil || res.RequeueAfter != staleRequeue {
+		t.Fatalf("conflict: result %+v, error %v; want a quiet requeue after %s", res, err, staleRequeue)
+	}
+}
+
+// startBadRolloutAgain blocks a third revision after a rollback.
+func (h *harness) startBadRolloutAgain() {
+	h.t.Helper()
+	h.addReplicaSet(replicaSet("payments-api-h3", 4, "h3", "payments-api:v3"))
+	h.setDeployment(func(d *appsv1.Deployment) {
+		d.Generation = 4
+		d.Annotations[revisionAnnotation] = "4"
+		d.Spec.Template.Spec.Containers[0].Image = "payments-api:v3"
+		d.Status = appsv1.DeploymentStatus{ObservedGeneration: 4, Replicas: 3, UpdatedReplicas: 1, AvailableReplicas: 2, Conditions: progressDeadlineExceeded()}
+	})
 }

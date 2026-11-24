@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // revertToV2 stands in for Argo CD self-heal: it re-applies the bad v2
@@ -15,14 +14,9 @@ import (
 // progress deadline again.
 func (h *harness) revertToV2(revision int, argoApp string) {
 	h.t.Helper()
-	rs2, err := h.kube.AppsV1().ReplicaSets(testNamespace).Get(h.ctx, "payments-api-h2", metav1.GetOptions{})
-	if err != nil {
-		h.t.Fatal(err)
-	}
+	rs2 := h.replicaSet("payments-api-h2")
 	rs2.Annotations[revisionAnnotation] = itoa(revision)
-	if _, err := h.kube.AppsV1().ReplicaSets(testNamespace).Update(h.ctx, rs2, metav1.UpdateOptions{}); err != nil {
-		h.t.Fatal(err)
-	}
+	h.updateReplicaSet(rs2)
 	h.setDeployment(func(d *appsv1.Deployment) {
 		d.Generation = int64(revision)
 		d.Annotations[revisionAnnotation] = itoa(revision)

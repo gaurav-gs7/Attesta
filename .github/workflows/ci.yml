@@ -55,7 +55,14 @@ jobs:
           git diff --exit-code -- go.mod go.sum
       - name: Vet
         run: go vet ./...
+      - name: Install envtest binaries (kube-apiserver and etcd)
+        run: |
+          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.25.4-0.20261123171039-055e78270477
+          echo "KUBEBUILDER_ASSETS=$(setup-envtest use 1.35.x -p path)" >> "$GITHUB_ENV"
       - name: Test with race detector
+        env:
+          # The controller's envtest suite fails rather than skips here.
+          ATTESTA_REQUIRE_ENVTEST: "1"
         run: go test -race -count=1 -coverprofile=coverage.out -covermode=atomic ./...
       - name: Coverage at least COVERAGE_MIN
         env:

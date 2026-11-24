@@ -17,6 +17,11 @@ rules:
   - apiGroups: ["apps"]
     resources: ["replicasets"]
     verbs: ["get", "list", "watch"]
+  # Events about guards (events.k8s.io), and the leader-election events
+  # controller-runtime still writes through the core API.
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch", "update"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch", "update"]

@@ -10,8 +10,9 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+
+	attestav1 "github.com/gaurav-gs7/attesta/api/v1"
 )
 
 // sample is what the fake Prometheus reports for one candidate revision.
@@ -87,22 +88,15 @@ func checks(extra map[string]any) map[string]any {
 func newAnalysisHarness(t *testing.T, rollback map[string]any, checkSpec map[string]any, withProm bool) (*harness, *fakeProm, *clock) {
 	t.Helper()
 	h := newHarness(t, rollback, nil)
-	g, err := h.dyn.Resource(rolloutGuardGVR).Namespace(testNamespace).Get(h.ctx, "payments-api-rollout", metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := unstructured.SetNestedMap(g.Object, checkSpec, "spec", "checks"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := h.dyn.Resource(rolloutGuardGVR).Namespace(testNamespace).Update(h.ctx, g, metav1.UpdateOptions{}); err != nil {
-		t.Fatal(err)
-	}
+	h.updateGuard(func(obj map[string]any) {
+		obj["spec"].(map[string]any)["checks"] = checkSpec
+	})
 	prom := &fakeProm{byHash: map[string]sample{"h1": healthySample()}}
 	clk := &clock{t: time.Date(2026, 11, 22, 8, 0, 0, 0, time.UTC)}
 	if withProm {
-		h.ctrl.prometheus = prom
+		h.r.Prometheus = prom
 	}
-	h.ctrl.now = clk.now
+	h.r.Now = clk.now
 	return h, prom, clk
 }
 
@@ -333,11 +327,17 @@ func TestAnalysisServiceWideWhenRevisionLabelEmpty(t *testing.T) {
 	}
 }
 
+func guardFrom(t *testing.T, spec map[string]any) *attestav1.RolloutGuard {
+	t.Helper()
+	var g attestav1.RolloutGuard
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(map[string]any{"spec": spec}, &g); err != nil {
+		t.Fatal(err)
+	}
+	return &g
+}
+
 func TestAnalysisConfigDefaultsAndParsing(t *testing.T) {
-	guard := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{
-		"checks": map[string]any{"errorRateThreshold": int64(2)},
-	}}}
-	cfg := analysisConfigFrom(guard, "svc")
+	cfg := analysisConfigFrom(guardFrom(t, map[string]any{"checks": map[string]any{"errorRateThreshold": int64(2)}}), "svc")
 	if cfg.Err != nil || !cfg.Enabled() || *cfg.ErrorRateThresholdPct != 2 {
 		t.Fatalf("integer threshold not parsed: %+v", cfg)
 	}
@@ -346,15 +346,16 @@ func TestAnalysisConfigDefaultsAndParsing(t *testing.T) {
 		t.Fatalf("defaults not applied: %+v", cfg)
 	}
 
-	off := analysisConfigFrom(&unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{}}}, "svc")
-	if off.Enabled() {
+	if off := analysisConfigFrom(guardFrom(t, map[string]any{}), "svc"); off.Enabled() {
 		t.Fatal("analysis must be off without thresholds")
 	}
 
-	bad := analysisConfigFrom(&unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{
-		"checks":   map[string]any{"errorRateThreshold": 150.0, "latencyP95ThresholdMs": "fast", "window": "1s", "successfulChecks": int64(0)},
+	// The CRD schema rejects these at apply time; a guard stored before the
+	// schema is reported instead of analysed.
+	bad := analysisConfigFrom(guardFrom(t, map[string]any{
+		"checks":   map[string]any{"errorRateThreshold": 150.0, "latencyP95ThresholdMs": -1.0, "window": "1s", "successfulChecks": int64(0)},
 		"rollback": map[string]any{"consecutiveFailures": int64(0)},
-	}}}, "svc")
+	}), "svc")
 	if bad.Err == nil {
 		t.Fatal("expected validation errors")
 	}

@@ -2,41 +2,32 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/dynamic"
-	dynamicinformer "k8s.io/client-go/dynamic/dynamicinformer"
-	"k8s.io/client-go/informers"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/tools/record"
-	"k8s.io/client-go/util/workqueue"
+	"k8s.io/client-go/tools/events"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	attestav1 "github.com/gaurav-gs7/attesta/api/v1"
 	"github.com/gaurav-gs7/attesta/internal/promql"
 )
-
-var rolloutGuardGVR = schema.GroupVersionResource{
-	Group:    "attesta.io",
-	Version:  "v1",
-	Resource: "rolloutguards",
-}
 
 const (
 	revisionAnnotation        = "deployment.kubernetes.io/revision"
@@ -64,12 +55,16 @@ const (
 	fluxKustomizeLabel     = "kustomize.toolkit.fluxcd.io/name"
 	fluxHelmLabel          = "helm.toolkit.fluxcd.io/name"
 
-	// guardsByDeploymentIndex maps "namespace/deployment" to the guards
-	// targeting that Deployment.
-	guardsByDeploymentIndex = "attesta.io/target-deployment"
-	// replicaSetsByOwnerIndex maps a Deployment UID to the ReplicaSets it
-	// controls.
-	replicaSetsByOwnerIndex = "attesta.io/owner-deployment"
+	// TargetDeploymentIndex is a cache index of guards by the
+	// "namespace/name" of the Deployment they target.
+	TargetDeploymentIndex = "attesta.io/target-deployment"
+	// OwnerIndex is a cache index of ReplicaSets by the UID of the
+	// Deployment that owns them.
+	OwnerIndex = "attesta.io/owner-deployment"
+
+	// staleRequeue is how soon a reconcile that lost a race with another
+	// writer, or ran on a cache that trails the API server, runs again.
+	staleRequeue = time.Second
 )
 
 // errCacheBehind means the ReplicaSet cache has not yet seen the revision the
@@ -77,12 +72,13 @@ const (
 // pick the wrong candidate or rollback target.
 var errCacheBehind = errors.New("replicaset cache is behind the deployment revision")
 
-type Options struct {
-	Namespace string
-	Resync    time.Duration
-	Logger    *slog.Logger
-	// Recorder overrides the Kubernetes event recorder. Tests use it.
-	Recorder record.EventRecorder
+// RolloutGuardReconciler reconciles RolloutGuards against their Deployments.
+// Every read goes through the manager's cache; every write carries the
+// resourceVersion it was decided on, so a decision made on a stale view
+// fails with a conflict and is made again.
+type RolloutGuardReconciler struct {
+	client.Client
+	Recorder events.EventRecorder
 	// Prometheus enables metric analysis for guards that set spec.checks.
 	// Nil disables it; guards then rely on ProgressDeadlineExceeded only.
 	Prometheus promql.Querier
@@ -90,207 +86,55 @@ type Options struct {
 	Now func() time.Time
 }
 
-type RolloutGuardController struct {
-	kube        kubernetes.Interface
-	dynamic     dynamic.Interface
-	informer    cache.SharedIndexInformer
-	deployments cache.SharedIndexInformer
-	replicaSets cache.SharedIndexInformer
-	queue       workqueue.TypedRateLimitingInterface[string]
-	recorder    record.EventRecorder
-	namespace   string
-	logger      *slog.Logger
-	prometheus  promql.Querier
-	now         func() time.Time
+// SetupWithManager registers the cache indexes and watches.
+func (r *RolloutGuardReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager, workers int) error {
+	if err := IndexFields(ctx, mgr.GetFieldIndexer()); err != nil {
+		return err
+	}
+	return ctrl.NewControllerManagedBy(mgr).
+		Named("rolloutguard").
+		// The controller's own status writes do not change the guard's
+		// generation; skip them so a status update does not trigger another
+		// pass. Periodic resyncs (same resourceVersion) still reconcile.
+		For(&attestav1.RolloutGuard{}, builder.WithPredicates(predicate.Or[client.Object](
+			predicate.GenerationChangedPredicate{}, resyncPredicate()))).
+		Watches(&appsv1.Deployment{}, handler.EnqueueRequestsFromMapFunc(r.guardsForDeployment)).
+		// ReplicaSet status churns with every pod change. Only a new revision
+		// or owner matters to the guard.
+		Watches(&appsv1.ReplicaSet{}, handler.EnqueueRequestsFromMapFunc(r.guardsForReplicaSet),
+			builder.WithPredicates(replicaSetIdentityPredicate())).
+		WithOptions(controller.Options{MaxConcurrentReconciles: workers}).
+		Complete(r)
 }
 
-func NewRolloutGuardController(cfg *rest.Config, opts Options) (*RolloutGuardController, error) {
-	kube, err := kubernetes.NewForConfig(cfg)
-	if err != nil {
-		return nil, err
+// IndexFields adds the indexes the reconciler and its event mapping read.
+func IndexFields(ctx context.Context, indexer client.FieldIndexer) error {
+	if err := indexer.IndexField(ctx, &attestav1.RolloutGuard{}, TargetDeploymentIndex, guardTargetIndex); err != nil {
+		return fmt.Errorf("index rollout guards: %w", err)
 	}
-	dyn, err := dynamic.NewForConfig(cfg)
-	if err != nil {
-		return nil, err
+	if err := indexer.IndexField(ctx, &appsv1.ReplicaSet{}, OwnerIndex, replicaSetOwnerIndex); err != nil {
+		return fmt.Errorf("index replicasets: %w", err)
 	}
-	return NewRolloutGuardControllerWithClients(kube, dyn, opts), nil
-}
-
-func NewRolloutGuardControllerWithClients(kube kubernetes.Interface, dyn dynamic.Interface, opts Options) *RolloutGuardController {
-	resync := opts.Resync
-	if resync <= 0 {
-		resync = 30 * time.Second
-	}
-	logger := opts.Logger
-	if logger == nil {
-		logger = slog.Default()
-	}
-
-	dynamicFactory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(dyn, resync, opts.Namespace, nil)
-	informer := dynamicFactory.ForResource(rolloutGuardGVR).Informer()
-	typedFactory := informers.NewSharedInformerFactoryWithOptions(kube, resync, informers.WithNamespace(opts.Namespace))
-	deployments := typedFactory.Apps().V1().Deployments().Informer()
-	replicaSets := typedFactory.Apps().V1().ReplicaSets().Informer()
-	// The indexes are what keep event handlers and reconciles off the API
-	// server: a Deployment event finds its guards, and a reconcile finds a
-	// Deployment's ReplicaSets, by a map lookup in the informer cache.
-	// AddIndexers fails only on a started informer or a duplicate index name,
-	// both programming errors on these freshly built informers.
-	if err := informer.AddIndexers(cache.Indexers{guardsByDeploymentIndex: guardTargetIndexFunc}); err != nil {
-		panic(fmt.Sprintf("add rollout guard index: %v", err))
-	}
-	if err := replicaSets.AddIndexers(cache.Indexers{replicaSetsByOwnerIndex: replicaSetOwnerIndexFunc}); err != nil {
-		panic(fmt.Sprintf("add replicaset index: %v", err))
-	}
-
-	recorder := opts.Recorder
-	if recorder == nil {
-		recorder = newEventRecorder(kube)
-	}
-
-	c := &RolloutGuardController{
-		kube:        kube,
-		dynamic:     dyn,
-		informer:    informer,
-		deployments: deployments,
-		replicaSets: replicaSets,
-		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
-			workqueue.DefaultTypedControllerRateLimiter[string](),
-			workqueue.TypedRateLimitingQueueConfig[string]{Name: "rolloutguard"},
-		),
-		recorder:   recorder,
-		namespace:  opts.Namespace,
-		logger:     logger,
-		prometheus: opts.Prometheus,
-		now:        opts.Now,
-	}
-	if c.now == nil {
-		c.now = time.Now
-	}
-	_, _ = informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: c.enqueueObject,
-		UpdateFunc: func(prev, next any) {
-			// The controller's own status writes do not change the guard's
-			// generation; skip them so a status patch does not trigger another
-			// pass. Periodic resyncs (same resourceVersion) still enqueue.
-			if guardSpecOrResyncChanged(prev, next) {
-				c.enqueueObject(next)
-			}
-		},
-		DeleteFunc: c.enqueueObject,
-	})
-	_, _ = deployments.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    c.enqueueDeployment,
-		UpdateFunc: func(_, next any) { c.enqueueDeployment(next) },
-		DeleteFunc: c.enqueueDeployment,
-	})
-	_, _ = replicaSets.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: c.enqueueReplicaSetOwner,
-		UpdateFunc: func(prev, next any) {
-			// ReplicaSet status churns with every pod change. Only a new
-			// revision or owner matters to the guard.
-			if replicaSetIdentityChanged(prev, next) {
-				c.enqueueReplicaSetOwner(next)
-			}
-		},
-		DeleteFunc: c.enqueueReplicaSetOwner,
-	})
-	return c
-}
-
-func (c *RolloutGuardController) Run(ctx context.Context, workers int) error {
-	if workers <= 0 {
-		workers = 1
-	}
-	defer c.queue.ShutDown()
-
-	go c.informer.Run(ctx.Done())
-	go c.deployments.Run(ctx.Done())
-	go c.replicaSets.Run(ctx.Done())
-	if !cache.WaitForCacheSync(ctx.Done(), c.HasSynced) {
-		return errors.New("rollout guard controller cache sync failed")
-	}
-	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			wait.UntilWithContext(ctx, c.worker, time.Second)
-		}()
-	}
-	<-ctx.Done()
-	// Return only once in-flight reconciles have finished, so a caller that
-	// hands over leadership after Run returns never overlaps with this one.
-	c.queue.ShutDown()
-	wg.Wait()
 	return nil
 }
 
-func (c *RolloutGuardController) worker(ctx context.Context) {
-	for c.processNext(ctx) {
-	}
-}
-
-func (c *RolloutGuardController) processNext(ctx context.Context) bool {
-	key, quit := c.queue.Get()
-	if quit {
-		return false
-	}
-	defer c.queue.Done(key)
-
-	start := time.Now()
-	err := c.Reconcile(ctx, key)
-	reconcileDuration.Observe(time.Since(start).Seconds())
-	if isStaleRead(err) {
-		// The cache or a status write lost a race with another writer. Retry
-		// on a fresher view; this is routine, not a failure.
-		reconcileTotal.WithLabelValues("requeue").Inc()
-		c.logger.Debug("requeue rollout guard on stale read", "key", key, "error", err)
-		c.queue.AddRateLimited(key)
-		return true
-	}
-	if err != nil {
-		reconcileTotal.WithLabelValues("error").Inc()
-		c.logger.Error("reconcile rollout guard", "key", key, "error", err)
-		c.queue.AddRateLimited(key)
-		return true
-	}
-	reconcileTotal.WithLabelValues("success").Inc()
-	c.queue.Forget(key)
-	return true
-}
-
-// HasSynced reports whether the guard, Deployment and ReplicaSet caches have
-// synced. It is false until Run has been called.
-func (c *RolloutGuardController) HasSynced() bool {
-	return c.informer.HasSynced() && c.deployments.HasSynced() && c.replicaSets.HasSynced()
-}
-
-// isStaleRead reports errors that mean "retry on a fresher view": an
-// optimistic-concurrency conflict on a write, or a ReplicaSet cache that has
-// not caught up with the Deployment.
-func isStaleRead(err error) bool {
-	return err != nil && (apierrors.IsConflict(err) || errors.Is(err, errCacheBehind))
-}
-
-func guardTargetIndexFunc(obj any) ([]string, error) {
-	guard, ok := obj.(*unstructured.Unstructured)
+func guardTargetIndex(obj client.Object) []string {
+	guard, ok := obj.(*attestav1.RolloutGuard)
 	if !ok {
-		return nil, nil
+		return nil
 	}
-	target := rolloutGuardSpecFrom(guard).DeploymentName(guard.GetName())
-	return []string{guard.GetNamespace() + "/" + target}, nil
+	return []string{guard.Namespace + "/" + rolloutGuardSpecFrom(guard).DeploymentName(guard.Name)}
 }
 
-func replicaSetOwnerIndexFunc(obj any) ([]string, error) {
+func replicaSetOwnerIndex(obj client.Object) []string {
 	rs, ok := obj.(*appsv1.ReplicaSet)
 	if !ok {
-		return nil, nil
+		return nil
 	}
 	if owner := deploymentOwner(rs.OwnerReferences); owner != nil {
-		return []string{string(owner.UID)}, nil
+		return []string{string(owner.UID)}
 	}
-	return nil, nil
+	return nil
 }
 
 func deploymentOwner(refs []metav1.OwnerReference) *metav1.OwnerReference {
@@ -308,162 +152,157 @@ func deploymentOwner(refs []metav1.OwnerReference) *metav1.OwnerReference {
 	return nil
 }
 
-func replicaSetIdentityChanged(prev, next any) bool {
-	p, ok1 := prev.(*appsv1.ReplicaSet)
-	n, ok2 := next.(*appsv1.ReplicaSet)
-	if !ok1 || !ok2 {
-		return true
-	}
-	if p.ResourceVersion == n.ResourceVersion {
-		return false // periodic resync; the Deployment resync covers it
-	}
-	return p.Annotations[revisionAnnotation] != n.Annotations[revisionAnnotation] ||
-		p.Labels[podTemplateHashLabel] != n.Labels[podTemplateHashLabel] ||
-		len(p.OwnerReferences) != len(n.OwnerReferences)
-}
-
-func (c *RolloutGuardController) enqueueObject(obj any) {
-	key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
-	if err == nil {
-		c.queue.Add(key)
+// resyncPredicate passes the periodic resync, which redelivers an object
+// unchanged, so every guard is re-evaluated on the manager's sync period.
+func resyncPredicate() predicate.Funcs {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			return e.ObjectOld.GetResourceVersion() == e.ObjectNew.GetResourceVersion()
+		},
 	}
 }
 
-func guardSpecOrResyncChanged(prev, next any) bool {
-	p, ok1 := prev.(*unstructured.Unstructured)
-	n, ok2 := next.(*unstructured.Unstructured)
-	if !ok1 || !ok2 {
-		return true
-	}
-	return p.GetResourceVersion() == n.GetResourceVersion() || p.GetGeneration() != n.GetGeneration()
+func replicaSetIdentityPredicate() predicate.Funcs {
+	return predicate.Funcs{UpdateFunc: func(e event.UpdateEvent) bool {
+		p, ok1 := e.ObjectOld.(*appsv1.ReplicaSet)
+		n, ok2 := e.ObjectNew.(*appsv1.ReplicaSet)
+		if !ok1 || !ok2 {
+			return true
+		}
+		if p.ResourceVersion == n.ResourceVersion {
+			return false // periodic resync; the Deployment resync covers it
+		}
+		return p.Annotations[revisionAnnotation] != n.Annotations[revisionAnnotation] ||
+			p.Labels[podTemplateHashLabel] != n.Labels[podTemplateHashLabel] ||
+			len(p.OwnerReferences) != len(n.OwnerReferences)
+	}}
 }
 
-func (c *RolloutGuardController) enqueueDeployment(obj any) {
-	if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
-		obj = tombstone.Obj
-	}
-	deployment, ok := obj.(*appsv1.Deployment)
-	if !ok {
-		return
-	}
-	c.enqueueGuardsFor(deployment.Namespace, deployment.Name)
+// guardsForDeployment maps a Deployment event to the guards targeting it,
+// through the cache index; event handling never calls the API server.
+func (r *RolloutGuardReconciler) guardsForDeployment(ctx context.Context, obj client.Object) []reconcile.Request {
+	return r.guardsFor(ctx, obj.GetNamespace(), obj.GetName())
 }
 
-func (c *RolloutGuardController) enqueueReplicaSetOwner(obj any) {
-	if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
-		obj = tombstone.Obj
-	}
+func (r *RolloutGuardReconciler) guardsForReplicaSet(ctx context.Context, obj client.Object) []reconcile.Request {
 	rs, ok := obj.(*appsv1.ReplicaSet)
 	if !ok {
-		return
+		return nil
 	}
-	if owner := deploymentOwner(rs.OwnerReferences); owner != nil {
-		c.enqueueGuardsFor(rs.Namespace, owner.Name)
+	owner := deploymentOwner(rs.OwnerReferences)
+	if owner == nil {
+		return nil
 	}
+	return r.guardsFor(ctx, rs.Namespace, owner.Name)
 }
 
-// enqueueGuardsFor queues every guard that targets the Deployment. It reads
-// only the informer's index, so event handlers never call the API server.
-func (c *RolloutGuardController) enqueueGuardsFor(namespace, deployment string) {
-	guards, err := c.informer.GetIndexer().ByIndex(guardsByDeploymentIndex, namespace+"/"+deployment)
-	if err != nil {
-		c.logger.Warn("look up rollout guards for deployment", "namespace", namespace, "deployment", deployment, "error", err)
-		return
+func (r *RolloutGuardReconciler) guardsFor(ctx context.Context, namespace, deployment string) []reconcile.Request {
+	var guards attestav1.RolloutGuardList
+	if err := r.List(ctx, &guards, client.InNamespace(namespace),
+		client.MatchingFields{TargetDeploymentIndex: namespace + "/" + deployment}); err != nil {
+		logr.FromContextOrDiscard(ctx).Error(err, "look up rollout guards for deployment", "namespace", namespace, "deployment", deployment)
+		return nil
 	}
-	for _, obj := range guards {
-		c.enqueueObject(obj)
+	requests := make([]reconcile.Request, 0, len(guards.Items))
+	for _, g := range guards.Items {
+		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: g.Namespace, Name: g.Name}})
 	}
+	return requests
+}
+
+func (r *RolloutGuardReconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
 }
 
 // Reconcile evaluates one RolloutGuard against its Deployment.
 //
-// Rollback is deliberately narrow. It happens only when rollback is enabled,
-// the Deployment is Blocked at its observed generation, a healthy template has
-// been recorded, and the current template is not that healthy template. The
-// last rule is what stops the controller from rolling "back" to a bad revision
-// after its own rollback created a newer revision number.
-func (c *RolloutGuardController) Reconcile(ctx context.Context, key string) error {
-	namespace, _, err := cache.SplitMetaNamespaceKey(key)
-	if err != nil {
-		return err
+// Rollback is deliberately narrow. It happens only when rollback is enabled
+// and the Deployment consents, the Deployment is Blocked at its observed
+// generation, a healthy template has been recorded, and the current template
+// is not that healthy template. The last rule is what stops the controller
+// from rolling "back" to a bad revision after its own rollback created a
+// newer revision number.
+func (r *RolloutGuardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	result, err := r.reconcile(ctx, req)
+	if isStaleRead(err) {
+		// The cache or a write lost a race with another writer. Retry on a
+		// fresher view; this is routine, not a failure.
+		logr.FromContextOrDiscard(ctx).V(1).Info("requeue on a stale read", "error", err.Error())
+		return ctrl.Result{RequeueAfter: staleRequeue}, nil
 	}
-	// Reads come from the informer caches. A cache can trail the API server;
-	// writes carry resourceVersion preconditions so a decision made on a
-	// stale view fails with a conflict and is retried instead of applied.
-	obj, exists, err := c.informer.GetIndexer().GetByKey(key)
-	if err != nil {
-		return err
-	}
-	if !exists {
-		return nil
-	}
-	cached, ok := obj.(*unstructured.Unstructured)
-	if !ok {
-		return fmt.Errorf("rollout guard cache holds %T for %s", obj, key)
-	}
-	guard := cached.DeepCopy()
-	spec := rolloutGuardSpecFrom(guard)
-	prev := statusFromGuard(guard)
-	deploymentName := spec.DeploymentName(guard.GetName())
+	return result, err
+}
 
-	obj, exists, err = c.deployments.GetIndexer().GetByKey(namespace + "/" + deploymentName)
-	if err != nil {
-		return err
-	}
-	if !exists {
-		status := statusForMissingDeployment(prev, guard, spec, deploymentName)
-		return c.finish(ctx, guard, prev, status, nil)
-	}
-	cachedDeployment, ok := obj.(*appsv1.Deployment)
-	if !ok {
-		return fmt.Errorf("deployment cache holds %T for %s/%s", obj, namespace, deploymentName)
-	}
-	deployment := cachedDeployment.DeepCopy()
+// isStaleRead reports errors that mean "retry on a fresher view": an
+// optimistic-concurrency conflict on a write, or a ReplicaSet cache that has
+// not caught up with the Deployment.
+func isStaleRead(err error) bool {
+	return err != nil && (apierrors.IsConflict(err) || errors.Is(err, errCacheBehind))
+}
 
-	evaluation := EvaluateDeploymentRollout(deployment)
-	status := nextStatus(prev, guard, spec, deployment, evaluation)
+func (r *RolloutGuardReconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	var guard attestav1.RolloutGuard
+	if err := r.Get(ctx, req.NamespacedName, &guard); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	spec := rolloutGuardSpecFrom(&guard)
+	prev := statusFromGuard(&guard)
+	deploymentName := spec.DeploymentName(guard.Name)
+
+	var deployment appsv1.Deployment
+	err := r.Get(ctx, types.NamespacedName{Namespace: guard.Namespace, Name: deploymentName}, &deployment)
+	if apierrors.IsNotFound(err) {
+		status := statusForMissingDeployment(prev, &guard, spec, deploymentName)
+		return ctrl.Result{}, r.finish(ctx, &guard, prev, status, nil)
+	}
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	evaluation := EvaluateDeploymentRollout(&deployment)
+	status := nextStatus(prev, &guard, spec, &deployment, evaluation)
 	if spec.RollbackEnabled {
-		if rollbackAuthorized(deployment, guard.GetName()) {
+		if rollbackAuthorized(&deployment, guard.Name) {
 			status.SetCondition(ConditionRollbackAuthorized, metav1.ConditionTrue, "DeploymentConsents",
 				fmt.Sprintf("deployment %s lists this guard in %s", deployment.Name, rollbackGuardsAnnotation))
 		} else {
-			status.SetCondition(ConditionRollbackAuthorized, metav1.ConditionFalse, reasonNotAuthorized, notAuthorizedMessage(deployment, guard.GetName()))
+			status.SetCondition(ConditionRollbackAuthorized, metav1.ConditionFalse, reasonNotAuthorized, notAuthorizedMessage(&deployment, guard.Name))
 		}
 	} else {
 		meta.RemoveStatusCondition(&status.Conditions, ConditionRollbackAuthorized)
 	}
 
 	promote, blocked := evaluation.Healthy, evaluation.Blocked
-	requeueAfter, err := c.applyAnalysis(ctx, guard, spec, deployment, evaluation, &status, &promote, &blocked)
+	requeueAfter, err := r.applyAnalysis(ctx, &guard, spec, &deployment, evaluation, &status, &promote, &blocked)
 	if err != nil {
-		return err
+		return ctrl.Result{}, err
 	}
 
 	var actionErr error
 	switch {
 	case promote:
-		if err := c.recordHealthyRevision(ctx, deployment, &status); err != nil {
-			return err
+		if err := r.recordHealthyRevision(ctx, &deployment, &status); err != nil {
+			return ctrl.Result{}, err
 		}
 	case blocked && spec.RollbackEnabled:
-		actionErr = c.rollback(ctx, guard, deployment, &status)
+		actionErr = r.rollback(ctx, &guard, &deployment, &status)
 	}
-	if err := c.finish(ctx, guard, prev, status, actionErr); err != nil {
-		return err
+	if err := r.finish(ctx, &guard, prev, status, actionErr); err != nil {
+		return ctrl.Result{}, err
 	}
-	if requeueAfter > 0 {
-		// Keep analysing on schedule rather than waiting for the next event
-		// or resync.
-		c.queue.AddAfter(key, requeueAfter)
-	}
-	return nil
+	// Keep analysing on schedule rather than waiting for the next event or
+	// resync.
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
 // applyAnalysis runs metric analysis for the revision rolling out, if the
 // guard configures it. It can hold promotion (the rollout is complete but has
 // not passed enough checks) or block the rollout (enough consecutive
 // failures). It returns when to analyse next.
-func (c *RolloutGuardController) applyAnalysis(ctx context.Context, guard *unstructured.Unstructured, spec RolloutGuardSpec,
+func (r *RolloutGuardReconciler) applyAnalysis(ctx context.Context, guard *attestav1.RolloutGuard, spec RolloutGuardSpec,
 	deployment *appsv1.Deployment, evaluation RolloutEvaluation, status *RolloutGuardStatus, promote, blocked *bool) (time.Duration, error) {
 
 	cfg := analysisConfigFrom(guard, spec.ServiceLabel(deployment.Name))
@@ -476,7 +315,7 @@ func (c *RolloutGuardController) applyAnalysis(ctx context.Context, guard *unstr
 		status.Analysis = nil
 		status.SetCondition(ConditionAnalysis, metav1.ConditionFalse, "InvalidChecks", cfg.Err.Error())
 		return 0, nil
-	case c.prometheus == nil:
+	case r.Prometheus == nil:
 		status.Analysis = nil
 		status.SetCondition(ConditionAnalysis, metav1.ConditionFalse, "PrometheusNotConfigured",
 			"spec.checks is set but the controller has no --prometheus-url; only ProgressDeadlineExceeded is acted on")
@@ -489,7 +328,7 @@ func (c *RolloutGuardController) applyAnalysis(ctx context.Context, guard *unstr
 	// lists ReplicaSets only when the Deployment's generation has moved.
 	a := status.Analysis
 	if a == nil || a.CandidateGeneration != deployment.Generation {
-		current, _, err := c.ownedReplicaSets(ctx, deployment)
+		current, _, err := r.ownedReplicaSets(ctx, deployment)
 		if err != nil {
 			return 0, err
 		}
@@ -510,10 +349,10 @@ func (c *RolloutGuardController) applyAnalysis(ctx context.Context, guard *unstr
 	}
 	status.Analysis = a
 
-	now := c.now().UTC()
+	now := r.now().UTC()
 	last, err := time.Parse(time.RFC3339, a.LastCheckTime)
 	if err != nil || now.Sub(last) >= cfg.Interval {
-		result := analyze(ctx, c.prometheus, cfg, a.CandidateTemplateHash)
+		result := analyze(ctx, r.Prometheus, cfg, a.CandidateTemplateHash)
 		analysisTotal.WithLabelValues(result.Result).Inc()
 		a.LastCheckTime = now.Format(time.RFC3339)
 		a.LastResult, a.LastMessage = result.Result, result.Message
@@ -572,9 +411,14 @@ func analysisReason(result string) string {
 
 // finish writes the status if it changed, emits an event on phase or reason
 // transitions, and returns actionErr so failed actions are retried.
-func (c *RolloutGuardController) finish(ctx context.Context, guard *unstructured.Unstructured, prev, status RolloutGuardStatus, actionErr error) error {
+func (r *RolloutGuardReconciler) finish(ctx context.Context, guard *attestav1.RolloutGuard, prev, status RolloutGuardStatus, actionErr error) error {
 	if statusChanged(guard, status) {
-		if err := c.patchStatus(ctx, guard, status); err != nil {
+		updated := guard.DeepCopy()
+		updated.Status = status
+		// The update carries the resourceVersion of the cached read, so a
+		// stale view never overwrites newer status such as a just-recorded
+		// rollback.
+		if err := r.Status().Update(ctx, updated); err != nil {
 			return errors.Join(actionErr, err)
 		}
 	}
@@ -584,17 +428,14 @@ func (c *RolloutGuardController) finish(ctx context.Context, guard *unstructured
 		case PhaseBlocked, PhaseRolledBack, PhaseRollbackFailed:
 			eventType = corev1.EventTypeWarning
 		}
-		c.recorder.Event(guard, eventType, status.Reason, status.Message)
+		if r.Recorder != nil {
+			r.Recorder.Eventf(guard, nil, eventType, status.Reason, "Reconcile", "%s", status.Message)
+		}
 		if status.Phase != prev.Phase {
 			phaseTransitions.WithLabelValues(status.Phase).Inc()
 		}
-		c.logger.Info("rollout guard transition",
-			"namespace", guard.GetNamespace(),
-			"name", guard.GetName(),
-			"deployment", status.DeploymentRef,
-			"phase", status.Phase,
-			"reason", status.Reason,
-		)
+		logr.FromContextOrDiscard(ctx).Info("rollout guard transition",
+			"deployment", status.DeploymentRef, "phase", status.Phase, "reason", status.Reason)
 	}
 	return actionErr
 }
@@ -602,11 +443,11 @@ func (c *RolloutGuardController) finish(ctx context.Context, guard *unstructured
 // recordHealthyRevision remembers the template of a fully rolled out
 // Deployment. It lists ReplicaSets only when the Deployment's generation has
 // moved since the last recorded healthy state.
-func (c *RolloutGuardController) recordHealthyRevision(ctx context.Context, deployment *appsv1.Deployment, status *RolloutGuardStatus) error {
+func (r *RolloutGuardReconciler) recordHealthyRevision(ctx context.Context, deployment *appsv1.Deployment, status *RolloutGuardStatus) error {
 	if status.HealthyGeneration == deployment.Generation && status.HealthyTemplateHash != "" {
 		return nil
 	}
-	current, _, err := c.ownedReplicaSets(ctx, deployment)
+	current, _, err := r.ownedReplicaSets(ctx, deployment)
 	if err != nil {
 		return err
 	}
@@ -629,14 +470,14 @@ func (c *RolloutGuardController) recordHealthyRevision(ctx context.Context, depl
 // rollback restores the last recorded healthy template. It returns an error
 // only for failures worth retrying; decisions not to act are recorded in the
 // status and return nil.
-func (c *RolloutGuardController) rollback(ctx context.Context, guard *unstructured.Unstructured, deployment *appsv1.Deployment, status *RolloutGuardStatus) error {
+func (r *RolloutGuardReconciler) rollback(ctx context.Context, guard *attestav1.RolloutGuard, deployment *appsv1.Deployment, status *RolloutGuardStatus) error {
 	cause, causeMessage := status.Reason, status.Message
-	if !rollbackAuthorized(deployment, guard.GetName()) {
+	if !rollbackAuthorized(deployment, guard.Name) {
 		// The controller can update any Deployment it watches. Acting for a
 		// guard the Deployment never named would let anyone who can create a
 		// guard rewrite a Deployment they have no rights on.
 		status.Reason = reasonNotAuthorized
-		status.Message = notAuthorizedMessage(deployment, guard.GetName())
+		status.Message = notAuthorizedMessage(deployment, guard.Name)
 		status.SetCondition(ConditionRolledBack, metav1.ConditionFalse, reasonNotAuthorized, status.Message)
 		rollbackTotal.WithLabelValues("skipped_not_authorized").Inc()
 		return nil
@@ -649,7 +490,7 @@ func (c *RolloutGuardController) rollback(ctx context.Context, guard *unstructur
 		return nil
 	}
 
-	current, replicaSets, err := c.ownedReplicaSets(ctx, deployment)
+	current, replicaSets, err := r.ownedReplicaSets(ctx, deployment)
 	if err != nil {
 		return err
 	}
@@ -710,11 +551,11 @@ func (c *RolloutGuardController) rollback(ctx context.Context, guard *unstructur
 	}
 	updated.Annotations[rollbackFromAnnotation] = fromRevision
 	updated.Annotations[rollbackToAnnotation] = toRevision
-	updated.Annotations[rollbackAtAnnotation] = time.Now().UTC().Format(time.RFC3339)
-	updated.Annotations[rollbackGuardAnnotation] = guard.GetName()
+	updated.Annotations[rollbackAtAnnotation] = r.now().UTC().Format(time.RFC3339)
+	updated.Annotations[rollbackGuardAnnotation] = guard.Name
 	updated.Annotations[rollbackReasonAnnotation] = cause
 
-	if _, err := c.kube.AppsV1().Deployments(deployment.Namespace).Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
+	if err := r.Update(ctx, updated); err != nil {
 		if apierrors.IsConflict(err) {
 			// The Deployment changed after the cached read this decision was
 			// made on. Leave the status as evaluated and decide again on the
@@ -744,26 +585,27 @@ func (c *RolloutGuardController) rollback(ctx context.Context, guard *unstructur
 
 // ownedReplicaSets returns the Deployment's ReplicaSets that carry a revision,
 // and the one with the highest revision, which is the Deployment's current
-// template. It reads the ReplicaSet cache, and returns errCacheBehind when the
-// cache has not seen the revision the Deployment reports yet.
-func (c *RolloutGuardController) ownedReplicaSets(_ context.Context, deployment *appsv1.Deployment) (*appsv1.ReplicaSet, []appsv1.ReplicaSet, error) {
-	objs, err := c.replicaSets.GetIndexer().ByIndex(replicaSetsByOwnerIndex, string(deployment.UID))
-	if err != nil {
+// template. It reads the cache, and returns errCacheBehind when the cache has
+// not seen the revision the Deployment reports yet.
+func (r *RolloutGuardReconciler) ownedReplicaSets(ctx context.Context, deployment *appsv1.Deployment) (*appsv1.ReplicaSet, []appsv1.ReplicaSet, error) {
+	var list appsv1.ReplicaSetList
+	if err := r.List(ctx, &list, client.InNamespace(deployment.Namespace),
+		client.MatchingFields{OwnerIndex: string(deployment.UID)}); err != nil {
 		return nil, nil, err
 	}
 	var owned []appsv1.ReplicaSet
 	currentIndex := -1
 	var currentRevision int64 = -1
-	for _, obj := range objs {
-		rs, ok := obj.(*appsv1.ReplicaSet)
-		if !ok || rs.Namespace != deployment.Namespace || !isOwnedByDeployment(rs.OwnerReferences, deployment.UID) {
+	for i := range list.Items {
+		rs := &list.Items[i]
+		if !isOwnedByDeployment(rs.OwnerReferences, deployment.UID) {
 			continue
 		}
 		revision, ok := parseRevision(rs.Annotations)
 		if !ok {
 			continue
 		}
-		owned = append(owned, *rs.DeepCopy())
+		owned = append(owned, *rs)
 		if revision > currentRevision {
 			currentRevision = revision
 			currentIndex = len(owned) - 1
@@ -777,53 +619,6 @@ func (c *RolloutGuardController) ownedReplicaSets(_ context.Context, deployment 
 		return nil, owned, nil
 	}
 	return &owned[currentIndex], owned, nil
-}
-
-// nullRemoved sets to nil every key of current that next lacks, recursing
-// into maps present in both, so a JSON merge patch of next removes them.
-func nullRemoved(current, next map[string]any) {
-	for key, old := range current {
-		value, ok := next[key]
-		if !ok {
-			next[key] = nil
-			continue
-		}
-		oldMap, wasMap := old.(map[string]any)
-		newMap, isMap := value.(map[string]any)
-		if wasMap && isMap {
-			nullRemoved(oldMap, newMap)
-		}
-	}
-}
-
-func (c *RolloutGuardController) patchStatus(ctx context.Context, guard *unstructured.Unstructured, status RolloutGuardStatus) error {
-	next := statusMap(status)
-	// A merge patch keeps keys it does not mention, at every level. Null out
-	// keys the new status no longer has: fields written by older versions,
-	// and zero values the API types omit, such as a counter reset to 0
-	// inside status.analysis.
-	current, _, _ := unstructured.NestedMap(guard.Object, "status")
-	nullRemoved(current, next)
-	body := map[string]any{"status": next}
-	if rv := guard.GetResourceVersion(); rv != "" {
-		// Precondition: fail with a conflict if the guard changed since the
-		// cached read, so a stale view never overwrites newer status such
-		// as a just-recorded rollback.
-		body["metadata"] = map[string]any{"resourceVersion": rv}
-	}
-	payload, err := json.Marshal(body)
-	if err != nil {
-		return err
-	}
-	_, err = c.dynamic.Resource(rolloutGuardGVR).Namespace(guard.GetNamespace()).Patch(
-		ctx,
-		guard.GetName(),
-		types.MergePatchType,
-		payload,
-		metav1.PatchOptions{},
-		"status",
-	)
-	return err
 }
 
 // rollbackAuthorized reports whether the Deployment names the guard in its

@@ -4,6 +4,15 @@ All notable changes to Attesta. The format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+### Changed
+
+- The controller runs on controller-runtime (v0.25): typed `api/v1` objects, the manager's cache, field indexes, leader election that releases the Lease only after reconciles stop, health probes and metrics. Its reconcile metrics are now controller-runtime's (`controller_runtime_reconcile_*`, `workqueue_*`); `attesta_rolloutguard_reconcile_total` and `_duration_seconds` are gone. Events are written through events.k8s.io/v1; add that API group to custom RBAC.
+- The controller has an envtest suite: a real API server and etcd with the generated CRDs, run in CI.
+
+### Removed
+
+- `POST /api/v1/services/{name}/health-gate` and `attesta health-gate`. No endpoint acts on health numbers sent by a caller; the controller measures canaries from Prometheus.
+
 ## [0.1.0] - 2026-11-24
 
 The first tagged release. It is the result of a production-readiness audit of the earlier prototype; each change is a separate commit on `main`, most named by their audit finding.

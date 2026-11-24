@@ -2,271 +2,151 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"sync"
 	"testing"
-	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	appsv1 "k8s.io/api/apps/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	dynamicfake "k8s.io/client-go/dynamic/fake"
-	kubefake "k8s.io/client-go/kubernetes/fake"
-	k8stesting "k8s.io/client-go/testing"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+
+	attestav1 "github.com/gaurav-gs7/attesta/api/v1"
 )
 
 // Audit C-7: Deployment and ReplicaSet events find their guards through the
-// informer index. Handlers make no API calls.
-func TestDeploymentEventsUseTheGuardIndex(t *testing.T) {
+// cache index, not by listing every guard.
+func TestEventsMapToTheTargetingGuardOnly(t *testing.T) {
 	h := newHarness(t, nil, nil)
-	other := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "attesta.io/v1", "kind": "RolloutGuard",
-		"metadata": map[string]any{"name": "billing-rollout", "namespace": testNamespace},
-		"spec":     map[string]any{"deploymentRef": "billing"},
-	}}
-	if _, err := h.dyn.Resource(rolloutGuardGVR).Namespace(testNamespace).Create(h.ctx, other, metav1.CreateOptions{}); err != nil {
+	other := &attestav1.RolloutGuard{
+		ObjectMeta: metav1.ObjectMeta{Name: "billing-rollout", Namespace: testNamespace},
+		Spec:       attestav1.RolloutGuardSpec{DeploymentRef: "billing"},
+	}
+	if err := h.c.Create(h.ctx, other); err != nil {
 		t.Fatal(err)
 	}
-	h.syncCaches()
-	h.dyn.ClearActions()
-	h.kube.ClearActions()
-
-	h.ctrl.enqueueDeployment(h.deploymentFromCache())
-	if got := h.ctrl.queue.Len(); got != 1 {
-		t.Fatalf("queue length = %d, want 1 (only the guard targeting payments-api)", got)
+	want := ctrl.Request{NamespacedName: testGuardKey}
+	if got := h.r.guardsForDeployment(h.ctx, h.deployment()); len(got) != 1 || got[0] != want {
+		t.Fatalf("deployment event mapped to %v, want only %v", got, want)
 	}
-	key, _ := h.ctrl.queue.Get()
-	h.ctrl.queue.Done(key)
-	if key != testGuardKey {
-		t.Fatalf("queued %q, want %q", key, testGuardKey)
+	if got := h.r.guardsForReplicaSet(h.ctx, replicaSet("payments-api-h2", 2, "h2", "payments-api:v2")); len(got) != 1 || got[0] != want {
+		t.Fatalf("replicaset event mapped to %v, want only %v", got, want)
 	}
-
-	rs := replicaSet("payments-api-h2", 2, "h2", "payments-api:v2")
-	h.ctrl.enqueueReplicaSetOwner(rs)
-	if got := h.ctrl.queue.Len(); got != 1 {
-		t.Fatalf("replicaset event queued %d guards, want 1", got)
-	}
-
-	if n := len(h.dyn.Actions()) + len(h.kube.Actions()); n != 0 {
-		t.Fatalf("event handlers made %d API calls, want 0: %v %v", n, h.dyn.Actions(), h.kube.Actions())
+	orphan := replicaSet("x", 1, "x", "x")
+	orphan.OwnerReferences = nil
+	if got := h.r.guardsForReplicaSet(h.ctx, orphan); len(got) != 0 {
+		t.Fatalf("a ReplicaSet without a Deployment owner mapped to %v", got)
 	}
 }
 
-func (h *harness) deploymentFromCache() *appsv1.Deployment {
-	h.t.Helper()
-	obj, ok, err := h.ctrl.deployments.GetIndexer().GetByKey(testNamespace + "/payments-api")
-	if err != nil || !ok {
-		h.t.Fatalf("deployment not cached: ok=%v err=%v", ok, err)
+func TestReplicaSetStatusChurnIsFiltered(t *testing.T) {
+	p := replicaSetIdentityPredicate()
+	old := replicaSet("payments-api-h1", 1, "h1", "payments-api:v1")
+	old.ResourceVersion = "1"
+	churn := old.DeepCopy()
+	churn.ResourceVersion = "2"
+	churn.Status.ReadyReplicas = 3
+	if p.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: churn}) {
+		t.Fatal("a status-only ReplicaSet change triggered a reconcile")
 	}
-	return obj.(*appsv1.Deployment)
-}
-
-func TestReplicaSetStatusChurnDoesNotEnqueue(t *testing.T) {
-	prev := replicaSet("payments-api-h1", 1, "h1", "payments-api:v1")
-	prev.ResourceVersion = "10"
-	next := prev.DeepCopy()
-	next.ResourceVersion = "11"
-	next.Status.ReadyReplicas = 2
-	if replicaSetIdentityChanged(prev, next) {
-		t.Fatal("a status-only ReplicaSet update should not enqueue")
+	resync := old.DeepCopy()
+	if p.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: resync}) {
+		t.Fatal("a ReplicaSet resync triggered a reconcile; the Deployment resync covers it")
 	}
-	next.Annotations[revisionAnnotation] = "3"
-	if !replicaSetIdentityChanged(prev, next) {
-		t.Fatal("a revision change must enqueue")
+	moved := old.DeepCopy()
+	moved.ResourceVersion = "3"
+	moved.Annotations[revisionAnnotation] = "4"
+	if !p.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: moved}) {
+		t.Fatal("a new revision did not trigger a reconcile")
 	}
 }
 
-// A Deployment that reports a revision the ReplicaSet cache has not seen must
-// not be acted on: the newest cached ReplicaSet would be mistaken for the
-// current template.
+func TestGuardResyncsPassButStatusWritesDoNot(t *testing.T) {
+	p := resyncPredicate()
+	g := &attestav1.RolloutGuard{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "5", Generation: 1}}
+	if !p.Update(event.UpdateEvent{ObjectOld: g, ObjectNew: g.DeepCopy()}) {
+		t.Fatal("a periodic resync was filtered")
+	}
+	statusWrite := g.DeepCopy()
+	statusWrite.ResourceVersion = "6"
+	if p.Update(event.UpdateEvent{ObjectOld: g, ObjectNew: statusWrite}) {
+		t.Fatal("the controller's own status write passed the resync predicate")
+	}
+}
+
+// An informer can deliver a Deployment at revision 2 before the ReplicaSet
+// cache has seen ReplicaSet revision 2. Acting then would mistake the newest
+// cached ReplicaSet for the current template.
 func TestReconcileWaitsForReplicaSetCache(t *testing.T) {
 	h := newHarness(t, map[string]any{"enabled": true}, nil)
 	h.mustReconcile()
 	h.startBadRollout()
-	h.syncCaches()
-	if err := h.ctrl.replicaSets.GetIndexer().Delete(h.replicaSetFromCache("payments-api-h2")); err != nil {
+	// The cache has not seen ReplicaSet h2 yet.
+	h2 := h.replicaSet("payments-api-h2")
+	if err := h.c.Delete(h.ctx, h2); err != nil {
 		t.Fatal(err)
 	}
-	h.kube.ClearActions()
+	updatesBefore := h.deploymentUpdates()
 
-	err := h.ctrl.Reconcile(h.ctx, testGuardKey)
+	err := h.reconcile()
 	if !errors.Is(err, errCacheBehind) {
 		t.Fatalf("expected errCacheBehind, got %v", err)
 	}
-	if got := h.deploymentUpdates(); got != 0 {
+	if got := h.deploymentUpdates() - updatesBefore; got != 0 {
 		t.Fatalf("rolled back on a stale ReplicaSet view: %d deployment updates", got)
 	}
-	h.mustReconcile() // caches caught up
+	res, err := h.r.Reconcile(h.ctx, ctrl.Request{NamespacedName: testGuardKey})
+	if err != nil || res.RequeueAfter != staleRequeue {
+		t.Fatalf("stale cache: result %+v, error %v; want a quiet requeue", res, err)
+	}
+	h2.ResourceVersion = ""
+	h.addReplicaSet(h2) // the cache caught up
+	h.mustReconcile()
 	if h.image() != "payments-api:v1" {
 		t.Fatalf("image = %s after the cache caught up, want payments-api:v1", h.image())
 	}
 }
 
-func (h *harness) replicaSetFromCache(name string) any {
-	h.t.Helper()
-	obj, ok, err := h.ctrl.replicaSets.GetIndexer().GetByKey(testNamespace + "/" + name)
-	if err != nil || !ok {
-		h.t.Fatalf("replicaset %s not cached", name)
-	}
-	return obj
-}
-
-// The status patch carries the cached resourceVersion, so a reconcile working
-// from a stale guard gets a conflict instead of overwriting newer status.
-func TestStatusPatchCarriesResourceVersionPrecondition(t *testing.T) {
-	h := newHarness(t, nil, map[string]any{"metadata": map[string]any{
-		"name": "payments-api-rollout", "namespace": testNamespace, "generation": int64(1), "resourceVersion": "42",
-	}})
-	var payload []byte
-	h.dyn.PrependReactor("patch", "rolloutguards", func(a k8stesting.Action) (bool, runtime.Object, error) {
-		payload = a.(k8stesting.PatchAction).GetPatch()
-		return false, nil, nil
-	})
-	h.mustReconcile()
-	var body struct {
-		Metadata struct {
-			ResourceVersion string `json:"resourceVersion"`
-		} `json:"metadata"`
-	}
-	if err := json.Unmarshal(payload, &body); err != nil {
-		t.Fatalf("decode patch %s: %v", payload, err)
-	}
-	if body.Metadata.ResourceVersion != "42" {
-		t.Fatalf("status patch precondition = %q, want 42: %s", body.Metadata.ResourceVersion, payload)
-	}
-}
-
-// Steady state against informers: resyncs reconcile every guard, but after
-// the initial LIST and WATCH the controller makes no reads at all.
-func TestSteadyStateMakesNoReads(t *testing.T) {
-	if testing.Short() {
-		t.Skip("runs informers through several one-second resyncs")
-	}
-	guard := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "attesta.io/v1", "kind": "RolloutGuard",
-		"metadata": map[string]any{"name": "payments-api-rollout", "namespace": testNamespace, "generation": int64(1)},
-		"spec":     map[string]any{"serviceRef": "payments-api"},
-	}}
-	kube := kubefake.NewSimpleClientset(
-		healthyDeployment(1, "payments-api:v1"),
-		replicaSet("payments-api-h1", 1, "h1", "payments-api:v1"),
-	)
-	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
-		map[schema.GroupVersionResource]string{rolloutGuardGVR: "RolloutGuardList"}, guard)
-	ctrl := NewRolloutGuardControllerWithClients(kube, dyn, Options{Recorder: record.NewFakeRecorder(100), Resync: time.Second})
-
-	before := successfulReconciles(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- ctrl.Run(ctx, 1) }()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		// Read the tracker directly so the poll is not recorded as an action.
-		obj, err := dyn.Tracker().Get(rolloutGuardGVR, testNamespace, "payments-api-rollout")
-		if u, ok := obj.(*unstructured.Unstructured); err == nil && ok && u.Object["status"] != nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			cancel()
-			t.Fatal("guard was never reconciled")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	// client-go clamps informer resync to at least one second.
-	time.Sleep(3500 * time.Millisecond)
-	cancel()
-	if err := <-done; err != nil {
+// The status update carries the resourceVersion of the read it was decided
+// on, so a reconcile working from a stale guard gets a conflict instead of
+// overwriting newer status.
+func TestStatusUpdateFailsOnAStaleGuard(t *testing.T) {
+	h := newHarness(t, map[string]any{"enabled": true}, nil)
+	stale := &staleGuardClient{Client: h.c}
+	h.r.Client = stale
+	stale.snapshot(h.ctx, t)
+	// Another writer changes the guard after the snapshot.
+	g := h.guard()
+	g.Labels = map[string]string{"touched": "yes"}
+	if err := h.c.Update(h.ctx, g); err != nil {
 		t.Fatal(err)
 	}
-
-	reads := map[string]int{}
-	for _, a := range append(kube.Actions(), dyn.Actions()...) {
-		switch a.GetVerb() {
-		case "get", "list":
-			reads[a.GetVerb()+" "+a.GetResource().Resource]++
-		}
-	}
-	want := map[string]int{"list rolloutguards": 1, "list deployments": 1, "list replicasets": 1}
-	if reconciles := successfulReconciles(t) - before; reconciles < 3 {
-		t.Fatalf("only %v reconciles ran; resyncs did not drive the controller", reconciles)
-	}
-	for k, v := range reads {
-		if want[k] != v {
-			t.Fatalf("reads = %v, want only the initial lists %v", reads, want)
-		}
+	err := h.reconcile()
+	if !apierrors.IsConflict(err) {
+		t.Fatalf("status write from a stale guard: %v, want a conflict", err)
 	}
 }
 
-func successfulReconciles(t *testing.T) float64 {
-	t.Helper()
-	reg := prometheus.NewRegistry()
-	reg.MustRegister(reconcileTotal)
-	families, err := reg.Gather()
-	if err != nil {
+// staleGuardClient serves the guard as it was when snapshot was called, the
+// way a cache that has not seen the latest write would.
+type staleGuardClient struct {
+	client.Client
+	guard *attestav1.RolloutGuard
+}
+
+func (s *staleGuardClient) snapshot(ctx context.Context, t *testing.T) {
+	var g attestav1.RolloutGuard
+	if err := s.Client.Get(ctx, testGuardKey, &g); err != nil {
 		t.Fatal(err)
 	}
-	for _, mf := range families {
-		for _, m := range mf.GetMetric() {
-			for _, l := range m.GetLabel() {
-				if l.GetName() == "result" && l.GetValue() == "success" {
-					return m.GetCounter().GetValue()
-				}
-			}
-		}
-	}
-	return 0
+	s.guard = &g
 }
 
-// Audit C-10: Run returns only after in-flight reconciles finish, so the
-// caller can hand leadership over without two replicas overlapping.
-func TestRunWaitsForInFlightReconcile(t *testing.T) {
-	guard := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "attesta.io/v1", "kind": "RolloutGuard",
-		"metadata": map[string]any{"name": "payments-api-rollout", "namespace": testNamespace, "generation": int64(1)},
-		"spec":     map[string]any{"serviceRef": "payments-api"},
-	}}
-	kube := kubefake.NewSimpleClientset(
-		healthyDeployment(1, "payments-api:v1"),
-		replicaSet("payments-api-h1", 1, "h1", "payments-api:v1"),
-	)
-	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
-		map[schema.GroupVersionResource]string{rolloutGuardGVR: "RolloutGuardList"}, guard)
-	entered, release := make(chan struct{}), make(chan struct{})
-	var once sync.Once
-	dyn.PrependReactor("patch", "rolloutguards", func(k8stesting.Action) (bool, runtime.Object, error) {
-		once.Do(func() { close(entered) })
-		<-release // a status write that is slow to return
-		return false, nil, nil
-	})
-	ctrl := NewRolloutGuardControllerWithClients(kube, dyn, Options{Recorder: record.NewFakeRecorder(100)})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- ctrl.Run(ctx, 1) }()
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("reconcile never reached the status patch")
+func (s *staleGuardClient) Get(ctx context.Context, key types.NamespacedName, obj client.Object, opts ...client.GetOption) error {
+	if g, ok := obj.(*attestav1.RolloutGuard); ok && key == testGuardKey && s.guard != nil {
+		s.guard.DeepCopyInto(g)
+		return nil
 	}
-	cancel()
-	select {
-	case err := <-done:
-		t.Fatalf("Run returned (%v) while a reconcile was still in flight", err)
-	case <-time.After(300 * time.Millisecond):
-	}
-	close(release)
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Run did not return after the reconcile finished")
-	}
+	return s.Client.Get(ctx, key, obj, opts...)
 }

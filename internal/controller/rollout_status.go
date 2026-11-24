@@ -1,17 +1,14 @@
 package controller
 
 import (
-	"encoding/json"
 	"fmt"
-	"reflect"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 
 	attestav1 "github.com/gaurav-gs7/attesta/api/v1"
 )
@@ -85,31 +82,20 @@ type (
 	AnalysisStatus     = attestav1.AnalysisStatus
 )
 
-func rolloutGuardSpecFrom(guard *unstructured.Unstructured) RolloutGuardSpec {
-	serviceRef, _, _ := unstructured.NestedString(guard.Object, "spec", "serviceRef")
-	deploymentRef, _, _ := unstructured.NestedString(guard.Object, "spec", "deploymentRef")
-	strategy, _, _ := unstructured.NestedString(guard.Object, "spec", "strategy")
-	// Rollback rewrites a Deployment's pod template, so it is opt-in: a guard
-	// without spec.rollback.enabled only reports.
-	rollbackEnabled, _, _ := unstructured.NestedBool(guard.Object, "spec", "rollback", "enabled")
+func rolloutGuardSpecFrom(guard *attestav1.RolloutGuard) RolloutGuardSpec {
 	return RolloutGuardSpec{
-		ServiceRef:      serviceRef,
-		DeploymentRef:   deploymentRef,
-		Strategy:        strategy,
-		RollbackEnabled: rollbackEnabled,
+		ServiceRef:    guard.Spec.ServiceRef,
+		DeploymentRef: guard.Spec.DeploymentRef,
+		Strategy:      guard.Spec.Strategy,
+		// Rollback rewrites a Deployment's pod template, so it is opt-in: a
+		// guard without spec.rollback.enabled only reports.
+		RollbackEnabled: guard.Spec.Rollback != nil && guard.Spec.Rollback.Enabled,
 	}
 }
 
-// statusFromGuard loads the status the controller wrote on a previous pass.
-// A status that does not decode (written by hand, or by a version before
-// the schema) is dropped and rebuilt rather than failing the reconcile.
-func statusFromGuard(guard *unstructured.Unstructured) RolloutGuardStatus {
-	var s RolloutGuardStatus
-	if raw, found, _ := unstructured.NestedMap(guard.Object, "status"); found {
-		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(raw, &s); err != nil {
-			s = RolloutGuardStatus{}
-		}
-	}
+// statusFromGuard is the status the controller wrote on a previous pass.
+func statusFromGuard(guard *attestav1.RolloutGuard) RolloutGuardStatus {
+	s := *guard.Status.DeepCopy()
 	// "Reconciled" was always True and carried no information; drop it from
 	// objects written by older controller versions.
 	meta.RemoveStatusCondition(&s.Conditions, "Reconciled")
@@ -176,9 +162,9 @@ func EvaluateDeploymentRollout(deployment *appsv1.Deployment) RolloutEvaluation 
 
 // nextStatus carries persistent fields over from the previous status and
 // applies the current evaluation.
-func nextStatus(prev RolloutGuardStatus, guard *unstructured.Unstructured, spec RolloutGuardSpec, deployment *appsv1.Deployment, evaluation RolloutEvaluation) RolloutGuardStatus {
+func nextStatus(prev RolloutGuardStatus, guard *attestav1.RolloutGuard, spec RolloutGuardSpec, deployment *appsv1.Deployment, evaluation RolloutEvaluation) RolloutGuardStatus {
 	s := prev
-	s.ObservedGeneration = guard.GetGeneration()
+	s.ObservedGeneration = guard.Generation
 	s.DeploymentGeneration = deployment.Generation
 	s.Phase = evaluation.Phase
 	s.Reason = evaluation.Reason
@@ -206,9 +192,9 @@ func nextStatus(prev RolloutGuardStatus, guard *unstructured.Unstructured, spec 
 	return s
 }
 
-func statusForMissingDeployment(prev RolloutGuardStatus, guard *unstructured.Unstructured, spec RolloutGuardSpec, deploymentName string) RolloutGuardStatus {
+func statusForMissingDeployment(prev RolloutGuardStatus, guard *attestav1.RolloutGuard, spec RolloutGuardSpec, deploymentName string) RolloutGuardStatus {
 	s := prev
-	s.ObservedGeneration = guard.GetGeneration()
+	s.ObservedGeneration = guard.Generation
 	s.DeploymentGeneration = 0
 	s.Phase = PhaseBlocked
 	s.Reason = "DeploymentMissing"
@@ -224,35 +210,8 @@ func statusForMissingDeployment(prev RolloutGuardStatus, guard *unstructured.Uns
 	return s
 }
 
-// statusMap is status as the object stores it.
-func statusMap(status RolloutGuardStatus) map[string]any {
-	m, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&status)
-	if err != nil {
-		// Only unsupported Go types fail, and the status has none.
-		panic(fmt.Sprintf("encode RolloutGuard status: %v", err))
-	}
-	return m
-}
-
-// statusChanged reports whether writing next would change the stored status.
-// Both sides are normalised through JSON so typed and unstructured values
-// compare equal.
-func statusChanged(guard *unstructured.Unstructured, next RolloutGuardStatus) bool {
-	current, _, _ := unstructured.NestedMap(guard.Object, "status")
-	return !reflect.DeepEqual(normalizeJSON(current), normalizeJSON(statusMap(next)))
-}
-
-func normalizeJSON(value any) any {
-	raw, err := json.Marshal(value)
-	if err != nil {
-		return value
-	}
-	var out any
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return value
-	}
-	if m, ok := out.(map[string]any); ok && len(m) == 0 {
-		return nil
-	}
-	return out
+// statusChanged reports whether writing next would change the stored
+// status.
+func statusChanged(guard *attestav1.RolloutGuard, next RolloutGuardStatus) bool {
+	return !equality.Semantic.DeepEqual(guard.Status, next)
 }
