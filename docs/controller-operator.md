@@ -68,7 +68,7 @@ spec:
 
 `ProgressDeadlineExceeded` still blocks a rollout with or without analysis. It is debounced by the Deployment's `progressDeadlineSeconds` (600 s by default).
 
-Not implemented: traffic shifting. `spec.steps` is accepted but not used, so the whole Deployment rolls out and analysis judges the new revision's pods as they take traffic.
+**Not a canary.** Attesta does not shift traffic. `spec.strategy` (`rolling`, `canary`, `blue-green`) is a label the controller records and reports; it behaves the same for each. The Deployment does a standard rolling update, analysis judges the new revision's pods as they take their share of traffic, and a failing revision is rolled back. That share is whatever the rolling update has reached, not a chosen percentage, so with `maxSurge: 1` on ten replicas the first checks see about a tenth of traffic, and a fast rollout can finish before `successfulChecks` passes: the revision then stays `Verifying` until it does, and is rolled back if it fails. For weighted steps and traffic splitting, use Argo Rollouts or Flagger; `spec.steps` is ignored and deprecated.
 
 If an Argo CD Application with `selfHeal: true` manages the same Deployment, Argo CD reverts the controller's rollback to the version in Git; the controller then reports `RollbackReverted` and stands down. The Argo CD Application that `attesta service init` generates turns self-heal off when rollback is enabled. See [Who owns the pod template](architecture.md#who-owns-the-pod-template).
 

@@ -58,9 +58,9 @@ An admission webhook that runs a SubjectAccessReview for the guard's creator was
 
 Incidents open from Alertmanager's webhook or a JSON call. Opening an incident evaluates the SLOs, reads the controller's decisions for the service's guards from the previous 2 hours, and builds a timeline from those records, the alert and the evaluation. The latest revision the controller promoted in that window is named as a rollback candidate and labelled as a correlation. Without cluster access the timeline says the decisions were not read. The postmortem draft marks the cause and follow-ups as TODO.
 
-### Rollback requests
+### No caller-supplied health
 
-No endpoint accepts health numbers from a caller; canary health is measured by the controller. Rollback endpoints record a `rollback-requested` entry. Acting on that request is left to deployment tooling or to the controller.
+No endpoint accepts health numbers from a caller, and none starts, pauses or rolls back anything. Revision health is measured by the controller from Prometheus; the API reads the decisions it recorded.
 
 ### Readiness score
 

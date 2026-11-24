@@ -23,6 +23,10 @@ All notable changes to Attesta. The format follows [Keep a Changelog](https://ke
 - The controller runs on controller-runtime (v0.25): typed `api/v1` objects, the manager's cache, field indexes, leader election that releases the Lease only after reconciles stop, health probes and metrics. Its reconcile metrics are now controller-runtime's (`controller_runtime_reconcile_*`, `workqueue_*`); `attesta_rolloutguard_reconcile_total` and `_duration_seconds` are gone. Events are written through events.k8s.io/v1; add that API group to custom RBAC.
 - The controller has an envtest suite: a real API server and etcd with the generated CRDs, run in CI.
 
+### Deprecated
+
+- `RolloutGuard.spec.steps`. It is ignored, as it always was, and will be removed. Attesta does not shift traffic; `spec.strategy` is a label. The generated `rollout.yaml` no longer writes steps.
+
 ### Removed
 
 - The API's rollout records: `POST /api/v1/services/{name}/rollouts`, `GET .../rollouts/{id}`, its pause, resume, complete and rollback transitions, `POST /api/v1/services/{name}/rollback` and `GET .../deployments`, and the CLI's `rollback`, `deployments` and `rollout` commands. They recorded requests and changed nothing in the cluster, so the API's account of a service could differ from what the controller did. Onboarding no longer writes an invented "v0.1.0 generated" deployment. Migration 6 drops the `rollouts` and `deployments` tables; export them first if you want those request records. The `operator` role now covers incidents and alerts only.

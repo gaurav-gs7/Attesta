@@ -43,13 +43,15 @@ type RolloutGuardSpec struct {
 	// +optional
 	// +kubebuilder:validation:MaxLength=253
 	DeploymentRef string `json:"deploymentRef,omitempty"`
-	// Strategy is recorded and reported; the controller acts the same for
-	// every strategy.
+	// Strategy is a label, recorded and reported, nothing more. Attesta
+	// does not shift traffic: whatever the strategy, the Deployment does a
+	// standard rolling update, and the controller judges the new revision's
+	// pods as they take their share of traffic.
 	// +optional
 	// +kubebuilder:validation:Enum=rolling;canary;blue-green
 	Strategy string `json:"strategy,omitempty"`
-	// Steps are recorded for planned traffic shifting. The controller does
-	// not use them.
+	// Steps are ignored. Deprecated: they described traffic shifting that
+	// Attesta does not do, and will be removed from the API.
 	// +optional
 	// +kubebuilder:validation:MaxItems=20
 	Steps []RolloutStep `json:"steps,omitempty"`

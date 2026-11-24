@@ -5,20 +5,11 @@ metadata:
   namespace: {{ .Service.Namespace }}
 spec:
   serviceRef: {{ .Service.Name }}
+  # strategy is a label: Attesta does not shift traffic. The Deployment does
+  # a standard rolling update; the controller judges the new revision's pods
+  # on the checks below (with --prometheus-url) and on the progress deadline,
+  # and rolls back when they fail. See docs/controller-operator.md.
   strategy: {{ .Service.DeploymentStrategy }}
-  # steps are recorded for planned traffic shifting; the controller does not
-  # use them. It rolls back on ProgressDeadlineExceeded and, when the
-  # controller runs with --prometheus-url, on the metric checks below.
-  # See docs/controller-operator.md.
-  steps:
-    - weight: 10
-      duration: 2m
-    - weight: 25
-      duration: 5m
-    - weight: 50
-      duration: 5m
-    - weight: 100
-      duration: 0m
   checks:
     # Thresholds from the service's registered SLO, applied to the new
     # revision only (its pod_template_hash label, added by the ServiceMonitor).
