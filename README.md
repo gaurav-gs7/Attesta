@@ -240,12 +240,13 @@ Every response carries an `X-Request-ID` header: the caller's own, if it sends a
 ## Repository Layout
 
 ```text
+api/v1/                  attesta.io/v1 API types; deploy/crds is generated from them
 cmd/attesta/             CLI
 cmd/attesta-api/         HTTP API binary and image
 cmd/attesta-controller/  RolloutGuard controller binary and image
 internal/                Everything the binaries share: catalog, SLO gate, workflows, controller, scaffold, ...
 templates/               Generated service scaffold
-deploy/crds/             AttestaService, SLOPolicy and RolloutGuard CRDs
+deploy/crds/             AttestaService, SLOPolicy and RolloutGuard CRDs (generated: make generate)
 deploy/controller/       Controller manifests
 infra/                   Terraform, Argo CD and monitoring values for local clusters
 scripts/                 Local demo and failure-scenario runners

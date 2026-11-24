@@ -110,6 +110,11 @@ jobs:
           kustomize build test/e2e > e2e.yaml
           kubeconform -strict -summary -kubernetes-version 1.32.0 controller.yaml e2e.yaml
           test "$(grep -c '^kind: CustomResourceDefinition' crds.yaml)" -eq 3
+      - name: CRDs and deepcopy match the API types
+        run: |
+          go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.23.0
+          make generate
+          git diff --exit-code -- api deploy/crds
       - name: Render and validate the generated scaffold's overlays
         # The TestRendered* tests need kustomize and kubeconform, which only
         # this job installs; here they fail rather than skip without them.
@@ -170,3 +175,20 @@ jobs:
           kind load docker-image attesta-controller:e2e --name attesta-e2e
       - name: Run end-to-end test
         run: bash scripts/e2e-rollback.sh
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: The scaffold's custom resources pass the CRD schemas
+        # The CRDs are installed by the test above. A server-side dry run
+        # checks enums, patterns and ranges, not only field names.
+        run: |
+          ATTESTA_WRITE_SCAFFOLD=/tmp/scaffold go test -count=1 -run '^TestWriteScaffoldForE2E$' ./internal/templates
+          kubectl create namespace payments --dry-run=client -o yaml | kubectl apply -f -
+          for f in attesta-service slo rollout; do
+            kubectl apply --dry-run=server -f "/tmp/scaffold/payments-api/$f.yaml"
+          done
+          # And the schema is enforced: an unknown strategy is refused.
+          if sed 's/^  strategy: .*/  strategy: yolo/' /tmp/scaffold/payments-api/rollout.yaml | kubectl apply --dry-run=server -f - 2>/tmp/err; then
+            echo "an invalid RolloutGuard was accepted"; exit 1
+          fi
+          grep -q 'Unsupported value: "yolo"' /tmp/err

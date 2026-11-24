@@ -1,7 +1,13 @@
-.PHONY: fmt test lint build docker-build e2e run-api run-cli run-controller demo demo-full demo-failures validate-service compose-up compose-down clean
+.PHONY: fmt generate test lint build docker-build e2e run-api run-cli run-controller demo demo-full demo-failures validate-service compose-up compose-down clean
 
 fmt:
 	go fmt ./...
+
+# Deepcopy functions and CRDs from the API types in api/v1. CI fails if the
+# committed files differ from what this produces.
+generate:
+	controller-gen object paths=./api/...
+	controller-gen crd:allowDangerousTypes=true paths=./api/... output:crd:artifacts:config=deploy/crds
 
 test:
 	go test -race ./...

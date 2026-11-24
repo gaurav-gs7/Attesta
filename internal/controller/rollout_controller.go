@@ -541,14 +541,14 @@ func (c *RolloutGuardController) applyAnalysis(ctx context.Context, guard *unstr
 			a.CandidateRevision, a.LastMessage, a.ConsecutiveFailures, cfg.ConsecutiveFailures, a.ConsecutivePasses, cfg.SuccessfulChecks))
 
 	switch {
-	case a.ConsecutiveFailures >= cfg.ConsecutiveFailures:
+	case int(a.ConsecutiveFailures) >= cfg.ConsecutiveFailures:
 		*blocked, *promote = true, false
 		status.Phase = PhaseBlocked
 		status.Reason = "AnalysisFailed"
 		status.Message = fmt.Sprintf("revision %s failed %d consecutive metric checks: %s", a.CandidateRevision, a.ConsecutiveFailures, a.LastMessage)
 		status.SetCondition(ConditionHealthy, metav1.ConditionFalse, status.Reason, status.Message)
 		status.SetCondition(ConditionBlocked, metav1.ConditionTrue, status.Reason, status.Message)
-	case evaluation.Healthy && a.ConsecutivePasses < cfg.SuccessfulChecks:
+	case evaluation.Healthy && int(a.ConsecutivePasses) < cfg.SuccessfulChecks:
 		*promote = false
 		status.Phase = PhaseVerifying
 		status.Reason = "AnalysisPending"
@@ -779,16 +779,31 @@ func (c *RolloutGuardController) ownedReplicaSets(_ context.Context, deployment 
 	return &owned[currentIndex], owned, nil
 }
 
-func (c *RolloutGuardController) patchStatus(ctx context.Context, guard *unstructured.Unstructured, status RolloutGuardStatus) error {
-	next := status.AsMap()
-	// A merge patch keeps keys it does not mention. Null out keys the new
-	// status no longer has, such as fields written by older versions.
-	current, _, _ := unstructured.NestedMap(guard.Object, "status")
-	for key := range current {
-		if _, ok := next[key]; !ok {
+// nullRemoved sets to nil every key of current that next lacks, recursing
+// into maps present in both, so a JSON merge patch of next removes them.
+func nullRemoved(current, next map[string]any) {
+	for key, old := range current {
+		value, ok := next[key]
+		if !ok {
 			next[key] = nil
+			continue
+		}
+		oldMap, wasMap := old.(map[string]any)
+		newMap, isMap := value.(map[string]any)
+		if wasMap && isMap {
+			nullRemoved(oldMap, newMap)
 		}
 	}
+}
+
+func (c *RolloutGuardController) patchStatus(ctx context.Context, guard *unstructured.Unstructured, status RolloutGuardStatus) error {
+	next := statusMap(status)
+	// A merge patch keeps keys it does not mention, at every level. Null out
+	// keys the new status no longer has: fields written by older versions,
+	// and zero values the API types omit, such as a counter reset to 0
+	// inside status.analysis.
+	current, _, _ := unstructured.NestedMap(guard.Object, "status")
+	nullRemoved(current, next)
 	body := map[string]any{"status": next}
 	if rv := guard.GetResourceVersion(); rv != "" {
 		// Precondition: fail with a conflict if the guard changed since the

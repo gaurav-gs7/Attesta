@@ -12,6 +12,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+
+	attestav1 "github.com/gaurav-gs7/attesta/api/v1"
 )
 
 // Phases written to RolloutGuard.status.phase.
@@ -74,119 +76,14 @@ type RolloutEvaluation struct {
 	Blocked           bool
 }
 
-// RolloutGuardStatus is the controller's view of RolloutGuard.status. It is
-// loaded from the live object on every reconcile so that conditions, the last
-// healthy revision and rollback history survive across passes.
-type RolloutGuardStatus struct {
-	ObservedGeneration   int64
-	DeploymentGeneration int64
-	Phase                string
-	Reason               string
-	Message              string
-	ServiceRef           string
-	DeploymentRef        string
-	Strategy             string
-	DesiredReplicas      int32
-	UpdatedReplicas      int32
-	AvailableReplicas    int32
-	RollbackEnabled      bool
-
-	// HealthyRevision, HealthyTemplateHash and HealthyGeneration identify the
-	// last ReplicaSet the controller saw fully rolled out. Rollback restores
-	// this template and nothing else.
-	HealthyRevision     string
-	HealthyTemplateHash string
-	HealthyGeneration   int64
-
-	// RollbackRevision and RollbackTemplateHash record the last rollback the
-	// controller performed. RollbackFromTemplateHash is the template it rolled
-	// away from: if that template comes back (a GitOps tool with self-heal, or
-	// a manual apply), the controller reports it instead of rolling back again.
-	// It is cleared once a different revision rolls out healthy.
-	RollbackRevision         string
-	RollbackTemplateHash     string
-	RollbackFromTemplateHash string
-
-	// Analysis tracks metric checks of the revision currently rolling out.
-	// It is nil when analysis is off or the Deployment is on the healthy
-	// template.
-	Analysis *AnalysisStatus
-
-	Conditions []metav1.Condition
-}
-
-// AnalysisStatus is the state of metric analysis for one candidate revision.
-type AnalysisStatus struct {
-	CandidateRevision     string
-	CandidateTemplateHash string
-	CandidateGeneration   int64
-	ConsecutiveFailures   int
-	ConsecutivePasses     int
-	LastCheckTime         string
-	LastResult            string
-	LastMessage           string
-	Requests              *float64
-	ErrorRatePct          *float64
-	LatencyP95Ms          *float64
-}
-
-func (a *AnalysisStatus) asMap() map[string]any {
-	m := map[string]any{
-		"candidateRevision":     a.CandidateRevision,
-		"candidateTemplateHash": a.CandidateTemplateHash,
-		"candidateGeneration":   a.CandidateGeneration,
-		"consecutiveFailures":   a.ConsecutiveFailures,
-		"consecutivePasses":     a.ConsecutivePasses,
-	}
-	for key, value := range map[string]string{"lastCheckTime": a.LastCheckTime, "lastResult": a.LastResult, "lastMessage": a.LastMessage} {
-		if value != "" {
-			m[key] = value
-		}
-	}
-	for key, value := range map[string]*float64{"requests": a.Requests, "errorRatePct": a.ErrorRatePct, "latencyP95Ms": a.LatencyP95Ms} {
-		if value != nil {
-			m[key] = *value
-		}
-	}
-	return m
-}
-
-func analysisFromGuard(guard *unstructured.Unstructured) *AnalysisStatus {
-	m, found, _ := unstructured.NestedMap(guard.Object, "status", "analysis")
-	if !found {
-		return nil
-	}
-	str := func(key string) string { v, _ := m[key].(string); return v }
-	num := func(key string) *float64 {
-		switch v := m[key].(type) {
-		case float64:
-			return &v
-		case int64:
-			f := float64(v)
-			return &f
-		}
-		return nil
-	}
-	integer := func(key string) int64 {
-		if v := num(key); v != nil {
-			return int64(*v)
-		}
-		return 0
-	}
-	return &AnalysisStatus{
-		CandidateRevision:     str("candidateRevision"),
-		CandidateTemplateHash: str("candidateTemplateHash"),
-		CandidateGeneration:   integer("candidateGeneration"),
-		ConsecutiveFailures:   int(integer("consecutiveFailures")),
-		ConsecutivePasses:     int(integer("consecutivePasses")),
-		LastCheckTime:         str("lastCheckTime"),
-		LastResult:            str("lastResult"),
-		LastMessage:           str("lastMessage"),
-		Requests:              num("requests"),
-		ErrorRatePct:          num("errorRatePct"),
-		LatencyP95Ms:          num("latencyP95Ms"),
-	}
-}
+// RolloutGuardStatus and AnalysisStatus are the API types: the controller
+// decodes and writes RolloutGuard.status with the same structs the CRD's
+// schema is generated from, so it cannot write a field the API server
+// prunes.
+type (
+	RolloutGuardStatus = attestav1.RolloutGuardStatus
+	AnalysisStatus     = attestav1.AnalysisStatus
+)
 
 func rolloutGuardSpecFrom(guard *unstructured.Unstructured) RolloutGuardSpec {
 	serviceRef, _, _ := unstructured.NestedString(guard.Object, "spec", "serviceRef")
@@ -204,34 +101,14 @@ func rolloutGuardSpecFrom(guard *unstructured.Unstructured) RolloutGuardSpec {
 }
 
 // statusFromGuard loads the status the controller wrote on a previous pass.
-// Unknown or malformed fields are ignored rather than failing the reconcile.
+// A status that does not decode (written by hand, or by a version before
+// the schema) is dropped and rebuilt rather than failing the reconcile.
 func statusFromGuard(guard *unstructured.Unstructured) RolloutGuardStatus {
 	var s RolloutGuardStatus
-	str := func(field string) string {
-		v, _, _ := unstructured.NestedString(guard.Object, "status", field)
-		return v
-	}
-	s.Phase = str("phase")
-	s.Reason = str("reason")
-	s.HealthyRevision = str("healthyRevision")
-	s.HealthyTemplateHash = str("healthyTemplateHash")
-	s.RollbackRevision = str("rollbackRevision")
-	s.RollbackTemplateHash = str("rollbackTemplateHash")
-	s.RollbackFromTemplateHash = str("rollbackFromTemplateHash")
-	s.HealthyGeneration, _, _ = unstructured.NestedInt64(guard.Object, "status", "healthyGeneration")
-	s.Analysis = analysisFromGuard(guard)
-
-	raw, _, _ := unstructured.NestedSlice(guard.Object, "status", "conditions")
-	for _, item := range raw {
-		m, ok := item.(map[string]any)
-		if !ok {
-			continue
+	if raw, found, _ := unstructured.NestedMap(guard.Object, "status"); found {
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(raw, &s); err != nil {
+			s = RolloutGuardStatus{}
 		}
-		var cond metav1.Condition
-		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(m, &cond); err != nil || cond.Type == "" {
-			continue
-		}
-		s.Conditions = append(s.Conditions, cond)
 	}
 	// "Reconciled" was always True and carried no information; drop it from
 	// objects written by older controller versions.
@@ -347,53 +224,14 @@ func statusForMissingDeployment(prev RolloutGuardStatus, guard *unstructured.Uns
 	return s
 }
 
-// SetCondition sets a condition, keeping lastTransitionTime when the status
-// value did not change.
-func (s *RolloutGuardStatus) SetCondition(conditionType string, status metav1.ConditionStatus, reason, message string) {
-	meta.SetStatusCondition(&s.Conditions, metav1.Condition{
-		Type:               conditionType,
-		Status:             status,
-		ObservedGeneration: s.ObservedGeneration,
-		Reason:             reason,
-		Message:            message,
-	})
-}
-
-func (s RolloutGuardStatus) AsMap() map[string]any {
-	status := map[string]any{
-		"observedGeneration":   s.ObservedGeneration,
-		"deploymentGeneration": s.DeploymentGeneration,
-		"phase":                s.Phase,
-		"reason":               s.Reason,
-		"message":              s.Message,
-		"deploymentRef":        s.DeploymentRef,
-		"desiredReplicas":      s.DesiredReplicas,
-		"updatedReplicas":      s.UpdatedReplicas,
-		"availableReplicas":    s.AvailableReplicas,
-		"rollbackEnabled":      s.RollbackEnabled,
-		"conditions":           s.Conditions,
+// statusMap is status as the object stores it.
+func statusMap(status RolloutGuardStatus) map[string]any {
+	m, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&status)
+	if err != nil {
+		// Only unsupported Go types fail, and the status has none.
+		panic(fmt.Sprintf("encode RolloutGuard status: %v", err))
 	}
-	optional := map[string]string{
-		"serviceRef":               s.ServiceRef,
-		"strategy":                 s.Strategy,
-		"healthyRevision":          s.HealthyRevision,
-		"healthyTemplateHash":      s.HealthyTemplateHash,
-		"rollbackRevision":         s.RollbackRevision,
-		"rollbackTemplateHash":     s.RollbackTemplateHash,
-		"rollbackFromTemplateHash": s.RollbackFromTemplateHash,
-	}
-	for key, value := range optional {
-		if value != "" {
-			status[key] = value
-		}
-	}
-	if s.HealthyGeneration != 0 {
-		status["healthyGeneration"] = s.HealthyGeneration
-	}
-	if s.Analysis != nil {
-		status["analysis"] = s.Analysis.asMap()
-	}
-	return status
+	return m
 }
 
 // statusChanged reports whether writing next would change the stored status.
@@ -401,7 +239,7 @@ func (s RolloutGuardStatus) AsMap() map[string]any {
 // compare equal.
 func statusChanged(guard *unstructured.Unstructured, next RolloutGuardStatus) bool {
 	current, _, _ := unstructured.NestedMap(guard.Object, "status")
-	return !reflect.DeepEqual(normalizeJSON(current), normalizeJSON(next.AsMap()))
+	return !reflect.DeepEqual(normalizeJSON(current), normalizeJSON(statusMap(next)))
 }
 
 func normalizeJSON(value any) any {

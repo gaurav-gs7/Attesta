@@ -1,23 +1,121 @@
+---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.23.0
   name: attestaservices.attesta.io
 spec:
   group: attesta.io
   names:
     kind: AttestaService
+    listKind: AttestaServiceList
     plural: attestaservices
+    shortNames:
+    - asvc
     singular: attestaservice
-    shortNames: ["asvc"]
   scope: Namespaced
   versions:
-    - name: v1
-      served: true
-      storage: true
-      schema:
-        openAPIV3Schema:
-          type: object
-          properties:
-            spec:
-              type: object
-              x-kubernetes-preserve-unknown-fields: true
+  - name: v1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          AttestaService is the declarative record of a service's ownership and
+          SLO, written by the generated scaffold. Nothing reconciles it yet.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              dashboard:
+                maxLength: 2048
+                type: string
+              deployment:
+                properties:
+                  maxErrorRate:
+                    description: MaxErrorRate is the error-rate percentage a rollout
+                      may reach.
+                    maximum: 100
+                    minimum: 0
+                    type: number
+                  rollbackOnFailure:
+                    type: boolean
+                  strategy:
+                    enum:
+                    - rolling
+                    - canary
+                    - blue-green
+                    type: string
+                type: object
+              language:
+                enum:
+                - go
+                - python
+                type: string
+              owner:
+                maxLength: 100
+                minLength: 1
+                type: string
+              pager:
+                maxLength: 100
+                type: string
+              repository:
+                maxLength: 300
+                type: string
+              runbook:
+                maxLength: 2048
+                type: string
+              runtime:
+                type: string
+              slo:
+                properties:
+                  availability:
+                    description: Availability is the target percentage over 30 days.
+                    maximum: 100
+                    minimum: 0
+                    type: number
+                  errorRate:
+                    description: ErrorRate is the highest acceptable 5xx percentage.
+                    maximum: 100
+                    minimum: 0
+                    type: number
+                  latencyP95:
+                    description: LatencyP95 is a duration, such as 300ms.
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                    type: string
+                type: object
+              team:
+                maxLength: 63
+                minLength: 1
+                type: string
+              tier:
+                enum:
+                - critical
+                - high
+                - medium
+                - low
+                type: string
+            required:
+            - language
+            - owner
+            - team
+            - tier
+            type: object
+        type: object
+    served: true
+    storage: true

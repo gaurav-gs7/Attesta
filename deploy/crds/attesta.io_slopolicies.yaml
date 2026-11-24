@@ -1,23 +1,122 @@
+---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.23.0
   name: slopolicies.attesta.io
 spec:
   group: attesta.io
   names:
     kind: SLOPolicy
+    listKind: SLOPolicyList
     plural: slopolicies
+    shortNames:
+    - slo
     singular: slopolicy
-    shortNames: ["slo"]
   scope: Namespaced
   versions:
-    - name: v1
-      served: true
-      storage: true
-      schema:
-        openAPIV3Schema:
-          type: object
-          properties:
-            spec:
-              type: object
-              x-kubernetes-preserve-unknown-fields: true
+  - name: v1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          SLOPolicy is the declarative record of a service's objectives and
+          burn-rate alerts, written by the generated scaffold. Nothing reconciles
+          it yet: the API reads SLO targets from its catalog.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              burnRateAlerts:
+                items:
+                  properties:
+                    burnRate:
+                      exclusiveMinimum: true
+                      minimum: 0
+                      type: number
+                    longWindow:
+                      pattern: ^[0-9]+(ms|s|m|h|d|w)$
+                      type: string
+                    severity:
+                      enum:
+                      - page
+                      - ticket
+                      type: string
+                    shortWindow:
+                      pattern: ^[0-9]+(ms|s|m|h|d|w)$
+                      type: string
+                  required:
+                  - burnRate
+                  - longWindow
+                  - severity
+                  - shortWindow
+                  type: object
+                maxItems: 10
+                type: array
+              objectives:
+                items:
+                  properties:
+                    evaluationWindow:
+                      description: |-
+                        EvaluationWindow judges the objective on recent traffic instead of
+                        the policy's window.
+                      pattern: ^[0-9]+(ms|s|m|h|d|w)$
+                      type: string
+                    name:
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                    prometheusQuery:
+                      maxLength: 4096
+                      minLength: 1
+                      type: string
+                    target:
+                      type: number
+                    unit:
+                      enum:
+                      - percent
+                      - ms
+                      type: string
+                  required:
+                  - name
+                  - prometheusQuery
+                  - target
+                  - unit
+                  type: object
+                maxItems: 20
+                minItems: 1
+                type: array
+              serviceRef:
+                maxLength: 63
+                minLength: 1
+                type: string
+              window:
+                description: |-
+                  Window is the period availability and the error budget are measured
+                  over, such as 30d.
+                pattern: ^[0-9]+(ms|s|m|h|d|w)$
+                type: string
+            required:
+            - objectives
+            - serviceRef
+            - window
+            type: object
+        type: object
+    served: true
+    storage: true
