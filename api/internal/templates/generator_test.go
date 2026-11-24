@@ -481,3 +481,38 @@ func TestGeneratedCIPinsActionsAndScopesWrites(t *testing.T) {
 		t.Error("the push job cannot push")
 	}
 }
+
+func TestImageRegistryIsConfigured(t *testing.T) {
+	root := filepath.Clean("../../..")
+	for registry, login := range map[string]string{
+		"ghcr.io/acme":                    "secrets.GITHUB_TOKEN",
+		"registry.example.com:5000/team/": "secrets.REGISTRY_PASSWORD",
+	} {
+		rendered, err := NewGenerator(filepath.Join(root, "templates"), WithImageRegistry(registry)).Render(testService("go"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ci, deploy string
+		for _, f := range rendered.Files {
+			switch f.Path {
+			case ".github/workflows/ci.yml":
+				ci = string(f.Content)
+			case "k8s/base/deployment.yaml":
+				deploy = string(f.Content)
+			}
+		}
+		host := strings.SplitN(registry, "/", 2)[0]
+		image := strings.TrimSuffix(registry, "/") + "/payments-api"
+		if !strings.Contains(ci, "IMAGE: "+image) || !strings.Contains(ci, "docker login "+host+" ") || !strings.Contains(ci, login) {
+			t.Errorf("%s: CI does not push to the registry with %s:\n%s", registry, login, ci)
+		}
+		if strings.Contains(ci, ":latest") || strings.Contains(deploy, ":latest") || !strings.Contains(deploy, "image: "+image+"\n") {
+			t.Errorf("%s: deployment image line wrong:\n%s", registry, deploy)
+		}
+	}
+	for _, bad := range []string{"https://ghcr.io/acme", "GHCR.io/acme", "ghcr.io/acme/../x", ""} {
+		if err := ValidateImageRegistry(bad); err == nil {
+			t.Errorf("registry %q accepted", bad)
+		}
+	}
+}

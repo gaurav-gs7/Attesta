@@ -124,3 +124,15 @@ func TestRetentionFromEnvironment(t *testing.T) {
 		t.Fatal("a retention under an hour was accepted")
 	}
 }
+
+func TestImageRegistryIsValidated(t *testing.T) {
+	t.Setenv("ATTESTA_API_TOKEN", "x")
+	t.Setenv("ATTESTA_IMAGE_REGISTRY", "https://ghcr.io/acme")
+	if err := Load().Validate(); err == nil {
+		t.Fatal("a registry URL with a scheme was accepted")
+	}
+	t.Setenv("ATTESTA_IMAGE_REGISTRY", "ghcr.io/acme")
+	if err := Load().Validate(); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -78,7 +78,10 @@ func main() {
 		log.Fatalf("retention: %v", err)
 	}
 
-	generator := templates.NewGenerator(cfg.TemplateDir)
+	if cfg.ImageRegistry == templates.DefaultImageRegistry {
+		log.Printf("WARNING: ATTESTA_IMAGE_REGISTRY is not set; generated services push to the placeholder %s", templates.DefaultImageRegistry)
+	}
+	generator := templates.NewGenerator(cfg.TemplateDir, templates.WithImageRegistry(cfg.ImageRegistry))
 	opts := []httpapi.Option{
 		httpapi.WithMaxBodyBytes(cfg.MaxBodyMB * 1024 * 1024),
 		httpapi.WithPrometheus(promCfg),

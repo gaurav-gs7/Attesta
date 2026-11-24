@@ -70,9 +70,25 @@ jobs:
 
       - name: Build and push image
         env:
+{{- if eq .RegistryHost "ghcr.io" }}
           REGISTRY_TOKEN: ${{ "{{" }} secrets.GITHUB_TOKEN {{ "}}" }}
           REGISTRY_USER: ${{ "{{" }} github.actor {{ "}}" }}
+{{- else }}
+          # Set these repository secrets for {{ .RegistryHost }}.
+          REGISTRY_TOKEN: ${{ "{{" }} secrets.REGISTRY_PASSWORD {{ "}}" }}
+          REGISTRY_USER: ${{ "{{" }} secrets.REGISTRY_USERNAME {{ "}}" }}
+{{- end }}
+          SHA: ${{ "{{" }} github.sha {{ "}}" }}
         run: |
-          echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
-          docker build -t "$IMAGE:${{ "{{" }} github.sha {{ "}}" }}" .
-          docker push "$IMAGE:${{ "{{" }} github.sha {{ "}}" }}"
+          echo "$REGISTRY_TOKEN" | docker login {{ .RegistryHost }} -u "$REGISTRY_USER" --password-stdin
+          # Tagged with the commit, never latest: a tag that moves makes
+          # nodes run different builds under one name.
+          docker build -t "$IMAGE:$SHA" .
+          docker push "$IMAGE:$SHA"
+          digest="$(docker inspect --format '{{ "{{" }}index .RepoDigests 0{{ "}}" }}' "$IMAGE:$SHA")"
+          {
+            echo "### Pushed $digest"
+            echo
+            echo "Promote it in an overlay with:"
+            echo '`kustomize edit set image '"${digest}"'`'
+          } >> "$GITHUB_STEP_SUMMARY"

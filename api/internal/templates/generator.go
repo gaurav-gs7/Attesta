@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"text/template"
@@ -23,6 +24,37 @@ import (
 // developer asked.
 type Generator struct {
 	templateDir string
+	registry    string
+}
+
+// DefaultImageRegistry is a placeholder: images pushed there go nowhere
+// useful. Set the registry with WithImageRegistry (ATTESTA_IMAGE_REGISTRY
+// for the API).
+const DefaultImageRegistry = "ghcr.io/change-me"
+
+// Option configures a Generator.
+type Option func(*Generator)
+
+// WithImageRegistry sets the registry and path prefix of generated
+// services' images, such as ghcr.io/acme or registry.example.com:5000/team.
+// A service's image is <registry>/<service name>.
+func WithImageRegistry(registry string) Option {
+	return func(g *Generator) {
+		if registry != "" {
+			g.registry = strings.TrimSuffix(registry, "/")
+		}
+	}
+}
+
+var imageRegistry = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]+([._-][a-z0-9]+)*)*$`)
+
+// ValidateImageRegistry rejects a registry that is not a lowercase
+// host[:port][/path], the form an image reference allows.
+func ValidateImageRegistry(registry string) error {
+	if len(registry) > 200 || !imageRegistry.MatchString(strings.TrimSuffix(registry, "/")) {
+		return fmt.Errorf("image registry %q: want a lowercase host[:port][/path], such as ghcr.io/acme", registry)
+	}
+	return nil
 }
 
 // Scaffold is a rendered scaffold. File paths are relative to the
@@ -48,13 +80,21 @@ type data struct {
 	PrometheusName string
 	// BurnWindows are the windows of the multi-window burn-rate rules, the
 	// same ones the API's deployment gate uses.
-	BurnWindows   []string
-	ImageName     string
+	BurnWindows []string
+	// ImageName is <registry>/<service name>, without a tag: each overlay
+	// pins the tag or digest it runs.
+	ImageName string
+	// RegistryHost is the registry's host[:port], for docker login.
+	RegistryHost  string
 	ContainerPort int
 }
 
-func NewGenerator(templateDir string) *Generator {
-	return &Generator{templateDir: templateDir}
+func NewGenerator(templateDir string, opts ...Option) *Generator {
+	g := &Generator{templateDir: templateDir, registry: DefaultImageRegistry}
+	for _, opt := range opts {
+		opt(g)
+	}
+	return g
 }
 
 // Render renders service's scaffold in memory. Nothing is written on
@@ -64,6 +104,9 @@ func (g *Generator) Render(service models.Service) (Scaffold, error) {
 	// library too: it refuses input it cannot render safely.
 	if err := security.RejectIfFindings(security.ValidateService(service)); err != nil {
 		return Scaffold{}, fmt.Errorf("refusing to generate a scaffold: %w", err)
+	}
+	if err := ValidateImageRegistry(g.registry); err != nil {
+		return Scaffold{}, err
 	}
 	languageTemplates := filepath.Join(g.templateDir, "service-"+strings.ToLower(service.Language))
 	if _, err := os.Stat(languageTemplates); err != nil {
@@ -75,7 +118,8 @@ func (g *Generator) Render(service models.Service) (Scaffold, error) {
 		ServiceTitle:   title(service.Name),
 		PrometheusName: prometheusName(service.Name),
 		BurnWindows:    burnWindowNames(),
-		ImageName:      "ghcr.io/example/" + service.Name,
+		ImageName:      g.registry + "/" + service.Name,
+		RegistryHost:   strings.SplitN(g.registry, "/", 2)[0],
 		ContainerPort:  8080,
 	}
 

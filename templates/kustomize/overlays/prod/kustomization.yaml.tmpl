@@ -3,6 +3,14 @@ kind: Kustomization
 namespace: {{ .Service.Namespace }}
 resources:
   - ../../base
+images:
+  # The build this environment runs, pinned by digest. CI writes the digest
+  # of each image it pushes to the job summary; promote a build by setting
+  # it here, from this directory:
+  #   kustomize edit set image {{ .ImageName }}@sha256:<digest>
+  # Until then pods do not start: no one pushes the tag "unset".
+  - name: {{ .ImageName }}
+    newTag: unset
 labels:
   - pairs:
       attesta.dev/environment: prod

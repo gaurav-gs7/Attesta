@@ -35,8 +35,9 @@ spec:
           type: RuntimeDefault
       containers:
         - name: app
-          image: {{ .ImageName }}:latest
-          imagePullPolicy: IfNotPresent
+          # No tag here: each overlay pins the digest it runs (images:), so
+          # every node runs the same build and a rollout is a Git change.
+          image: {{ .ImageName }}
           env:
             - name: OTEL_SERVICE_NAME
               value: {{ .Service.Name }}

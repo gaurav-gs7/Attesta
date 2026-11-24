@@ -59,6 +59,12 @@ if grep -En '^[[:space:]-]*uses:' "$service_dir/.github/workflows/ci.yml" | grep
   failures+=("every CI action must be pinned to a full commit SHA in .github/workflows/ci.yml")
 fi
 require_grep "Application" "infra/argocd/application.yaml" "Argo CD application is required"
+if grep -Eq 'image: .*:latest|imagePullPolicy: Always' "$service_dir/k8s/base/deployment.yaml"; then
+  failures+=("the Deployment must not run a moving tag (:latest) in k8s/base/deployment.yaml")
+fi
+for env in dev staging prod; do
+  require_grep "^images:" "k8s/overlays/$env/kustomization.yaml" "each overlay must pin its image"
+done
 require_grep "high_error_rate" "observability/alerts.yaml" "error-rate SLO alert is required"
 require_grep "high_p95_latency" "observability/alerts.yaml" "p95 latency alert is required"
 require_grep "_fast_burn" "observability/prometheus-rules.yaml" "fast burn-rate alert is required"

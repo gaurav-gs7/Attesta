@@ -12,6 +12,7 @@ import (
 
 	"github.com/gaurav-gs7/attesta/api/internal/auth"
 	"github.com/gaurav-gs7/attesta/api/internal/prometheus"
+	"github.com/gaurav-gs7/attesta/api/internal/templates"
 )
 
 // ErrNoAuth is returned by Validate when no API token is configured and
@@ -37,6 +38,9 @@ type Config struct {
 	TLSKeyFile    string
 	MaxBodyMB     int64
 	PrometheusURL string
+	// ImageRegistry is where generated services' images live, as
+	// host[:port][/path]; each service's image is <registry>/<name>.
+	ImageRegistry string
 }
 
 func Load() Config {
@@ -54,6 +58,7 @@ func Load() Config {
 		TLSKeyFile:       os.Getenv("ATTESTA_TLS_KEY_FILE"),
 		MaxBodyMB:        1,
 		PrometheusURL:    os.Getenv("ATTESTA_PROMETHEUS_URL"),
+		ImageRegistry:    env("ATTESTA_IMAGE_REGISTRY", templates.DefaultImageRegistry),
 	}
 }
 
@@ -67,6 +72,11 @@ func (c Config) Validate() error {
 	}
 	if (c.TLSCertFile == "") != (c.TLSKeyFile == "") {
 		return errors.New("set both ATTESTA_TLS_CERT_FILE and ATTESTA_TLS_KEY_FILE, or neither")
+	}
+	if c.ImageRegistry != "" {
+		if err := templates.ValidateImageRegistry(c.ImageRegistry); err != nil {
+			return fmt.Errorf("ATTESTA_IMAGE_REGISTRY: %w", err)
+		}
 	}
 	return nil
 }

@@ -53,6 +53,8 @@ go run ./cli/cmd/attesta service init payments-api \
 
 The API renders the scaffold in memory and never writes it to its own disk; the CLI downloads it from `GET /api/v1/services/payments-api/scaffold` (a `.tar.gz` with every file under `payments-api/`) and writes it to `generated/services/payments-api` (`--output` changes the parent, `--output ""` skips it; `attesta service scaffold payments-api` fetches it again). The CLI accepts only regular files under that one directory, within size limits, and writes them to a temporary directory that is renamed into place, so a failed download leaves an earlier scaffold as it was. Without `ATTESTA_PROMETHEUS_URL` the SLO state is `unknown`, so `attesta slo status payments-api` reports why, and rollouts are refused.
 
+A generated service's image is `<ATTESTA_IMAGE_REGISTRY>/<name>` (a lowercase `host[:port][/path]`, such as `ghcr.io/acme`; unset, it is the placeholder `ghcr.io/change-me` and the API warns at start-up). The base Deployment names the image without a tag, and each overlay pins what that environment runs with Kustomize's `images:`, starting at the tag `unset`, which no one pushes, so nothing starts until a build is promoted. The generated CI tags each push with the commit SHA, never `latest`, and writes the pushed digest to the job summary with the command that promotes it: `kustomize edit set image <image>@sha256:<digest>` in the overlay. CI logs in with `GITHUB_TOKEN` for `ghcr.io`, and with the `REGISTRY_USERNAME` and `REGISTRY_PASSWORD` secrets elsewhere.
+
 ## Authentication
 
 Every `/api/` request is made by an identity with a role; `/livez`, `/readyz` and `/metrics` stay open for probes and scrapers. Roles are ordered, each including the one before:

@@ -200,8 +200,9 @@ service_ci() {
   kubectl kustomize "$service_dir/k8s/overlays/$SERVICE_ENV" >"$rendered_file"
   cp "$rendered_file" "$stable_rendered_file"
   cp "$rendered_file" "$canary_rendered_file"
-  perl -0pi -e "s#image: ghcr.io/example/$SERVICE_NAME:latest#image: $STABLE_IMAGE_NAME#g" "$stable_rendered_file"
-  perl -0pi -e "s#image: ghcr.io/example/$SERVICE_NAME:latest#image: $CANARY_IMAGE_NAME#g" "$canary_rendered_file"
+  # The overlays pin the placeholder tag "unset" until a build is promoted.
+  perl -0pi -e "s#image: \\S+/$SERVICE_NAME:unset#image: $STABLE_IMAGE_NAME#g" "$stable_rendered_file"
+  perl -0pi -e "s#image: \\S+/$SERVICE_NAME:unset#image: $CANARY_IMAGE_NAME#g" "$canary_rendered_file"
   log "pinned stable manifest image to $STABLE_IMAGE_NAME"
   log "pinned candidate manifest image to $CANARY_IMAGE_NAME (the whole Deployment is updated; there is no traffic splitting)"
 }

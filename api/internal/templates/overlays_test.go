@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"sigs.k8s.io/yaml"
+
+	"github.com/gaurav-gs7/attesta/internal/scaffold"
 )
 
 // renderOverlay runs kustomize on one generated overlay and returns its
@@ -76,6 +78,31 @@ func TestRenderedOverlaysScaleThroughTheAutoscaler(t *testing.T) {
 		pdb := spec(objects["PodDisruptionBudget"][0])
 		if _, blocks := pdb["minAvailable"]; blocks || pdb["maxUnavailable"] != float64(1) {
 			t.Errorf("%s: PDB %v, want maxUnavailable: 1", env, pdb)
+		}
+	}
+}
+
+// Audit G-5: every service ran ghcr.io/example/<name>:latest with
+// IfNotPresent, so nodes could run different builds under one tag.
+func TestRenderedOverlaysPinTheImage(t *testing.T) {
+	root := filepath.Clean("../../..")
+	rendered, err := NewGenerator(filepath.Join(root, "templates"), WithImageRegistry("registry.example.com:5000/payments")).Render(testService("go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), "payments-api")
+	if err := scaffold.WriteDir(dir, rendered.Files); err != nil {
+		t.Fatal(err)
+	}
+	for _, env := range []string{"dev", "staging", "prod"} {
+		deploy := renderOverlay(t, dir, env)["Deployment"][0]
+		podSpec := spec(spec(deploy)["template"].(map[string]any))
+		container := podSpec["containers"].([]any)[0].(map[string]any)
+		if container["image"] != "registry.example.com:5000/payments/payments-api:unset" {
+			t.Errorf("%s: image %v, want the configured registry and the overlay's pinned tag", env, container["image"])
+		}
+		if policy, set := container["imagePullPolicy"]; set {
+			t.Errorf("%s: imagePullPolicy %v set; the pinned reference decides", env, policy)
 		}
 	}
 }

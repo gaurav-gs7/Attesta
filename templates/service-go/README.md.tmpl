@@ -17,3 +17,13 @@ make run
 - Environment: {{ .Service.Environment }}
 - SLO target: {{ printf "%.2f" .Service.SLOTarget }}%
 - Deployment strategy: {{ .Service.DeploymentStrategy }}
+
+## Releasing
+
+CI pushes `{{ .ImageName }}:<commit SHA>` on every push to main and prints its digest in the job summary. An environment runs only what its overlay pins; promote a build from `k8s/overlays/<env>`:
+
+```sh
+kustomize edit set image {{ .ImageName }}@sha256:<digest>
+```
+
+Until a digest is set the overlay's tag is `unset` and pods do not start.
