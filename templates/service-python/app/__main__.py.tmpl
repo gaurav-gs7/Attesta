@@ -49,6 +49,9 @@ DURATION = Histogram(
 
 
 class Handler(BaseHTTPRequestHandler):
+    # Seconds a connection may sit idle or trickle a request before it is
+    # closed, so slow clients cannot hold every thread.
+    timeout = 30
     def do_GET(self):
         start = time.monotonic()
         status = 200
@@ -86,10 +89,24 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+class Server(ThreadingHTTPServer):
+    # Request threads are joined on close, so requests in flight at SIGTERM
+    # finish before the process exits.
+    daemon_threads = False
+    block_on_close = True
+
+
 def main():
-    server = ThreadingHTTPServer(("", int(os.getenv("PORT", "8080"))), Handler)
-    signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=server.shutdown).start())
-    server.serve_forever()
+    server = Server(("", int(os.getenv("PORT", "8080"))), Handler)
+    # shutdown() blocks until serve_forever() returns, so it cannot run in
+    # the signal handler, which runs on serve_forever's thread.
+    stop = lambda *_: threading.Thread(target=server.shutdown).start()
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
 
 
 if __name__ == "__main__":

@@ -54,12 +54,22 @@ spec:
               port: http
             initialDelaySeconds: 3
             periodSeconds: 10
+          # Liveness only asks whether the process answers; readiness may
+          # also depend on what the service needs to serve.
           livenessProbe:
             httpGet:
               path: /livez
               port: http
             initialDelaySeconds: 10
             periodSeconds: 20
+          lifecycle:
+            # Endpoints drop a terminating pod asynchronously; keep serving
+            # for a few seconds before SIGTERM so in-flight routing settles.
+            # The server then drains for up to 10s, inside the 30s grace
+            # period.
+            preStop:
+              sleep:
+                seconds: 5
           resources:
             requests:
               cpu: 50m

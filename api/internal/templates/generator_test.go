@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -229,7 +230,7 @@ func assertCountsRequests(t *testing.T, cmd *exec.Cmd) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
 	base := "http://127.0.0.1:" + port
 	waitFor(t, base+"/readyz")
 
@@ -269,6 +270,21 @@ func assertCountsRequests(t *testing.T, cmd *exec.Cmd) {
 	}
 	if strings.Contains(after, "db_") {
 		t.Fatalf("metrics still expose made-up database series:\n%s", after)
+	}
+
+	// Audit G-6: SIGTERM drains and exits cleanly.
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("service did not exit cleanly on SIGTERM: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("service still running 5s after SIGTERM")
 	}
 }
 

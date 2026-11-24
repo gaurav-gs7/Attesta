@@ -106,3 +106,23 @@ func TestRenderedOverlaysPinTheImage(t *testing.T) {
 		}
 	}
 }
+
+// Audit G-6: liveness hit the readiness endpoint, and nothing gave the pod
+// time to leave the endpoints before it stopped.
+func TestRenderedDeploymentProbesAndDrains(t *testing.T) {
+	dir := generate(t, testService("go")).OutputPath
+	deploy := renderOverlay(t, dir, "staging")["Deployment"][0]
+	c := spec(spec(deploy)["template"].(map[string]any))["containers"].([]any)[0].(map[string]any)
+	path := func(probe string) any {
+		p, _ := c[probe].(map[string]any)
+		get, _ := p["httpGet"].(map[string]any)
+		return get["path"]
+	}
+	if path("livenessProbe") != "/livez" || path("readinessProbe") != "/readyz" {
+		t.Fatalf("probes: liveness %v, readiness %v", path("livenessProbe"), path("readinessProbe"))
+	}
+	lifecycle, _ := c["lifecycle"].(map[string]any)
+	if _, ok := lifecycle["preStop"]; !ok {
+		t.Fatal("no preStop delay before SIGTERM")
+	}
+}
