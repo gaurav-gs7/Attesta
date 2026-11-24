@@ -129,7 +129,7 @@ func TestRenderedDeploymentProbesAndDrains(t *testing.T) {
 
 // Audit G-7: the namespace was declared by the Kustomize base, a Terraform
 // module and Argo CD's CreateNamespace at once.
-func TestNamespaceHasOneOwner(t *testing.T) {
+func TestRenderedNamespaceHasOneOwner(t *testing.T) {
 	result := generate(t, testService("go"))
 	for _, f := range result.Files {
 		rel, _ := filepath.Rel(result.OutputPath, f)
