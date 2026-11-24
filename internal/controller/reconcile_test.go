@@ -28,6 +28,7 @@ const (
 	testNamespace = "platform"
 	testGuardName = "payments-api-rollout"
 	testUID       = types.UID("deployment-uid")
+	testGuardUID  = "0f3c9a2e-guard-uid"
 )
 
 var testGuardKey = types.NamespacedName{Namespace: testNamespace, Name: testGuardName}
@@ -60,6 +61,8 @@ type harness struct {
 	// updateDeployment, when set, answers every Deployment update instead of
 	// the fake API server (nil passes the update through).
 	updateDeployment func() error
+	// updateStatus, when set, answers guard status writes the same way.
+	updateStatus func() error
 }
 
 // newHarness starts with a healthy Deployment on revision 1 (image v1) and a
@@ -74,7 +77,7 @@ func newHarness(t *testing.T, rollback map[string]any, extraGuardFields map[stri
 	obj := map[string]any{
 		"apiVersion": "attesta.io/v1",
 		"kind":       "RolloutGuard",
-		"metadata":   map[string]any{"name": testGuardName, "namespace": testNamespace, "generation": int64(1)},
+		"metadata":   map[string]any{"name": testGuardName, "namespace": testNamespace, "generation": int64(1), "uid": testGuardUID},
 		"spec":       spec,
 	}
 	for k, v := range extraGuardFields {
@@ -112,7 +115,13 @@ func newHarness(t *testing.T, rollback map[string]any, extraGuardFields map[stri
 			if sub == "status" {
 				h.mu.Lock()
 				h.statusUpdates++
+				inject := h.updateStatus
 				h.mu.Unlock()
+				if _, ok := obj.(*attestav1.RolloutGuard); ok && inject != nil {
+					if err := inject(); err != nil {
+						return err
+					}
+				}
 			}
 			return c.SubResource(sub).Update(ctx, obj, opts...)
 		},

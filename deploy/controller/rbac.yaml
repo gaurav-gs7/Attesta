@@ -9,6 +9,13 @@ rules:
   - apiGroups: ["attesta.io"]
     resources: ["rolloutguards/status"]
     verbs: ["get", "patch", "update"]
+  # Decision records: create, and read one back by name. No update, patch or
+  # delete: the controller cannot rewrite its own history. Grant create on
+  # rolloutdecisions to nothing else; a record someone else creates at a
+  # guard's next position stops that guard (reported, never adopted).
+  - apiGroups: ["attesta.io"]
+    resources: ["rolloutdecisions"]
+    verbs: ["get", "create"]
   # Read-only. The right to update Deployments is in rollback-rbac.yaml so it
   # can be bound per namespace instead of cluster-wide.
   - apiGroups: ["apps"]

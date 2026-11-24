@@ -4,6 +4,15 @@ All notable changes to Attesta. The format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+### Added
+
+- `RolloutDecision`: an immutable, hash-chained record of every promotion, rollback and skipped or failed rollback, with the PromQL queries and values and the Deployment conditions it was decided on. Apply the new CRD (`kubectl apply -k deploy/crds`) and the updated controller RBAC (`get` and `create` on `rolloutdecisions`) before upgrading the controller. `status.lastDecision` points at a guard's chain; `attesta verify` checks chains from `kubectl ... -o json`. See [Decision Records](docs/controller-operator.md#decision-records).
+- `status.analysis.lastEvidence` on RolloutGuards, and the `attesta_rolloutguard_decisions_recorded_total{action}` metric.
+
+### Fixed
+
+- `attesta-controller` built from the controller-runtime commit panicked at start-up: it defined `--kubeconfig`, which controller-runtime already registers. The flag still works; it is controller-runtime's.
+
 ### Changed
 
 - The controller runs on controller-runtime (v0.25): typed `api/v1` objects, the manager's cache, field indexes, leader election that releases the Lease only after reconciles stop, health probes and metrics. Its reconcile metrics are now controller-runtime's (`controller_runtime_reconcile_*`, `workqueue_*`); `attesta_rolloutguard_reconcile_total` and `_duration_seconds` are gone. Events are written through events.k8s.io/v1; add that API group to custom RBAC.

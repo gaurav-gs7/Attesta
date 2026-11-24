@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -138,7 +139,20 @@ type AnalysisResult struct {
 	Requests     *float64
 	ErrorRatePct *float64
 	LatencyP95Ms *float64
+	// Evidence is each query sent and what it returned, for the decision
+	// record. EvaluatedAt is left for the caller to fill.
+	Evidence []attestav1.DecisionEvidence
 }
+
+func (r *AnalysisResult) evidence(name, query, value, threshold string, passed *bool) {
+	r.Evidence = append(r.Evidence, attestav1.DecisionEvidence{
+		Name: name, Source: "prometheus", Query: query, Value: value, Threshold: threshold, Passed: passed,
+	})
+}
+
+func formatValue(v float64) string { return strconv.FormatFloat(v, 'g', 6, 64) }
+
+func boolPtr(b bool) *bool { return &b }
 
 // queries returns the request, error and p95 queries for a candidate.
 func (c AnalysisConfig) queries(candidateHash string) (requests, errs, p95 string) {
@@ -163,13 +177,17 @@ func analyze(ctx context.Context, q promql.Querier, cfg AnalysisConfig, candidat
 
 	requests, found, err := q.Query(ctx, reqQuery)
 	if err != nil {
-		return AnalysisResult{Result: AnalysisInconclusive, Message: fmt.Sprintf("Prometheus query failed: %v", err)}
+		result := AnalysisResult{Result: AnalysisInconclusive, Message: fmt.Sprintf("Prometheus query failed: %v", err)}
+		result.evidence("requests", reqQuery, "error: "+err.Error(), "", nil)
+		return result
 	}
 	if !found {
 		requests = 0
 	}
 	result := AnalysisResult{Requests: &requests}
-	if requests < cfg.MinRequests || requests == 0 {
+	enough := requests >= cfg.MinRequests && requests > 0
+	result.evidence("requests", reqQuery, formatValue(requests), ">= "+formatValue(cfg.MinRequests), boolPtr(enough))
+	if !enough {
 		result.Result = AnalysisInconclusive
 		result.Message = fmt.Sprintf("%.0f requests to the candidate in the last %s; at least %.0f are needed", requests, window, cfg.MinRequests)
 		return result
@@ -181,27 +199,43 @@ func analyze(ctx context.Context, q promql.Querier, cfg AnalysisConfig, candidat
 		if err != nil {
 			result.Result = AnalysisInconclusive
 			result.Message = fmt.Sprintf("Prometheus query failed: %v", err)
+			result.evidence("errors", errQuery, "error: "+err.Error(), "", nil)
 			return result
 		}
+		value := formatValue(errs)
 		if !found {
 			errs = 0 // traffic exists and no 5xx series: zero errors
+			value = "absent (0)"
 		}
+		result.evidence("errors", errQuery, value, "", nil)
 		rate := errs / requests * 100
 		result.ErrorRatePct = &rate
+		if cfg.ErrorRateThresholdPct != nil {
+			result.evidence("error-rate", "100 * errors / requests", formatValue(rate)+"%",
+				"<= "+formatValue(*cfg.ErrorRateThresholdPct)+"%", boolPtr(rate <= *cfg.ErrorRateThresholdPct))
+		}
+		if cfg.MinAvailabilityPct != nil {
+			result.evidence("availability", "100 - error-rate", formatValue(100-rate)+"%",
+				">= "+formatValue(*cfg.MinAvailabilityPct)+"%", boolPtr(100-rate >= *cfg.MinAvailabilityPct))
+		}
 	}
 	if cfg.LatencyP95ThresholdMs != nil {
+		threshold := "<= " + formatValue(*cfg.LatencyP95ThresholdMs) + "ms"
 		p95, found, err := q.Query(ctx, p95Query)
 		if err != nil {
 			result.Result = AnalysisInconclusive
 			result.Message = fmt.Sprintf("Prometheus query failed: %v", err)
+			result.evidence("latency-p95", p95Query, "error: "+err.Error(), threshold, nil)
 			return result
 		}
 		if !found {
 			result.Result = AnalysisInconclusive
 			result.Message = fmt.Sprintf("no latency histogram data for the candidate in the last %s", window)
+			result.evidence("latency-p95", p95Query, "absent", threshold, nil)
 			return result
 		}
 		result.LatencyP95Ms = &p95
+		result.evidence("latency-p95", p95Query, formatValue(p95)+"ms", threshold, boolPtr(p95 <= *cfg.LatencyP95ThresholdMs))
 	}
 
 	var failures []string

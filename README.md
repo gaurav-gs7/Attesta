@@ -12,12 +12,12 @@ Every value Attesta reports is either measured, recorded, or explicitly marked a
 | --- | --- | --- |
 | Rollout guard controller | Watches Deployments, writes status and Events, and restores the last healthy template when Kubernetes reports `ProgressDeadlineExceeded` or when the new revision fails `consecutiveFailures` metric checks in a row (error rate, p95 latency, availability from Prometheus, scoped to that revision). Inconclusive data never decides. Rolls back only Deployments that name the guard in `attesta.io/rollback-guards`, and never fights a GitOps tool that re-applies the bad version. Leader election, metrics, probes. | No traffic shifting, so no true canary: `spec.steps` is not used. |
 | SLO gate | Error rate, p95, multi-window burn rates (1h+5m, 6h+30m) and the 30-day error budget from Prometheus. Unknown data blocks `POST /rollouts`. | Thresholds are global constants, not per service. |
-| Health gate | Applies thresholds to the metrics in the request. | It does not measure anything: inputs are caller-supplied, and thresholds are fixed at 300ms p99 and 1%. |
+| Decision records | Every promotion, rollback and skipped or failed rollback is written by the controller as an immutable `RolloutDecision`: what it measured (each PromQL query and value, the Deployment's conditions), the revision and images, what it restored, and when. Records form a SHA-256 hash chain per guard; `attesta verify` or `jq` plus `sha256sum` detect an edited, inserted or deleted record. | Tamper-evident, not tamper-proof: anyone who can delete both a guard and its records can erase history; export the records if you need retention. Not signed. |
 | Rollback endpoints | Record a rollback request. | They do not change the cluster. Your deployment tooling, or the controller, must act. |
 | Incidents | Alertmanager webhook (v4) with fingerprint dedupe and resolve; timeline from recorded events only. | Root cause is never inferred; the postmortem draft leaves it as TODO. |
 | Readiness score | Checks which metadata fields were registered. | It does not inspect the cluster or the repository. |
 | Workflow runner | Ordered in-process steps with per-step state and events, persisted to PostgreSQL. | A crashed run is re-run from the start, not resumed. Only succeeded runs are replayed; failed and abandoned ones are re-run. |
-| CRDs | `RolloutGuard` is reconciled. | `AttestaService` and `SLOPolicy` are declarative records only; nothing reconciles them. |
+| CRDs | `RolloutGuard` is reconciled; `RolloutDecision` is written by the controller only. | `AttestaService` and `SLOPolicy` are declarative records only; nothing reconciles them. |
 
 ## Components
 
@@ -88,6 +88,19 @@ go run ./cmd/attesta-controller --kubeconfig "$HOME/.kube/config" --leader-elect
 ```
 
 The controller classifies each guarded rollout as `Progressing`, `Verifying`, `Healthy`, `Paused` or `Blocked`. Blocked means Kubernetes reported `ProgressDeadlineExceeded` for the current generation or, with `--prometheus-url` and `spec.checks`, that the new revision failed `consecutiveFailures` metric checks in a row. With `spec.rollback.enabled: true` it restores the last template that passed, never acts on a paused Deployment, and never rolls back twice onto the same template. See [docs/controller-operator.md](docs/controller-operator.md) for the rules, metrics and limits.
+
+Each decision is recorded as a `RolloutDecision` in the guard's namespace and chained to the one before:
+
+```bash
+kubectl get rolloutdecisions -n platform
+# NAME                                    GUARD                  SEQ   ACTION       TRIGGER          REVISION
+# payments-api-rollout-0f3c9a2e-000001    payments-api-rollout   1     Promoted     AnalysisPassed   3
+# payments-api-rollout-0f3c9a2e-000002    payments-api-rollout   2     RolledBack   AnalysisFailed   4
+
+kubectl get rolloutguards,rolloutdecisions -n platform -o json | attesta verify
+```
+
+Without Attesta's code, a record checks out when `jq -cjS '.spec | del(.hash)' | sha256sum` equals its `spec.hash`, and its `spec.previousHash` equals the hash of the record before it.
 
 ## SLO Evaluation
 

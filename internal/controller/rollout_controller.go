@@ -82,6 +82,11 @@ type RolloutGuardReconciler struct {
 	// Prometheus enables metric analysis for guards that set spec.checks.
 	// Nil disables it; guards then rely on ProgressDeadlineExceeded only.
 	Prometheus promql.Querier
+	// Actor identifies this controller in the decision records it writes.
+	Actor attestav1.DecisionActor
+	// APIReader reads around the cache. It is used only to adopt a decision
+	// record the cache has not seen yet; nil means the client.
+	APIReader client.Reader
 	// Now overrides the clock. Tests use it.
 	Now func() time.Time
 }
@@ -250,10 +255,14 @@ func (r *RolloutGuardReconciler) reconcile(ctx context.Context, req ctrl.Request
 	}
 	spec := rolloutGuardSpecFrom(&guard)
 	prev := statusFromGuard(&guard)
+	adopted, err := r.adoptRecordedDecisions(ctx, &guard, &prev)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	deploymentName := spec.DeploymentName(guard.Name)
 
 	var deployment appsv1.Deployment
-	err := r.Get(ctx, types.NamespacedName{Namespace: guard.Namespace, Name: deploymentName}, &deployment)
+	err = r.Get(ctx, types.NamespacedName{Namespace: guard.Namespace, Name: deploymentName}, &deployment)
 	if apierrors.IsNotFound(err) {
 		status := statusForMissingDeployment(prev, &guard, spec, deploymentName)
 		return ctrl.Result{}, r.finish(ctx, &guard, prev, status, nil)
@@ -282,13 +291,21 @@ func (r *RolloutGuardReconciler) reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	var actionErr error
+	var decision *decisionDraft
 	switch {
 	case promote:
 		if err := r.recordHealthyRevision(ctx, &deployment, &status); err != nil {
 			return ctrl.Result{}, err
 		}
+		decision = r.promotion(&deployment, prev, &status)
 	case blocked && spec.RollbackEnabled:
-		actionErr = r.rollback(ctx, &guard, &deployment, &status)
+		decision, actionErr = r.rollback(ctx, &guard, &deployment, &status)
+	}
+	if decision.worthRecording(prev, status) && !decision.matches(adopted, &deployment) {
+		// The record goes in before the status that points at it.
+		if err := r.recordDecision(ctx, &guard, &deployment, &status, decision); err != nil {
+			return ctrl.Result{}, errors.Join(actionErr, err)
+		}
 	}
 	if err := r.finish(ctx, &guard, prev, status, actionErr); err != nil {
 		return ctrl.Result{}, err
@@ -357,6 +374,10 @@ func (r *RolloutGuardReconciler) applyAnalysis(ctx context.Context, guard *attes
 		a.LastCheckTime = now.Format(time.RFC3339)
 		a.LastResult, a.LastMessage = result.Result, result.Message
 		a.Requests, a.ErrorRatePct, a.LatencyP95Ms = result.Requests, result.ErrorRatePct, result.LatencyP95Ms
+		for i := range result.Evidence {
+			result.Evidence[i].EvaluatedAt = a.LastCheckTime
+		}
+		a.LastEvidence = result.Evidence
 		switch result.Result {
 		case AnalysisPassed:
 			a.ConsecutivePasses++
@@ -467,11 +488,46 @@ func (r *RolloutGuardReconciler) recordHealthyRevision(ctx context.Context, depl
 	return nil
 }
 
-// rollback restores the last recorded healthy template. It returns an error
-// only for failures worth retrying; decisions not to act are recorded in the
-// status and return nil.
-func (r *RolloutGuardReconciler) rollback(ctx context.Context, guard *attestav1.RolloutGuard, deployment *appsv1.Deployment, status *RolloutGuardStatus) error {
+// promotion is the decision to record a newly healthy template, or nil if
+// the healthy template did not change in this pass.
+func (r *RolloutGuardReconciler) promotion(deployment *appsv1.Deployment, prev RolloutGuardStatus, status *RolloutGuardStatus) *decisionDraft {
+	if status.HealthyTemplateHash == "" || status.HealthyTemplateHash == prev.HealthyTemplateHash {
+		return nil
+	}
+	at := r.now().UTC().Format(time.RFC3339)
+	evidence := analysisEvidence(status, status.HealthyTemplateHash)
+	trigger := "RolloutComplete"
+	if len(evidence) > 0 {
+		trigger = "AnalysisPassed"
+	}
+	return &decisionDraft{
+		action:       attestav1.ActionPromoted,
+		trigger:      trigger,
+		reason:       status.Reason,
+		message:      fmt.Sprintf("revision %s (template %s) is the healthy revision a rollback restores: %s", status.HealthyRevision, status.HealthyTemplateHash, status.Message),
+		revision:     status.HealthyRevision,
+		templateHash: status.HealthyTemplateHash,
+		evidence:     append(evidence, deploymentEvidence(deployment, at)...),
+	}
+}
+
+// rollback restores the last recorded healthy template. It returns the
+// decision it made, if any, and an error only for failures worth retrying;
+// decisions not to act are recorded in the status and return nil.
+func (r *RolloutGuardReconciler) rollback(ctx context.Context, guard *attestav1.RolloutGuard, deployment *appsv1.Deployment, status *RolloutGuardStatus) (*decisionDraft, error) {
 	cause, causeMessage := status.Reason, status.Message
+	// The candidate is known when analysis ran; the ReplicaSet lookup below
+	// fills it in otherwise.
+	d := &decisionDraft{trigger: cause}
+	if a := status.Analysis; a != nil {
+		d.revision, d.templateHash = a.CandidateRevision, a.CandidateTemplateHash
+	}
+	at := r.now().UTC().Format(time.RFC3339)
+	decide := func(action string) *decisionDraft {
+		d.action, d.reason, d.message = action, status.Reason, status.Message
+		d.evidence = append(analysisEvidence(status, d.templateHash), deploymentEvidence(deployment, at)...)
+		return d
+	}
 	if !rollbackAuthorized(deployment, guard.Name) {
 		// The controller can update any Deployment it watches. Acting for a
 		// guard the Deployment never named would let anyone who can create a
@@ -480,26 +536,29 @@ func (r *RolloutGuardReconciler) rollback(ctx context.Context, guard *attestav1.
 		status.Message = notAuthorizedMessage(deployment, guard.Name)
 		status.SetCondition(ConditionRolledBack, metav1.ConditionFalse, reasonNotAuthorized, status.Message)
 		rollbackTotal.WithLabelValues("skipped_not_authorized").Inc()
-		return nil
+		return decide(attestav1.ActionRollbackSkipped), nil
 	}
 	if status.HealthyTemplateHash == "" {
 		status.Reason = reasonNoHealthyRevision
 		status.Message = fmt.Sprintf("rollout of %s is blocked and no healthy revision has been recorded; not rolling back", deployment.Name)
 		status.SetCondition(ConditionRolledBack, metav1.ConditionFalse, reasonNoHealthyRevision, status.Message)
 		rollbackTotal.WithLabelValues("skipped_no_healthy_revision").Inc()
-		return nil
+		return decide(attestav1.ActionRollbackSkipped), nil
 	}
 
 	current, replicaSets, err := r.ownedReplicaSets(ctx, deployment)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	if current != nil {
+		d.revision, d.templateHash = current.Annotations[revisionAnnotation], current.Labels[podTemplateHashLabel]
 	}
 	if current != nil && current.Labels[podTemplateHashLabel] == status.HealthyTemplateHash {
 		status.Reason = reasonHealthyRevFailing
 		status.Message = fmt.Sprintf("deployment %s is already on the last healthy template (revision %s) and is still blocked; not rolling back again",
 			deployment.Name, current.Annotations[revisionAnnotation])
 		rollbackTotal.WithLabelValues("skipped_already_healthy").Inc()
-		return nil
+		return decide(attestav1.ActionRollbackSkipped), nil
 	}
 
 	if current != nil && status.RollbackFromTemplateHash != "" && current.Labels[podTemplateHashLabel] == status.RollbackFromTemplateHash {
@@ -514,7 +573,7 @@ func (r *RolloutGuardReconciler) rollback(ctx context.Context, guard *attestav1.
 			orUnknown(deployment.Annotations[rollbackAtAnnotation]), gitOpsHint(deployment))
 		status.SetCondition(ConditionRolledBack, metav1.ConditionFalse, reasonRollbackReverted, status.Message)
 		rollbackTotal.WithLabelValues("skipped_reverted").Inc()
-		return nil
+		return decide(attestav1.ActionRollbackSkipped), nil
 	}
 
 	var target *appsv1.ReplicaSet
@@ -530,7 +589,7 @@ func (r *RolloutGuardReconciler) rollback(ctx context.Context, guard *attestav1.
 		status.Message = fmt.Sprintf("healthy ReplicaSet with template hash %s no longer exists for deployment %s", status.HealthyTemplateHash, deployment.Name)
 		status.SetCondition(ConditionRolledBack, metav1.ConditionFalse, reasonHealthyRevisionGone, status.Message)
 		rollbackTotal.WithLabelValues("skipped_healthy_revision_gone").Inc()
-		return nil
+		return decide(attestav1.ActionRollbackFailed), nil
 	}
 
 	fromRevision := deployment.Annotations[revisionAnnotation]
@@ -560,14 +619,14 @@ func (r *RolloutGuardReconciler) rollback(ctx context.Context, guard *attestav1.
 			// The Deployment changed after the cached read this decision was
 			// made on. Leave the status as evaluated and decide again on the
 			// fresh object.
-			return fmt.Errorf("roll back deployment %s/%s: %w", deployment.Namespace, deployment.Name, err)
+			return nil, fmt.Errorf("roll back deployment %s/%s: %w", deployment.Namespace, deployment.Name, err)
 		}
 		status.Phase = PhaseRollbackFailed
 		status.Reason = reasonRollbackFailed
 		status.Message = fmt.Sprintf("update deployment %s: %v", deployment.Name, err)
 		status.SetCondition(ConditionRolledBack, metav1.ConditionFalse, reasonRollbackFailed, status.Message)
 		rollbackTotal.WithLabelValues("failed").Inc()
-		return fmt.Errorf("roll back deployment %s/%s: %w", deployment.Namespace, deployment.Name, err)
+		return decide(attestav1.ActionRollbackFailed), fmt.Errorf("roll back deployment %s/%s: %w", deployment.Namespace, deployment.Name, err)
 	}
 
 	status.Phase = PhaseRolledBack
@@ -580,7 +639,8 @@ func (r *RolloutGuardReconciler) rollback(ctx context.Context, guard *attestav1.
 	}
 	status.SetCondition(ConditionRolledBack, metav1.ConditionTrue, reasonRollbackTriggered, status.Message)
 	rollbackTotal.WithLabelValues("triggered").Inc()
-	return nil
+	d.restoredTo = &attestav1.DecisionRevision{Revision: toRevision, TemplateHash: status.HealthyTemplateHash}
+	return decide(attestav1.ActionRolledBack), nil
 }
 
 // ownedReplicaSets returns the Deployment's ReplicaSets that carry a revision,

@@ -1,6 +1,7 @@
 // Package v1 holds the attesta.io/v1 API types: RolloutGuard, which the
-// controller reconciles, and AttestaService and SLOPolicy, which the
-// generated scaffold declares and nothing reconciles yet.
+// controller reconciles; RolloutDecision, the hash-chained record of each
+// decision it makes; and AttestaService and SLOPolicy, which the generated
+// scaffold declares and nothing reconciles yet.
 //
 // The CRDs in deploy/crds are generated from these types (make generate),
 // so the schema the API server enforces is the one the controller decodes.
@@ -28,6 +29,7 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&RolloutGuard{}, &RolloutGuardList{},
 		&AttestaService{}, &AttestaServiceList{},
 		&SLOPolicy{}, &SLOPolicyList{},
+		&RolloutDecision{}, &RolloutDecisionList{},
 	)
 	metav1.AddToGroupVersion(scheme, GroupVersion)
 	return nil

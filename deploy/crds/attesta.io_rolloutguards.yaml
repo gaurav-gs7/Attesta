@@ -190,6 +190,54 @@ spec:
                     type: number
                   lastCheckTime:
                     type: string
+                  lastEvidence:
+                    description: |-
+                      LastEvidence is the queries and values of the last check, copied into
+                      the decision record when the check decides.
+                    items:
+                      description: DecisionEvidence is one measurement behind a decision.
+                      properties:
+                        evaluatedAt:
+                          description: EvaluatedAt is when the value was read, RFC
+                            3339.
+                          type: string
+                        name:
+                          description: |-
+                            Name is the check: requests, error-rate, latency-p95, availability,
+                            error-budget-remaining, or deployment-condition.
+                          type: string
+                        passed:
+                          description: Passed reports whether the value was within
+                            the threshold.
+                          type: boolean
+                        query:
+                          description: Query is the PromQL sent, or for Kubernetes
+                            the object and field read.
+                          type: string
+                        source:
+                          description: Source is prometheus or kubernetes.
+                          enum:
+                          - prometheus
+                          - kubernetes
+                          type: string
+                        threshold:
+                          description: Threshold is the limit the value was judged
+                            against, if any.
+                          type: string
+                        value:
+                          description: |-
+                            Value is what came back, as text, so the record is the same in every
+                            language that verifies it; "absent" when the query returned no data.
+                          type: string
+                      required:
+                      - evaluatedAt
+                      - name
+                      - query
+                      - source
+                      - value
+                      type: object
+                    maxItems: 20
+                    type: array
                   lastMessage:
                     type: string
                   lastResult:
@@ -281,6 +329,23 @@ spec:
                 type: string
               healthyTemplateHash:
                 type: string
+              lastDecision:
+                description: |-
+                  LastDecision is the head of the guard's chain of RolloutDecisions:
+                  the next decision links to it.
+                properties:
+                  hash:
+                    type: string
+                  name:
+                    type: string
+                  sequence:
+                    format: int64
+                    type: integer
+                required:
+                - hash
+                - name
+                - sequence
+                type: object
               message:
                 type: string
               observedGeneration:

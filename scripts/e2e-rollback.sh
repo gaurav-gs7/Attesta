@@ -340,4 +340,25 @@ triggered="$(leader_metric 'attesta_rolloutguard_rollback_total{outcome="trigger
 [[ "$triggered" == "1" ]] || fail "new leader reports rollback_total{outcome=\"triggered\"}=${triggered:-absent}, want 1"
 log "ok: app2 rolled back by metric analysis: $message"
 
-log "PASS: deadline and metric-analysis rollbacks both restored the healthy template once; paused rollouts were left alone"
+log "each decision is on record with its evidence, and every record hashes to what it claims"
+kubectl -n "$NS" get rolloutdecisions -o json >/tmp/decisions.json
+rollbacks="$(jq '[.items[] | select(.spec.guard=="app2-rollout" and .spec.action=="RolledBack")] | length' /tmp/decisions.json)"
+[[ "$rollbacks" == "1" ]] || fail "app2 has $rollbacks RolledBack decision records, want 1"
+measured="$(jq -r '.items[] | select(.spec.guard=="app2-rollout" and .spec.action=="RolledBack")
+  | .spec.evidence[] | select(.name=="error-rate") | "\(.value) \(.threshold) \(.passed)"' /tmp/decisions.json)"
+[[ "$measured" == "20% <= 1% false" ]] || fail "app2's rollback record carries error-rate evidence '$measured', want '20% <= 1% false'"
+# The documented check, with no Attesta code involved.
+count="$(jq '.items | length' /tmp/decisions.json)"
+for ((i = 0; i < count; i++)); do
+  want="$(jq -r ".items[$i].spec.hash" /tmp/decisions.json)"
+  got="$(jq -cjS ".items[$i].spec | del(.hash)" /tmp/decisions.json | sha256sum | cut -d' ' -f1)"
+  [[ "$got" == "$want" ]] || fail "decision $(jq -r ".items[$i].metadata.name" /tmp/decisions.json) hashes to $got, claims $want"
+done
+if kubectl -n "$NS" patch rolloutdecision "$(jq -r '.items[0].metadata.name' /tmp/decisions.json)" --type=merge \
+  -p '{"spec":{"reason":"edited"}}' 2>/tmp/patch.err; then
+  fail "the API server accepted an edit to a decision record"
+fi
+grep -q immutable /tmp/patch.err || fail "editing a decision failed for the wrong reason: $(cat /tmp/patch.err)"
+log "ok: $count decision records verified by sha256 over jq's canonical form; edits are refused"
+
+log "PASS: deadline and metric-analysis rollbacks both restored the healthy template once and are on record; paused rollouts were left alone"

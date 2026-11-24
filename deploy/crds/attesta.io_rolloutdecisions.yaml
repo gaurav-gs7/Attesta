@@ -1,0 +1,249 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.23.0
+  name: rolloutdecisions.attesta.io
+spec:
+  group: attesta.io
+  names:
+    kind: RolloutDecision
+    listKind: RolloutDecisionList
+    plural: rolloutdecisions
+    shortNames:
+    - rdec
+    singular: rolloutdecision
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.guard
+      name: Guard
+      type: string
+    - jsonPath: .spec.sequence
+      name: Seq
+      type: integer
+    - jsonPath: .spec.action
+      name: Action
+      type: string
+    - jsonPath: .spec.trigger
+      name: Trigger
+      type: string
+    - jsonPath: .spec.deployment.revision
+      name: Revision
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          RolloutDecision is the record of one decision a RolloutGuard's controller
+          made about a Deployment: what it measured, where, when, and what it did.
+          Records are written only by the controller, never change (the API server
+          refuses any edit of spec), and form a hash chain per guard: each carries
+          the SHA-256 of its own spec and the hash of the record before it, so a
+          deleted, inserted or altered record breaks the chain where it happened.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: RolloutDecisionSpec is the decision. Every field is covered
+              by Hash.
+            properties:
+              action:
+                enum:
+                - Promoted
+                - RolledBack
+                - RollbackFailed
+                - RollbackSkipped
+                - Paused
+                type: string
+              actor:
+                description: Actor is the controller instance that decided.
+                properties:
+                  controller:
+                    description: |-
+                      Controller is the controller's name and version, such as
+                      attesta-controller/v0.2.0.
+                    type: string
+                  instance:
+                    description: 'Instance is the replica that held the leader lease:
+                      its pod name.'
+                    type: string
+                required:
+                - controller
+                type: object
+              decidedAt:
+                description: DecidedAt is when the controller decided, RFC 3339 with
+                  nanoseconds.
+                minLength: 1
+                type: string
+              deployment:
+                description: Deployment is the Deployment and revision the decision
+                  is about.
+                properties:
+                  generation:
+                    format: int64
+                    type: integer
+                  images:
+                    description: Images are the pod template's container images, in
+                      order.
+                    items:
+                      type: string
+                    type: array
+                  name:
+                    type: string
+                  revision:
+                    description: |-
+                      Revision and TemplateHash identify the ReplicaSet the Deployment was
+                      rolling out when the decision was made.
+                    type: string
+                  templateHash:
+                    type: string
+                  uid:
+                    description: UID distinguishes a Deployment from a later one of
+                      the same name.
+                    type: string
+                required:
+                - generation
+                - name
+                - uid
+                type: object
+              evidence:
+                description: Evidence is what the controller measured for this decision.
+                items:
+                  description: DecisionEvidence is one measurement behind a decision.
+                  properties:
+                    evaluatedAt:
+                      description: EvaluatedAt is when the value was read, RFC 3339.
+                      type: string
+                    name:
+                      description: |-
+                        Name is the check: requests, error-rate, latency-p95, availability,
+                        error-budget-remaining, or deployment-condition.
+                      type: string
+                    passed:
+                      description: Passed reports whether the value was within the
+                        threshold.
+                      type: boolean
+                    query:
+                      description: Query is the PromQL sent, or for Kubernetes the
+                        object and field read.
+                      type: string
+                    source:
+                      description: Source is prometheus or kubernetes.
+                      enum:
+                      - prometheus
+                      - kubernetes
+                      type: string
+                    threshold:
+                      description: Threshold is the limit the value was judged against,
+                        if any.
+                      type: string
+                    value:
+                      description: |-
+                        Value is what came back, as text, so the record is the same in every
+                        language that verifies it; "absent" when the query returned no data.
+                      type: string
+                  required:
+                  - evaluatedAt
+                  - name
+                  - query
+                  - source
+                  - value
+                  type: object
+                maxItems: 20
+                type: array
+              guard:
+                description: Guard is the RolloutGuard, in the record's namespace,
+                  that decided.
+                minLength: 1
+                type: string
+              guardUID:
+                description: |-
+                  GuardUID is the guard's UID. A guard deleted and created again under
+                  the same name starts a new chain rather than continuing the old one.
+                minLength: 1
+                type: string
+              hash:
+                description: |-
+                  Hash is the hex SHA-256 of this spec without the hash field,
+                  serialized as compact JSON with object keys sorted and no HTML
+                  escaping: jq -cjS '.spec | del(.hash)' reproduces the input.
+                pattern: ^[0-9a-f]{64}$
+                type: string
+              message:
+                description: Message explains the decision in a sentence.
+                type: string
+              previousHash:
+                description: PreviousHash is the Hash of decision Sequence-1, empty
+                  for the first.
+                pattern: ^([0-9a-f]{64})?$
+                type: string
+              reason:
+                description: Reason is the machine-readable outcome, as on the guard's
+                  status.
+                minLength: 1
+                type: string
+              restoredTo:
+                description: RestoredTo is the revision a rollback restored.
+                properties:
+                  revision:
+                    type: string
+                  templateHash:
+                    type: string
+                required:
+                - revision
+                - templateHash
+                type: object
+              sequence:
+                description: Sequence is the decision's position in the guard's chain,
+                  from 1.
+                format: int64
+                minimum: 1
+                type: integer
+              trigger:
+                description: |-
+                  Trigger is what the decision responded to: ProgressDeadlineExceeded,
+                  AnalysisFailed, AnalysisPassed, RolloutComplete or
+                  ErrorBudgetExhausted.
+                minLength: 1
+                type: string
+            required:
+            - action
+            - actor
+            - decidedAt
+            - deployment
+            - guard
+            - guardUID
+            - hash
+            - reason
+            - sequence
+            - trigger
+            type: object
+            x-kubernetes-validations:
+            - message: decision records are immutable
+              rule: self == oldSelf
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources: {}

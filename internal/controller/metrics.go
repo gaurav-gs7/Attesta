@@ -25,6 +25,13 @@ var (
 		Help:      "Metric analysis checks of rolling-out revisions by result (Passed, Failed, Inconclusive).",
 	}, []string{"result"})
 
+	decisionsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "attesta",
+		Subsystem: "rolloutguard",
+		Name:      "decisions_recorded_total",
+		Help:      "RolloutDecision records written, by action (Promoted, RolledBack, RollbackFailed, RollbackSkipped, Paused).",
+	}, []string{"action"})
+
 	phaseTransitions = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "attesta",
 		Subsystem: "rolloutguard",
@@ -39,6 +46,6 @@ var registerOnce sync.Once
 // controller-runtime's metrics.Registry. Only the first call has an effect.
 func RegisterMetrics(reg prometheus.Registerer) {
 	registerOnce.Do(func() {
-		reg.MustRegister(rollbackTotal, phaseTransitions, analysisTotal)
+		reg.MustRegister(rollbackTotal, phaseTransitions, analysisTotal, decisionsTotal)
 	})
 }

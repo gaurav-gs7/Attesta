@@ -178,6 +178,11 @@ type RolloutGuardStatus struct {
 	// +optional
 	Analysis *AnalysisStatus `json:"analysis,omitempty"`
 
+	// LastDecision is the head of the guard's chain of RolloutDecisions:
+	// the next decision links to it.
+	// +optional
+	LastDecision *DecisionRef `json:"lastDecision,omitempty"`
+
 	// +optional
 	// +listType=map
 	// +listMapKey=type
@@ -209,6 +214,11 @@ type AnalysisStatus struct {
 	ErrorRatePct *float64 `json:"errorRatePct,omitempty"`
 	// +optional
 	LatencyP95Ms *float64 `json:"latencyP95Ms,omitempty"`
+	// LastEvidence is the queries and values of the last check, copied into
+	// the decision record when the check decides.
+	// +optional
+	// +kubebuilder:validation:MaxItems=20
+	LastEvidence []DecisionEvidence `json:"lastEvidence,omitempty"`
 }
 
 // SetCondition sets a condition at the status's observed generation,

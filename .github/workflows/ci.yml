@@ -201,6 +201,8 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: ${{ env.GO_VERSION }}
+      - name: The decision chains verify, guard heads included
+        run: kubectl get rolloutguards,rolloutdecisions -n attesta-e2e -o json | go run ./cmd/attesta verify
       - name: The scaffold's custom resources pass the CRD schemas
         # The CRDs are installed by the test above. A server-side dry run
         # checks enums, patterns and ranges, not only field names.

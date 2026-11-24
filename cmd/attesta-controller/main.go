@@ -16,6 +16,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -124,8 +125,12 @@ func run(ctx context.Context, o options) error {
 		cacheOpts.DefaultNamespaces = map[string]cache.Config{o.namespace: {}}
 	}
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme:                  Scheme(),
-		Cache:                   cacheOpts,
+		Scheme: Scheme(),
+		Cache:  cacheOpts,
+		// Decision records only accumulate, and the controller reads one by
+		// name only when a status write was lost. Reading them live keeps
+		// them out of memory and the controller's rights at get and create.
+		Client:                  client.Options{Cache: &client.CacheOptions{DisableFor: []client.Object{&attestav1.RolloutDecision{}}}},
 		Metrics:                 metricsserver.Options{BindAddress: o.metricsAddr},
 		HealthProbeBindAddress:  o.healthAddr,
 		LeaderElection:          o.leaderElect,
@@ -145,9 +150,15 @@ func run(ctx context.Context, o options) error {
 	}
 	controller.RegisterMetrics(metrics.Registry)
 
+	instance := os.Getenv("POD_NAME")
+	if instance == "" {
+		instance, _ = os.Hostname()
+	}
 	reconciler := &controller.RolloutGuardReconciler{
-		Client:   mgr.GetClient(),
-		Recorder: mgr.GetEventRecorder("attesta-controller"),
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Recorder:  mgr.GetEventRecorder("attesta-controller"),
+		Actor:     attestav1.DecisionActor{Controller: "attesta-controller/" + version, Instance: instance},
 	}
 	if o.prometheusURL != "" {
 		promOpts := promql.Options{CAFile: o.promCAFile, QueryTimeout: o.promTimeout}

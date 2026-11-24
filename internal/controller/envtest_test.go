@@ -51,6 +51,7 @@ func TestEnvtest(t *testing.T) {
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                 testScheme(),
+		Client:                 client.Options{Cache: &client.CacheOptions{DisableFor: []client.Object{&attestav1.RolloutDecision{}}}},
 		Metrics:                metricsserver.Options{BindAddress: "0"},
 		HealthProbeBindAddress: "0",
 	})
@@ -58,7 +59,7 @@ func TestEnvtest(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(ctrl.LoggerInto(context.Background(), ctrl.Log))
-	r := &RolloutGuardReconciler{Client: mgr.GetClient(), Recorder: mgr.GetEventRecorder("attesta-controller")}
+	r := &RolloutGuardReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Recorder: mgr.GetEventRecorder("attesta-controller")}
 	if err := r.SetupWithManager(ctx, mgr, 1); err != nil {
 		t.Fatal(err)
 	}
@@ -171,6 +172,37 @@ func TestEnvtest(t *testing.T) {
 		if after.Annotations[rollbackGuardAnnotation] != testGuardName || !strings.Contains(rolledBack.Message, "ProgressDeadlineExceeded") ||
 			g.Status.RollbackFromTemplateHash != "h2" {
 			t.Fatalf("rollback not attributed: annotations %v, status %+v", after.Annotations, g.Status)
+		}
+	})
+
+	t.Run("decisions are recorded, verifiable after a round trip, and immutable", func(t *testing.T) {
+		g := waitForGuard(ctx, t, c, "the rollback decision is the chain head", func(g *attestav1.RolloutGuard) bool {
+			return g.Status.LastDecision != nil && g.Status.LastDecision.Sequence >= 2
+		})
+		var list attestav1.RolloutDecisionList
+		if err := c.List(ctx, &list, client.InNamespace(testNamespace),
+			client.MatchingLabels{attestav1.DecisionGuardUIDLabel: string(g.UID)}); err != nil {
+			t.Fatal(err)
+		}
+		// Records read back from the API server, after its defaulting and
+		// pruning, must still hash to what the controller sealed.
+		if err := attestav1.VerifyChain(g.Name, string(g.UID), list.Items, g.Status.LastDecision); err != nil {
+			t.Fatal(err)
+		}
+		var rolledBack *attestav1.RolloutDecision
+		for i := range list.Items {
+			if list.Items[i].Spec.Action == attestav1.ActionRolledBack {
+				rolledBack = &list.Items[i]
+			}
+		}
+		if rolledBack == nil || rolledBack.Spec.RestoredTo == nil || rolledBack.Spec.RestoredTo.TemplateHash != "h1" {
+			t.Fatalf("no RolledBack record restoring h1 among %d records", len(list.Items))
+		}
+
+		edited := rolledBack.DeepCopy()
+		edited.Spec.Reason = "NothingToSeeHere"
+		if err := c.Update(ctx, edited); !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), "immutable") {
+			t.Fatalf("editing a decision: %v, want Invalid (immutable)", err)
 		}
 	})
 }

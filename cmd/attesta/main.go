@@ -76,6 +76,8 @@ func run(args []string) error {
 		return incident(rest)
 	case "workflow", "workflows":
 		return workflow(rest)
+	case "verify":
+		return verify(rest)
 	default:
 		return errUsage
 	}
@@ -479,6 +481,7 @@ Usage:
   attesta incident show inc-20260516103000
   attesta workflows list
   attesta workflows show wf-...
+  kubectl get rolloutguards,rolloutdecisions -n payments -o json | attesta verify
   attesta list
   attesta status --name payments-api
   attesta rollback --name payments-api

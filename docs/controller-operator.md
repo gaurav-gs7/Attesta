@@ -72,6 +72,31 @@ Not implemented: traffic shifting. `spec.steps` is accepted but not used, so the
 
 If an Argo CD Application with `selfHeal: true` manages the same Deployment, Argo CD reverts the controller's rollback to the version in Git; the controller then reports `RollbackReverted` and stands down. The Argo CD Application that `attesta service init` generates turns self-heal off when rollback is enabled. See [Who owns the pod template](architecture.md#who-owns-the-pod-template).
 
+## Decision Records
+
+Every decision the controller makes is written as a `RolloutDecision` (short name `rdec`) in the guard's namespace, before the guard's status is updated:
+
+| Action | Recorded when |
+| --- | --- |
+| `Promoted` | A new template becomes the guard's healthy template, the one a rollback restores. |
+| `RolledBack` | The controller restored the healthy template. |
+| `RollbackFailed` | The rollback could not be done (the Deployment update failed, or the healthy ReplicaSet is gone). Recorded when the reason first appears, not on every retry. |
+| `RollbackSkipped` | A rollback was due and the controller declined: the Deployment did not consent, no healthy template was recorded, the healthy template is itself failing, or the bad template was re-applied by GitOps. Recorded once per reason. |
+
+A record holds the trigger (`ProgressDeadlineExceeded`, `AnalysisFailed`, `AnalysisPassed`, `RolloutComplete`), the Deployment's UID, generation, revision, template hash and images, the revision restored, the controller version and pod that decided, and the evidence: every PromQL query sent with its value, threshold and verdict, and the Deployment's `Progressing` condition and replica counts. A failed metric check's evidence reads like `error-rate 20% <= 1% false`.
+
+**The chain.** Each record carries `sequence`, `previousHash` (the hash of the record before it) and `hash`: SHA-256 over the record's `spec` without `hash`, as compact JSON with sorted keys and no HTML escaping, which is exactly what `jq -cjS '.spec | del(.hash)'` prints. The guard's `status.lastDecision` points at the head. An edited record no longer matches its hash; an inserted or deleted one breaks the sequence or the `previousHash` link; a record deleted from the end no longer matches the guard's head. `attesta verify` checks all of this for every guard in kubectl's JSON output and prints the trail:
+
+```bash
+kubectl get rolloutguards,rolloutdecisions -n platform -o json | attesta verify
+```
+
+**Immutability.** The CRD refuses any change to a record's `spec` (`self == oldSelf`), for every user, the controller included. The controller's RBAC on `rolloutdecisions` is `get` and `create`, nothing else. Grant `create` to no one else: a record someone else writes at a guard's next position is never adopted; the guard stops recording, and its reconciles fail with an error naming the record, until it is removed.
+
+**Crash safety.** The record is created before the status write that points at it. If the status write is lost (conflict, crash), the next pass finds the record at the next position, checks that it links to the current head and hashes correctly, and adopts it rather than recording the same decision twice. A rollback is done before its record is written; a crash between the two leaves the rollback recorded only in the Deployment's `attesta.io/rollback-*` annotations.
+
+**Limits.** Records are tamper-evident, not tamper-proof: someone allowed to delete both a guard and all of its records can remove its history, and nothing signs the records. They are never garbage-collected; a guard deleted and recreated under the same name starts a new chain (the name and `spec.guardUID` include the guard's UID). Pruning old records breaks verification from sequence 1; export them first if you need both retention limits and an unbroken chain.
+
 ## Run Locally
 
 ```bash
@@ -115,6 +140,7 @@ Metrics:
 - `attesta_rolloutguard_rollback_total{outcome}`: `triggered`, `failed`, or the reason a rollback was skipped
 - `attesta_rolloutguard_phase_transitions_total{phase}`
 - `attesta_rolloutguard_analysis_total{result}`: `Passed`, `Failed` or `Inconclusive` metric checks
+- `attesta_rolloutguard_decisions_recorded_total{action}`: `RolloutDecision` records written
 - controller-runtime's own: `controller_runtime_reconcile_total{controller="rolloutguard",result}`, `controller_runtime_reconcile_time_seconds`, `controller_runtime_reconcile_errors_total`, and the `workqueue_*` metrics
 - Go runtime and process metrics
 
@@ -133,7 +159,7 @@ Conditions:
 - `Analysis`, when the guard sets `spec.checks`.
 - `RollbackAuthorized`, when rollback is enabled: whether the Deployment names the guard in `attesta.io/rollback-guards`.
 
-`lastTransitionTime` changes only when a condition's status changes. Other fields: `healthyRevision`, `healthyTemplateHash`, `healthyGeneration`, `rollbackRevision`, `rollbackTemplateHash`, `rollbackFromTemplateHash`, replica counts, and the observed generations of the guard and the Deployment.
+`lastTransitionTime` changes only when a condition's status changes. Other fields: `healthyRevision`, `healthyTemplateHash`, `healthyGeneration`, `rollbackRevision`, `rollbackTemplateHash`, `rollbackFromTemplateHash`, replica counts, the observed generations of the guard and the Deployment, `lastDecision` (the head of the decision chain) and, while a revision is analysed, `analysis.lastEvidence` (the queries and values of the last check).
 
 ```bash
 kubectl get rolloutguards -A

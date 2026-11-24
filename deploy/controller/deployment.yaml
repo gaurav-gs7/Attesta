@@ -47,6 +47,10 @@ spec:
             # Enable metric analysis for guards that set spec.checks:
             # - --prometheus-url=http://prometheus-operated.monitoring.svc:9090
           env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:

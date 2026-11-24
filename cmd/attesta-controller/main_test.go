@@ -25,7 +25,7 @@ func TestFlagsDoNotClashWithLibraryFlags(t *testing.T) {
 
 func TestSchemeKnowsEveryTypeTheControllerUses(t *testing.T) {
 	s := Scheme()
-	for _, kind := range []string{"RolloutGuard", "Deployment", "ReplicaSet"} {
+	for _, kind := range []string{"RolloutGuard", "RolloutDecision", "Deployment", "ReplicaSet"} {
 		found := false
 		for gvk := range s.AllKnownTypes() {
 			if gvk.Kind == kind {
