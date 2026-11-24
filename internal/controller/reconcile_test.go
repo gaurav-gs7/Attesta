@@ -93,7 +93,7 @@ func newHarness(t *testing.T, rollback map[string]any, extraGuardFields map[stri
 		WithIndex(&attestav1.RolloutGuard{}, TargetDeploymentIndex, guardTargetIndex).
 		WithIndex(&appsv1.ReplicaSet{}, OwnerIndex, replicaSetOwnerIndex).
 		Build()
-	h.c = interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+	h.c = interceptor.NewClient(base, interceptor.Funcs{
 		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
 			if _, ok := obj.(*appsv1.Deployment); ok {
 				h.mu.Lock()

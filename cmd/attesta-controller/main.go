@@ -14,8 +14,6 @@ import (
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -31,7 +29,6 @@ import (
 var version = "dev"
 
 type options struct {
-	kubeconfig       string
 	namespace        string
 	resync           time.Duration
 	workers          int
@@ -52,25 +49,7 @@ type options struct {
 }
 
 func main() {
-	var o options
-	flag.StringVar(&o.kubeconfig, "kubeconfig", "", "path to kubeconfig; defaults to $KUBECONFIG, in-cluster config, then ~/.kube/config")
-	flag.StringVar(&o.namespace, "namespace", "", "namespace to watch; empty watches all namespaces")
-	flag.DurationVar(&o.resync, "resync", 30*time.Second, "interval at which every RolloutGuard is re-evaluated")
-	flag.IntVar(&o.workers, "workers", 2, "concurrent reconcile workers")
-	flag.StringVar(&o.metricsAddr, "metrics-addr", ":8080", "address for the Prometheus /metrics endpoint; \"0\" disables it")
-	flag.StringVar(&o.healthAddr, "health-addr", ":8081", "address for /healthz and /readyz")
-	flag.BoolVar(&o.leaderElect, "leader-elect", true, "use a Lease so only one replica reconciles at a time")
-	flag.StringVar(&o.leaderElectionNS, "leader-election-namespace", "", "namespace for the leader election Lease; defaults to $POD_NAMESPACE, then attesta-system")
-	flag.StringVar(&o.leaderElectionID, "leader-election-id", "attesta-controller", "name of the leader election Lease")
-	flag.DurationVar(&o.leaseDuration, "lease-duration", 15*time.Second, "leader election lease duration")
-	flag.DurationVar(&o.renewDeadline, "renew-deadline", 10*time.Second, "leader election renew deadline")
-	flag.DurationVar(&o.retryPeriod, "retry-period", 2*time.Second, "leader election retry period")
-	flag.DurationVar(&o.shutdownTimeout, "shutdown-timeout", 30*time.Second, "time reconciles get to finish on shutdown before the lease is released")
-	flag.StringVar(&o.prometheusURL, "prometheus-url", "", "Prometheus base URL for metric analysis of guards that set spec.checks; empty disables analysis")
-	flag.StringVar(&o.promTokenFile, "prometheus-bearer-token-file", "", "file holding a bearer token for Prometheus (for example a mounted Secret)")
-	flag.StringVar(&o.promCAFile, "prometheus-ca-file", "", "PEM bundle to trust for Prometheus's TLS certificate")
-	flag.DurationVar(&o.promTimeout, "prometheus-query-timeout", promql.DefaultQueryTimeout, "timeout for each Prometheus query")
-	flag.BoolVar(&o.showVersion, "version", false, "print the version and exit")
+	o := registerFlags(flag.CommandLine)
 	flag.Parse()
 
 	if o.showVersion {
@@ -80,10 +59,37 @@ func main() {
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	ctrl.SetLogger(logr.FromSlogHandler(logger.Handler()))
-	if err := run(ctrl.SetupSignalHandler(), o); err != nil {
+	if err := run(ctrl.SetupSignalHandler(), *o); err != nil {
 		logger.Error("attesta-controller exited", "error", err)
 		os.Exit(1)
 	}
+}
+
+// registerFlags defines the controller's flags on fs, which main passes as
+// the default flag set: controller-runtime registers --kubeconfig there, and
+// a second definition of any flag panics at startup.
+func registerFlags(fs *flag.FlagSet) *options {
+	var o options
+	// --kubeconfig is registered by controller-runtime's config package on
+	// the default flag set; defining it here too panics at startup.
+	fs.StringVar(&o.namespace, "namespace", "", "namespace to watch; empty watches all namespaces")
+	fs.DurationVar(&o.resync, "resync", 30*time.Second, "interval at which every RolloutGuard is re-evaluated")
+	fs.IntVar(&o.workers, "workers", 2, "concurrent reconcile workers")
+	fs.StringVar(&o.metricsAddr, "metrics-addr", ":8080", "address for the Prometheus /metrics endpoint; \"0\" disables it")
+	fs.StringVar(&o.healthAddr, "health-addr", ":8081", "address for /healthz and /readyz")
+	fs.BoolVar(&o.leaderElect, "leader-elect", true, "use a Lease so only one replica reconciles at a time")
+	fs.StringVar(&o.leaderElectionNS, "leader-election-namespace", "", "namespace for the leader election Lease; defaults to $POD_NAMESPACE, then attesta-system")
+	fs.StringVar(&o.leaderElectionID, "leader-election-id", "attesta-controller", "name of the leader election Lease")
+	fs.DurationVar(&o.leaseDuration, "lease-duration", 15*time.Second, "leader election lease duration")
+	fs.DurationVar(&o.renewDeadline, "renew-deadline", 10*time.Second, "leader election renew deadline")
+	fs.DurationVar(&o.retryPeriod, "retry-period", 2*time.Second, "leader election retry period")
+	fs.DurationVar(&o.shutdownTimeout, "shutdown-timeout", 30*time.Second, "time reconciles get to finish on shutdown before the lease is released")
+	fs.StringVar(&o.prometheusURL, "prometheus-url", "", "Prometheus base URL for metric analysis of guards that set spec.checks; empty disables analysis")
+	fs.StringVar(&o.promTokenFile, "prometheus-bearer-token-file", "", "file holding a bearer token for Prometheus (for example a mounted Secret)")
+	fs.StringVar(&o.promCAFile, "prometheus-ca-file", "", "PEM bundle to trust for Prometheus's TLS certificate")
+	fs.DurationVar(&o.promTimeout, "prometheus-query-timeout", promql.DefaultQueryTimeout, "timeout for each Prometheus query")
+	fs.BoolVar(&o.showVersion, "version", false, "print the version and exit")
+	return &o
 }
 
 // Scheme holds the types the controller reads and writes.
@@ -99,7 +105,8 @@ func Scheme() *runtime.Scheme {
 }
 
 func run(ctx context.Context, o options) error {
-	cfg, err := restConfig(o.kubeconfig)
+	// --kubeconfig, then $KUBECONFIG, in-cluster config, ~/.kube/config.
+	cfg, err := ctrl.GetConfig()
 	if err != nil {
 		return fmt.Errorf("load Kubernetes config: %w", err)
 	}
@@ -180,11 +187,4 @@ func run(ctx context.Context, o options) error {
 	ctrl.Log.Info("starting attesta-controller", "version", version, "namespace", o.namespace,
 		"leaderElect", o.leaderElect, "metricAnalysis", o.prometheusURL != "")
 	return mgr.Start(ctx)
-}
-
-func restConfig(kubeconfig string) (*rest.Config, error) {
-	if kubeconfig != "" {
-		return clientcmd.BuildConfigFromFlags("", kubeconfig)
-	}
-	return ctrl.GetConfig()
 }
