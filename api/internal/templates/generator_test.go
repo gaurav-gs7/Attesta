@@ -207,15 +207,25 @@ func TestGeneratedPythonServiceCountsRealRequests(t *testing.T) {
 		t.Skip("python3 not available")
 	}
 	result := generate(t, testService("python"))
+	// Install the scaffold's pinned, hashed requirements where only this
+	// test sees them.
+	site := t.TempDir()
+	install := exec.Command(python, "-m", "pip", "install", "--quiet", "--disable-pip-version-check",
+		"--require-hashes", "--target", site, "-r", "requirements.txt")
+	install.Dir = result.OutputPath
+	if out, err := install.CombinedOutput(); err != nil {
+		t.Fatalf("install the generated service's requirements: %v\n%s", err, out)
+	}
 	cmd := exec.Command(python, "-m", "app")
 	cmd.Dir = result.OutputPath
+	cmd.Env = append(os.Environ(), "PYTHONPATH="+site)
 	assertCountsRequests(t, cmd)
 }
 
 func assertCountsRequests(t *testing.T, cmd *exec.Cmd) {
 	t.Helper()
 	port := freePort(t)
-	cmd.Env = append(os.Environ(), "PORT="+port)
+	cmd.Env = append(cmd.Environ(), "PORT="+port)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -233,18 +243,20 @@ func assertCountsRequests(t *testing.T, cmd *exec.Cmd) {
 	// A request is counted after its response is written (that is when its
 	// duration is known), so a scrape right after the response can precede
 	// the count by a moment. Poll briefly instead of racing it.
-	want := []string{
-		`http_requests_total{service="payments-api",status="200"} 3`,
-		`http_request_duration_seconds_count{service="payments-api"} 3`,
-		`http_request_duration_seconds_bucket{service="payments-api",le="+Inf"} 3`,
+	// Go's client prints 3, Python's 3.0.
+	want := []*regexp.Regexp{
+		regexp.MustCompile(`(?m)^http_requests_total\{service="payments-api",status="200"\} 3(\.0)?$`),
+		regexp.MustCompile(`(?m)^http_request_duration_seconds_count\{service="payments-api"\} 3(\.0)?$`),
+		// Label order differs between the clients and does not matter.
+		regexp.MustCompile(`(?m)^http_request_duration_seconds_bucket\{(service="payments-api",le="\+Inf"|le="\+Inf",service="payments-api")\} 3(\.0)?$`),
 	}
 	var after string
 	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(20 * time.Millisecond) {
 		after = get(t, base+"/metrics")
 		missing := ""
 		for _, w := range want {
-			if !strings.Contains(after, w) {
-				missing = w
+			if !w.MatchString(after) {
+				missing = w.String()
 				break
 			}
 		}

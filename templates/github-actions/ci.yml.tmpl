@@ -35,7 +35,9 @@ jobs:
 
       - name: Test Python
         if: "${{ "{{" }} hashFiles('app/**/*.py') != '' {{ "}}" }}"
-        run: python3 -m compileall app
+        run: |
+          python3 -m pip install --require-hashes -r requirements.txt
+          python3 -m compileall app
 
       - name: Validate Kubernetes manifests
         run: kubectl kustomize k8s/overlays/staging >/tmp/rendered.yaml

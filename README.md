@@ -165,7 +165,7 @@ started | paused | completed --rollback--> rollback-requested
 
 `attesta service init` writes a Go or Python service with Dockerfile, Kustomize base and overlays, GitHub Actions CI, a `RolloutGuard` and `SLOPolicy`, PrometheusRule alerts, a ServiceMonitor, a Grafana dashboard, OpenTelemetry and Jaeger manifests, Terraform, an Argo CD Application and a runbook.
 
-- The service exposes real `http_requests_total` and `http_request_duration_seconds` metrics, the series the SLO gate reads.
+- The service exposes `http_requests_total` and the `http_request_duration_seconds` histogram, the series the SLO gate reads, from the standard clients (`client_golang`, `prometheus_client`) through middleware that counts every request except probes and scrapes, plus their runtime and process metrics. The Go client and its dependencies are pinned in `go.mod`/`go.sum`, the Python one by version and hash.
 - Alert thresholds and the runbook use the service's registered SLO.
 - Fields you did not register stay visible as gaps: the runbook marks a missing pager as TODO, and the Argo CD Application uses a `CHANGE-ME` repository placeholder.
 
