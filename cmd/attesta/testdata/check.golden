@@ -1,0 +1,7 @@
+[
+  {
+    "method": "GET",
+    "path": "/api/v1/services/payments-api/readiness",
+    "token": "test-token"
+  }
+]

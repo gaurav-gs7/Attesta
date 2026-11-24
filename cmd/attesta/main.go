@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -25,80 +26,61 @@ import (
 var serviceName = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
 
 func main() {
-	if len(os.Args) < 2 {
+	err := run(os.Args[1:])
+	if errors.Is(err, flag.ErrHelp) {
+		os.Exit(0) // the flag set printed its usage
+	}
+	if errors.Is(err, errUsage) {
 		usage()
 		os.Exit(2)
 	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "attesta: %v\n", err)
+		os.Exit(1)
+	}
+}
 
-	switch os.Args[1] {
+var errUsage = errors.New("usage")
+
+// stdout is where responses are printed; tests replace it.
+var stdout io.Writer = os.Stdout
+
+// run executes one CLI command. It returns errUsage for an unknown or
+// missing command.
+func run(args []string) error {
+	if len(args) == 0 {
+		return errUsage
+	}
+	rest := args[1:]
+	switch args[0] {
 	case "service":
-		if err := service(os.Args[2:]); err != nil {
-			fmt.Fprintf(os.Stderr, "attesta: %v\n", err)
-			os.Exit(1)
-		}
+		return service(rest)
 	case "onboard":
-		if err := onboard(os.Args[2:]); err != nil {
-			fmt.Fprintf(os.Stderr, "attesta: %v\n", err)
-			os.Exit(1)
-		}
+		return onboard(rest)
 	case "list":
-		if err := get("/api/v1/services"); err != nil {
-			fmt.Fprintf(os.Stderr, "attesta: %v\n", err)
-			os.Exit(1)
-		}
+		return get("/api/v1/services")
 	case "status":
-		if err := serviceGet(os.Args[2:], "status", "/api/v1/services/%s/status"); err != nil {
-			fmt.Fprintf(os.Stderr, "attesta: %v\n", err)
-			os.Exit(1)
-		}
+		return serviceGet(rest, "status", "/api/v1/services/%s/status")
 	case "deployments":
-		if err := serviceGet(os.Args[2:], "deployments", "/api/v1/services/%s/deployments"); err != nil {
-			fmt.Fprintf(os.Stderr, "attesta: %v\n", err)
-			os.Exit(1)
-		}
+		return serviceGet(rest, "deployments", "/api/v1/services/%s/deployments")
 	case "rollback":
-		if err := servicePost(os.Args[2:], "rollback", "/api/v1/services/%s/rollback", nil); err != nil {
-			fmt.Fprintf(os.Stderr, "attesta: %v\n", err)
-			os.Exit(1)
-		}
+		return servicePost(rest, "rollback", "/api/v1/services/%s/rollback", nil)
 	case "health-gate":
-		if err := healthGate(os.Args[2:]); err != nil {
-			fmt.Fprintf(os.Stderr, "attesta: %v\n", err)
-			os.Exit(1)
-		}
+		return healthGate(rest)
 	case "check":
-		if err := serviceGetByArg(os.Args[2:], "check", "/api/v1/services/%s/readiness"); err != nil {
-			fmt.Fprintf(os.Stderr, "attesta: %v\n", err)
-			os.Exit(1)
-		}
+		return serviceGetByArg(rest, "check", "/api/v1/services/%s/readiness")
 	case "score":
-		if err := serviceGetByArg(os.Args[2:], "score", "/api/v1/services/%s/score"); err != nil {
-			fmt.Fprintf(os.Stderr, "attesta: %v\n", err)
-			os.Exit(1)
-		}
+		return serviceGetByArg(rest, "score", "/api/v1/services/%s/score")
 	case "slo":
-		if err := slo(os.Args[2:]); err != nil {
-			fmt.Fprintf(os.Stderr, "attesta: %v\n", err)
-			os.Exit(1)
-		}
+		return slo(rest)
 	case "rollout":
-		if err := rollout(os.Args[2:]); err != nil {
-			fmt.Fprintf(os.Stderr, "attesta: %v\n", err)
-			os.Exit(1)
-		}
+		return rollout(rest)
 	case "incident":
-		if err := incident(os.Args[2:]); err != nil {
-			fmt.Fprintf(os.Stderr, "attesta: %v\n", err)
-			os.Exit(1)
-		}
+		return incident(rest)
 	case "workflow", "workflows":
-		if err := workflow(os.Args[2:]); err != nil {
-			fmt.Fprintf(os.Stderr, "attesta: %v\n", err)
-			os.Exit(1)
-		}
+		return workflow(rest)
 	default:
-		usage()
-		os.Exit(2)
+		return errUsage
 	}
 }
 
@@ -123,7 +105,7 @@ func service(args []string) error {
 }
 
 func onboard(args []string) error {
-	fs := flag.NewFlagSet("onboard", flag.ExitOnError)
+	fs := flag.NewFlagSet("onboard", flag.ContinueOnError)
 	req := models.CreateServiceRequest{}
 	fs.StringVar(&req.Name, "name", "", "service name")
 	fs.StringVar(&req.Language, "language", "go", "service language: go or python")
@@ -165,7 +147,7 @@ func serviceScaffold(args []string) error {
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
 		return fmt.Errorf("service name is required")
 	}
-	fs := flag.NewFlagSet("service scaffold", flag.ExitOnError)
+	fs := flag.NewFlagSet("service scaffold", flag.ContinueOnError)
 	output := fs.String("output", "generated/services", "directory to write the scaffold into, as <output>/<name>")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -245,7 +227,7 @@ func onboardInit(args []string) error {
 }
 
 func serviceGet(args []string, command, path string) error {
-	fs := flag.NewFlagSet(command, flag.ExitOnError)
+	fs := flag.NewFlagSet(command, flag.ContinueOnError)
 	name := fs.String("name", "", "service name")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -257,7 +239,7 @@ func serviceGet(args []string, command, path string) error {
 }
 
 func serviceGetByArg(args []string, command, path string) error {
-	fs := flag.NewFlagSet(command, flag.ExitOnError)
+	fs := flag.NewFlagSet(command, flag.ContinueOnError)
 	nameFlag := fs.String("name", "", "service name")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -273,7 +255,7 @@ func serviceGetByArg(args []string, command, path string) error {
 }
 
 func servicePost(args []string, command, path string, payload any) error {
-	fs := flag.NewFlagSet(command, flag.ExitOnError)
+	fs := flag.NewFlagSet(command, flag.ContinueOnError)
 	name := fs.String("name", "", "service name")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -285,7 +267,7 @@ func servicePost(args []string, command, path string, payload any) error {
 }
 
 func healthGate(args []string) error {
-	fs := flag.NewFlagSet("health-gate", flag.ExitOnError)
+	fs := flag.NewFlagSet("health-gate", flag.ContinueOnError)
 	name := fs.String("name", "", "service name")
 	req := reliability.Metrics{}
 	fs.Float64Var(&req.P95LatencyMs, "p95-latency-ms", 0, "observed p95 latency in milliseconds (the service's objective is a p95)")
@@ -361,7 +343,7 @@ func incident(args []string) error {
 }
 
 func incidentCreate(args []string) error {
-	fs := flag.NewFlagSet("incident create", flag.ExitOnError)
+	fs := flag.NewFlagSet("incident create", flag.ContinueOnError)
 	req := incidents.AlertRequest{}
 	fs.StringVar(&req.Service, "service", "", "service name")
 	fs.StringVar(&req.Severity, "severity", "", "incident severity")
@@ -408,7 +390,7 @@ func workflow(args []string) error {
 }
 
 func servicePostByArg(args []string, command, path string, payload any) error {
-	fs := flag.NewFlagSet(command, flag.ExitOnError)
+	fs := flag.NewFlagSet(command, flag.ContinueOnError)
 	nameFlag := fs.String("name", "", "service name")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -478,15 +460,15 @@ func call(method, path string, payload any) error {
 func printJSON(raw []byte) {
 	var payload any
 	if err := json.Unmarshal(raw, &payload); err != nil {
-		fmt.Println(string(raw))
+		_, _ = fmt.Fprintln(stdout, string(raw))
 		return
 	}
 	formatted, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
-		fmt.Println(string(raw))
+		_, _ = fmt.Fprintln(stdout, string(raw))
 		return
 	}
-	fmt.Println(string(formatted))
+	_, _ = fmt.Fprintln(stdout, string(formatted))
 }
 
 func baseURL() string {

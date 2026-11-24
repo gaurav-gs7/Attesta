@@ -1,0 +1,7 @@
+[
+  {
+    "method": "POST",
+    "path": "/api/v1/services/payments-api/rollback",
+    "token": "test-token"
+  }
+]

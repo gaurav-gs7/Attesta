@@ -1,0 +1,34 @@
+# Postmortem draft: payments-api, 5xx above 1%
+
+Generated from Attesta records. Sections marked TODO need a person.
+
+## Summary
+
+HighErrorRate (severity page) opened incident inc-1 for payments-api at 2026-11-24T10:00:00Z. Source: alertmanager. Status: resolved.
+
+## Impact
+
+At incident open, measured from prometheus over 5m: error rate 8.20% (threshold 1.00%), p95 latency 850ms (target 300ms); deployment gate blocked.
+
+The alert sender reported: error rate 8.20%. Attesta did not verify these values.
+
+## Timeline
+
+- 2026-11-24T09:50:00Z [deployment] deployment record v3: status started, strategy canary
+- 2026-11-24T10:00:00Z [incident-opened] Attesta opened inc-1 from alertmanager alert HighErrorRate, severity page; alert reported error rate 8.20%
+- 2026-11-24T10:00:00Z [slo-evaluation] measured from prometheus over 5m: error rate 8.20% (threshold 1.00%), p95 latency 850ms (target 300ms); deployment gate blocked
+- 2026-11-24T10:00:00Z [correlation] rollout v3 was recorded 10m0s before the alert; it is a rollback candidate. This is a time correlation, not a confirmed cause, and Attesta performed no rollback.
+
+## Contributing factors
+
+rollout v3 was recorded 10m0s before the alert; it is a rollback candidate. This is a time correlation, not a confirmed cause, and Attesta performed no rollback.
+
+TODO: confirm the cause.
+
+## Resolution
+
+Resolved at 2026-11-24T10:45:00Z. Rolled back to v2.
+
+## Follow-ups
+
+TODO: list the action items agreed in review.

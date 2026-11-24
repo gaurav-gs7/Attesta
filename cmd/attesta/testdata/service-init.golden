@@ -1,0 +1,20 @@
+[
+  {
+    "method": "POST",
+    "path": "/api/v1/services",
+    "token": "test-token",
+    "body": {
+      "name": "payments-api",
+      "team": "platform",
+      "owner": "payments-platform",
+      "tier": "critical",
+      "language": "go",
+      "pager": "payments-oncall",
+      "environment": "staging",
+      "slo": "99.9",
+      "sloLatencyP95": "300ms",
+      "sloErrorRate": 1,
+      "deploymentStrategy": "canary"
+    }
+  }
+]
