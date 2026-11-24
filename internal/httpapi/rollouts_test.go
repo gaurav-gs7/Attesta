@@ -188,20 +188,3 @@ func TestConcurrentRolloutStartsAdmitOne(t *testing.T) {
 		})
 	}
 }
-
-// The health gate marks the active rollout rollback-requested, and with no
-// rollout in flight it reports the decision without writing anything.
-func TestHealthGateRequestsRollbackOfTheActiveRollout(t *testing.T) {
-	server := rolloutServer(t, catalog.NewMemoryStore())
-	breach := `{"p95LatencyMs":450,"errorRate":0.2,"requests":100}`
-	if rec := authorizedRequest(server, http.MethodPost, svc+"/health-gate", []byte(breach)); rec.Code != http.StatusOK ||
-		!strings.Contains(rec.Body.String(), `"rollout":null`) {
-		t.Fatalf("breach with no rollout: %d %s, want 200 with no rollout", rec.Code, rec.Body.String())
-	}
-	_, started := call(t, server, http.MethodPost, svc+"/rollouts", rolloutBody)
-	code, out := call(t, server, http.MethodPost, svc+"/health-gate", breach)
-	if code != http.StatusAccepted || out.Rollout.ID != started.Rollout.ID || out.Rollout.State != rollouts.StateRollbackRequested ||
-		!strings.Contains(out.Rollout.Events[len(out.Rollout.Events)-1].Reason, "health gate") {
-		t.Fatalf("breach during a rollout: %d %+v", code, out.Rollout)
-	}
-}

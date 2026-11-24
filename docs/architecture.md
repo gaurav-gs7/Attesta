@@ -46,9 +46,9 @@ An admission webhook that runs a SubjectAccessReview for the guard's creator was
 
 Incidents open from Alertmanager's webhook or a JSON call. Opening an incident evaluates the SLO gate, loads deployment records from the previous 2 hours, and builds a timeline from those records, the alert and the evaluation. A rollout recorded in that window is named as a rollback candidate and labelled as a correlation. The postmortem draft marks the cause and follow-ups as TODO.
 
-### Health gate and rollback requests
+### Rollback requests
 
-The health gate applies fixed thresholds to metrics in the request body; it measures nothing itself. Rollback endpoints record a `rollback-requested` entry. Acting on that request is left to deployment tooling or to the controller.
+No endpoint accepts health numbers from a caller; canary health is measured by the controller. Rollback endpoints record a `rollback-requested` entry. Acting on that request is left to deployment tooling or to the controller.
 
 ### Readiness score
 
@@ -92,4 +92,4 @@ With PostgreSQL, Attesta stores the service catalog, deployment records, workflo
 
 An incident is a row in `incidents` with its timeline in `incident_events`, one row per event, appended and never rewritten. The SLO evaluation taken when it opened is kept as one JSONB snapshot, since it is never queried by field or changed; the service is not copied but joined from `services`, so an incident shows the service's current owner and pager. Every update carries the `version` it read and applies only if the row is still at that version: two concurrent resolutions cannot both write, and the second request answers `alreadyResolved` with the stored record. A partial unique index allows one active incident per service and Alertmanager fingerprint, so two notifications for one firing alert open one incident and the second reports `duplicate`.
 
-Only operations that change something create workflow runs: onboarding, rollouts, pauses, rollback requests, health gates and incidents. Reads (readiness, score, SLOs and error budget, status) compute their answer and write nothing.
+Only operations that change something create workflow runs: onboarding, rollouts, pauses, rollback requests and incidents. Reads (readiness, score, SLOs and error budget, status) compute their answer and write nothing.

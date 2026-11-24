@@ -200,32 +200,6 @@ duplicate_onboarding_idempotent() {
   record "duplicate-onboarding-idempotent" "$second"
 }
 
-low_traffic_waits_for_more_samples() {
-  local output="$run_dir/low-traffic-health-gate.json"
-  log "proving a healthy canary with little traffic waits for more instead of being judged"
-  api POST "/api/v1/services/$SERVICE_NAME/health-gate" '{"p95LatencyMs":900,"errorRate":0,"requests":10}' "$output" 200
-  assert_contains "$output" '"action"[[:space:]]*:[[:space:]]*"wait"' "expected low traffic decision to wait"
-  assert_contains "$output" 'waiting for more traffic' "expected low traffic reason to wait for traffic"
-  record "low-traffic-waits-for-more-samples" "$output"
-}
-
-bad_canary_rolls_back_and_records_evidence() {
-  local output="$run_dir/bad-canary-health-gate.json"
-  local deployments="$run_dir/deployments-after-rollback.json"
-  local rollback="$run_dir/rollback-evidence.json"
-  log "proving a bad canary gets a rollback decision, judged against the service's own SLO"
-  # No rollout is in flight (the SLO gate cannot open without Prometheus), so
-  # the decision is returned and nothing is recorded.
-  api POST "/api/v1/services/$SERVICE_NAME/health-gate" '{"p95LatencyMs":450,"errorRate":0.2,"requests":100}' "$output" 200
-  assert_contains "$output" '"action"[[:space:]]*:[[:space:]]*"rollback"' "expected bad canary to request rollback"
-  assert_contains "$output" '"latencyP95Ms"[[:space:]]*:[[:space:]]*300' "expected the policy applied to be reported"
-  assert_contains "$output" '"rollout"[[:space:]]*:[[:space:]]*null' "expected no rollout to be marked without one in flight"
-  api GET "/api/v1/services/$SERVICE_NAME/deployments" "" "$deployments" 200
-  cp "$output" "$rollback"
-  record "bad-canary-rolls-back" "$output"
-  record "rollback-evidence-recorded" "$rollback"
-}
-
 prometheus_unavailable_fails_closed() {
   local output="$run_dir/prometheus-unavailable-slo.json"
   local rollout="$run_dir/prometheus-unavailable-rollout.json"
@@ -244,8 +218,6 @@ main() {
   start_api
   invalid_metadata_rejected
   duplicate_onboarding_idempotent
-  low_traffic_waits_for_more_samples
-  bad_canary_rolls_back_and_records_evidence
   prometheus_unavailable_fails_closed
   write_summary "passed" "all failure-mode scenarios passed"
   log "failure-mode demo passed; evidence written to $run_dir"

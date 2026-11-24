@@ -17,7 +17,6 @@ import (
 
 	"github.com/gaurav-gs7/attesta/internal/incidents"
 	"github.com/gaurav-gs7/attesta/internal/models"
-	"github.com/gaurav-gs7/attesta/internal/reliability"
 	"github.com/gaurav-gs7/attesta/internal/scaffold"
 )
 
@@ -65,8 +64,6 @@ func run(args []string) error {
 		return serviceGet(rest, "deployments", "/api/v1/services/%s/deployments")
 	case "rollback":
 		return servicePost(rest, "rollback", "/api/v1/services/%s/rollback", nil)
-	case "health-gate":
-		return healthGate(rest)
 	case "check":
 		return serviceGetByArg(rest, "check", "/api/v1/services/%s/readiness")
 	case "score":
@@ -264,22 +261,6 @@ func servicePost(args []string, command, path string, payload any) error {
 		return fmt.Errorf("--name is required")
 	}
 	return post(fmt.Sprintf(path, *name), payload)
-}
-
-func healthGate(args []string) error {
-	fs := flag.NewFlagSet("health-gate", flag.ContinueOnError)
-	name := fs.String("name", "", "service name")
-	req := reliability.Metrics{}
-	fs.Float64Var(&req.P95LatencyMs, "p95-latency-ms", 0, "observed p95 latency in milliseconds (the service's objective is a p95)")
-	fs.Float64Var(&req.ErrorRate, "error-rate", 0, "observed error rate percentage")
-	fs.IntVar(&req.Requests, "requests", 100, "requests the canary served, failures included")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *name == "" {
-		return fmt.Errorf("--name is required")
-	}
-	return post(fmt.Sprintf("/api/v1/services/%s/health-gate", *name), req)
 }
 
 func slo(args []string) error {
@@ -500,7 +481,6 @@ Usage:
   attesta workflows show wf-...
   attesta list
   attesta status --name payments-api
-  attesta health-gate --name payments-api --p95-latency-ms 450 --error-rate 0.2 --requests 100
   attesta rollback --name payments-api
   attesta deployments --name payments-api
 `)

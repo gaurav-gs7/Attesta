@@ -16,11 +16,10 @@
 10. Deploy the stable revision.
 11. Deploy the candidate revision. This replaces every pod; there is no traffic splitting.
 12. Check `/readyz` and `/metrics` through a port-forward.
-13. **Simulated:** post fixed bad metrics (p99 450ms) to the health gate, which records a rollback request.
-14. Run `kubectl rollout undo` from the script, standing in for the tooling that would act on that request, and check the stable image is back.
-15. Show the readiness score and SLO status. Without Prometheus the SLO state is `unknown`.
-16. **Simulated:** open an incident from a hand-written alert, then print its timeline and postmortem draft.
-17. List the workflow runs behind these calls.
+13. **Simulated:** run `kubectl rollout undo` from the script and check the stable image is back. This demo does not run the controller; `make e2e` runs it, measuring the bad revision from Prometheus and rolling it back itself.
+14. Show the readiness score and SLO status. Without Prometheus the SLO state is `unknown`.
+15. **Simulated:** open an incident from a hand-written alert, then print its timeline and postmortem draft.
+16. List the workflow runs behind these calls.
 
 The RolloutGuard controller is not part of this demo.
 

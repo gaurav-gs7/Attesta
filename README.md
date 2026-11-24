@@ -62,7 +62,7 @@ Every `/api/` request is made by an identity with a role; `/livez`, `/readyz` an
 | Role | May |
 | --- | --- |
 | `viewer` | read everything |
-| `operator` | start and change rollouts, send health-gate results, open and resolve incidents, post Alertmanager alerts |
+| `operator` | start and change rollouts, open and resolve incidents, post Alertmanager alerts |
 | `admin` | register services |
 
 Callers send `Authorization: Bearer <token>` (the older `X-Attesta-Token` header still works). Identities come from one or more of:
@@ -141,11 +141,11 @@ receivers:
 Timelines contain only recorded events: deployment records from the 2 hours before the alert, the alert, the incident opening and the SLO evaluation. When a recorded rollout started in that window, a correlation event names it as a rollback candidate and says it is not a confirmed cause. The postmortem draft marks what Attesta cannot know as TODO.
 
 
-## Health Gate And Rollback Requests
+## Rollback Requests
 
-`POST /api/v1/services/{name}/health-gate` evaluates the `p95LatencyMs`, `errorRate` (percent) and `requests` (total, failures included) in the request body against the service's own objectives: its registered p95 latency and error-rate threshold (300ms and 1% if unset). A canary needs 50 requests before it can be promoted; below that it waits, unless it has already failed more requests than the threshold allows in a sample of 50, in which case it is rolled back at once. The response reports the `policy` it applied and marks its input as `caller-supplied`. `p99LatencyMs` and `successCount` are rejected: the gate used to compare a p99 against a p95 objective, and to count only successes, so a canary failing every request waited forever. When the decision is `rollback`, the service has `rollbackOnFailure: true` and a rollout is in flight, Attesta moves that rollout to `rollback-requested`; with no rollout in flight, or with `rollbackOnFailure: false` (decision `hold`), nothing is recorded.
+The API accepts no health numbers from callers: there is no endpoint that takes a latency or error rate and acts on it. Canary health is measured by the controller from Prometheus (see Kubernetes Controller).
 
-`POST /api/v1/services/{name}/rollback` requests a rollback of the service's most recent rollout. Neither endpoint changes the cluster.
+`POST /api/v1/services/{name}/rollback` requests a rollback of the service's most recent rollout. It does not change the cluster.
 
 ### Rollouts
 
@@ -176,8 +176,7 @@ started | paused | completed --rollback--> rollback-requested
 `make demo-full` builds the scaffold, deploys a stable and then a candidate image to kind, and walks through the API. Parts of it are simulated, and the script's log says so:
 
 - The candidate image replaces every pod. There is no traffic splitting.
-- The "bad canary" is a fixed set of metrics posted to the health gate.
-- The rollback is `kubectl rollout undo`, run by the script.
+- The rollback is `kubectl rollout undo`, run by the script; this demo does not run the controller. `make e2e` does, and there the controller measures the bad revision and rolls it back itself.
 - The incident is a hand-written alert payload.
 
 `make demo-failures` runs failure scenarios against the API and writes evidence under `artifacts/failure-modes/`: invalid metadata rejected, duplicate onboarding, low-traffic hold, rollback request recorded, Prometheus unreachable (gate `unknown`, rollout refused), and PostgreSQL unreachable at startup. See [docs/failure-modes.md](docs/failure-modes.md).
@@ -214,7 +213,6 @@ Without `DATABASE_URL`, Attesta keeps everything in memory. With it, the service
 | `GET /api/v1/services/{name}/deployments` | Deployment records |
 | `POST /api/v1/services/{name}/rollouts` | Start a rollout if the SLO gate allows it |
 | `GET /api/v1/services/{name}/rollouts/{id\|latest}`, `POST .../pause`, `.../resume`, `.../complete`, `.../rollback` | Rollout state and transitions |
-| `POST /api/v1/services/{name}/health-gate` | Evaluate caller-supplied canary metrics |
 | `POST /api/v1/services/{name}/rollback` | Record a rollback request |
 | `GET /api/v1/services/{name}/runbook` | Runbook rendered from the service record |
 | `GET /api/v1/services/{name}/scaffold` | The service's scaffold as a `.tar.gz`, rendered on demand |

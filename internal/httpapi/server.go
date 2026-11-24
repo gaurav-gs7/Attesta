@@ -24,7 +24,6 @@ import (
 	"github.com/gaurav-gs7/attesta/internal/page"
 	promclient "github.com/gaurav-gs7/attesta/internal/prometheus"
 	"github.com/gaurav-gs7/attesta/internal/readiness"
-	"github.com/gaurav-gs7/attesta/internal/reliability"
 	"github.com/gaurav-gs7/attesta/internal/rollouts"
 	scaffoldpkg "github.com/gaurav-gs7/attesta/internal/scaffold"
 	"github.com/gaurav-gs7/attesta/internal/security"
@@ -175,7 +174,6 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/services/{name}/rollouts/{id}/resume", s.rolloutAction(rollouts.ActionResume))
 	mux.HandleFunc("POST /api/v1/services/{name}/rollouts/{id}/complete", s.rolloutAction(rollouts.ActionComplete))
 	mux.HandleFunc("POST /api/v1/services/{name}/rollouts/{id}/rollback", s.rolloutAction(rollouts.ActionRollback))
-	mux.HandleFunc("POST /api/v1/services/{name}/health-gate", s.healthGate)
 	mux.HandleFunc("POST /api/v1/services/{name}/rollback", s.serviceRollback)
 	mux.HandleFunc("GET /api/v1/services/{name}/runbook", s.runbook)
 	mux.HandleFunc("GET /api/v1/services/{name}/scaffold", s.scaffold)
@@ -686,89 +684,6 @@ func (s *Server) transition(w http.ResponseWriter, r *http.Request, service mode
 	writeJSON(w, http.StatusOK, body)
 }
 
-func (s *Server) healthGate(w http.ResponseWriter, r *http.Request) {
-	service, ok := s.loadService(w, r)
-	if !ok {
-		return
-	}
-	var metrics reliability.Metrics
-	if !s.decodeStrict(w, r, &metrics) {
-		return
-	}
-	if err := metrics.Validate(); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	policy := reliability.PolicyFor(service)
-	var decision reliability.Decision
-	status := http.StatusOK
-	var rolledBack *models.Rollout
-	run := s.workflows.Run(r.Context(), workflows.Spec{
-		Name:    "rollout-health-gate",
-		Kind:    "attesta.rollout.health-gate",
-		Service: service.Name,
-		Steps: []workflows.Step{
-			{
-				Name:        "evaluate-canary-sli-window",
-				MaxAttempts: 1,
-				Run: func(context.Context) error {
-					decision = reliability.EvaluateCanary(policy, metrics)
-					if decision.Action == reliability.ActionRollback && !service.RollbackOnFailure {
-						decision.Action = reliability.ActionHold
-						decision.Reason += "; rollbackOnFailure is false for this service, so no rollback was requested"
-					}
-					return nil
-				},
-			},
-			{
-				Name: "request-rollback-of-active-rollout",
-				Run: func(ctx context.Context) error {
-					if decision.Action != reliability.ActionRollback {
-						return nil
-					}
-					active, err := s.store.LatestRollout(ctx, service.ID)
-					if errors.Is(err, catalog.ErrNotFound) || (err == nil && !rollouts.Active(active.State)) {
-						return nil // nothing in flight to roll back
-					}
-					if err != nil {
-						return err
-					}
-					from := active.State
-					if err := rollouts.Apply(&active, rollouts.ActionRollback, "health gate: "+decision.Reason, auth.Actor(ctx), time.Now().UTC()); err != nil {
-						return err
-					}
-					if err := s.store.UpdateRollout(ctx, active, from); err != nil {
-						return err
-					}
-					rolledBack = &active
-					return nil
-				},
-			},
-		},
-	})
-	if run.State != workflows.StateSucceeded {
-		writeRunFailure(w, r, run)
-		return
-	}
-	if rolledBack != nil {
-		status = http.StatusAccepted
-	}
-	writeJSON(w, status, map[string]any{
-		"service": service.Name,
-		// The gate judges the numbers in the request body. Attesta does not
-		// measure the canary itself on this endpoint.
-		"inputSource": "caller-supplied",
-		"metrics":     metrics,
-		// The thresholds applied, taken from the service record.
-		"policy":   policy,
-		"decision": decision,
-		// The active rollout marked rollback-requested, if the gate breached
-		// and one was in flight.
-		"rollout":  rolledBack,
-		"workflow": run,
-	})
-}
-
 func (s *Server) listIncidents(w http.ResponseWriter, r *http.Request) {
 	req, ok := pageRequest(w, r)
 	if !ok {
@@ -924,7 +839,7 @@ func (s *Server) runbook(w http.ResponseWriter, r *http.Request) {
 2. Compare p95 latency, availability, burn rate, and error rate against the SLO.
 3. Inspect pod restarts, CPU, memory, PDB status, and HPA saturation.
 4. Review the latest deployment, Git SHA, and image scan result.
-5. Roll back if the health gate fails during canary.
+5. Check the RolloutGuard: the controller rolls back a revision that fails its metric checks.
 6. Create an incident and attach the Attesta timeline/postmortem draft.
 
 ## Rollback

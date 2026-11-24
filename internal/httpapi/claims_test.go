@@ -410,15 +410,6 @@ func TestExplicitRollbackOnFailureFalseIsHonoured(t *testing.T) {
 		t.Fatalf("explicit false was overridden for a canary service: %s", svc)
 	}
 
-	// Audit S-5: the health gate must not record a rollback request for it.
-	gate := authorizedRequest(server, http.MethodPost, "/api/v1/services/hold-api/health-gate", []byte(`{"p95LatencyMs":900,"errorRate":5,"requests":500}`))
-	if gate.Code != http.StatusOK || !strings.Contains(gate.Body.String(), `"action":"hold"`) || !strings.Contains(gate.Body.String(), `"inputSource":"caller-supplied"`) {
-		t.Fatalf("health gate: %d %s", gate.Code, gate.Body.String())
-	}
-	deps := authorizedRequest(server, http.MethodGet, "/api/v1/services/hold-api/deployments", nil).Body.String()
-	if strings.Contains(deps, "rollback-requested") {
-		t.Fatalf("rollback recorded although rollbackOnFailure is false: %s", deps)
-	}
 }
 
 func TestCanaryDefaultsToRollbackOnFailure(t *testing.T) {

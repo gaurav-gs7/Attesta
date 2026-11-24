@@ -94,7 +94,6 @@ func TestCommandsSendTheAPIRequests(t *testing.T) {
 		"service-init": {"service", "init", "payments-api", "--owner", "payments-platform", "--team", "platform",
 			"--tier", "critical", "--language", "go", "--slo-availability", "99.9", "--slo-latency-p95", "300ms",
 			"--deployment", "canary", "--pager", "payments-oncall", "--output", ""},
-		"health-gate":       {"health-gate", "--name", "payments-api", "--p95-latency-ms", "450", "--error-rate", "0.2", "--requests", "100"},
 		"incident-create":   {"incident", "create", "--service", "payments-api", "--alert", "HighErrorRate", "--error-rate", "8.2"},
 		"incident-no-flags": {"incident", "create", "payments-api"},
 		"rollback":          {"rollback", "--name", "payments-api"},
@@ -132,10 +131,9 @@ func TestBadInvocationsAreErrors(t *testing.T) {
 		nil,
 		{"nope"},
 		{"service"},
-		{"health-gate"},
+		{"health-gate", "--name", "x"},
 		{"onboard", "--name", "x"},
 		{"service", "scaffold", "../etc"},
-		{"health-gate", "--name", "x", "--requests", "many"},
 	} {
 		if err := run(args); err == nil {
 			t.Errorf("%q: accepted", args)
