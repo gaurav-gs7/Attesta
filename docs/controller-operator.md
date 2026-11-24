@@ -74,7 +74,7 @@ If an Argo CD Application with `selfHeal: true` manages the same Deployment, Arg
 ## Run Locally
 
 ```bash
-go run ./controller/cmd/attesta-controller --kubeconfig "$HOME/.kube/config" --leader-elect=false
+go run ./cmd/attesta-controller --kubeconfig "$HOME/.kube/config" --leader-elect=false
 ```
 
 ## Deploy To A Cluster
@@ -98,7 +98,7 @@ kustomize edit set image attesta-controller=ghcr.io/gaurav-gs7/attesta-controlle
 To build your own image:
 
 ```bash
-docker build -f controller/Dockerfile --build-arg VERSION=$(git describe --tags --always) -t attesta-controller:dev .
+docker build -f cmd/attesta-controller/Dockerfile --build-arg VERSION=$(git describe --tags --always) -t attesta-controller:dev .
 ```
 
 ## Operating The Controller

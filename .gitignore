@@ -10,7 +10,7 @@ coverage.out
 artifacts/*
 !artifacts/README.md
 # Binaries built with `go build` at the repo root. Anchored so they do not
-# match the cli/cmd/attesta, api/cmd/attesta-api, controller/cmd/attesta-controller
+# match the cmd/attesta, cmd/attesta-api, cmd/attesta-controller
 # and templates/attesta source directories.
 /attesta
 /attesta-api

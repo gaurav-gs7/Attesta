@@ -12,18 +12,18 @@ lint:
 
 build:
 	mkdir -p bin
-	go build -trimpath -o bin/attesta-api ./api/cmd/attesta-api
-	go build -trimpath -o bin/attesta ./cli/cmd/attesta
-	go build -trimpath -o bin/attesta-controller ./controller/cmd/attesta-controller
+	go build -trimpath -o bin/attesta-api ./cmd/attesta-api
+	go build -trimpath -o bin/attesta ./cmd/attesta
+	go build -trimpath -o bin/attesta-controller ./cmd/attesta-controller
 
 run-api:
-	ATTESTA_API_TOKEN=local-dev-token go run ./api/cmd/attesta-api
+	ATTESTA_API_TOKEN=local-dev-token go run ./cmd/attesta-api
 
 run-cli:
-	ATTESTA_API_TOKEN=local-dev-token go run ./cli/cmd/attesta
+	ATTESTA_API_TOKEN=local-dev-token go run ./cmd/attesta
 
 run-controller:
-	go run ./controller/cmd/attesta-controller --leader-elect=false
+	go run ./cmd/attesta-controller --leader-elect=false
 
 demo:
 	bash scripts/demo-local.sh
@@ -40,15 +40,15 @@ validate-service:
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 docker-build:
-	docker build -f controller/Dockerfile --build-arg VERSION=$(VERSION) -t attesta-controller:$(VERSION) .
-	docker build -f api/Dockerfile --build-arg VERSION=$(VERSION) -t attesta-api:$(VERSION) .
+	docker build -f cmd/attesta-controller/Dockerfile --build-arg VERSION=$(VERSION) -t attesta-controller:$(VERSION) .
+	docker build -f cmd/attesta-api/Dockerfile --build-arg VERSION=$(VERSION) -t attesta-api:$(VERSION) .
 
 KIND_CLUSTER ?= attesta-e2e
 
 # Runs the controller end-to-end test on a throwaway kind cluster.
 e2e:
 	kind get clusters | grep -qx $(KIND_CLUSTER) || kind create cluster --name $(KIND_CLUSTER) --wait 120s
-	docker build -f controller/Dockerfile --build-arg VERSION=e2e -t attesta-controller:e2e .
+	docker build -f cmd/attesta-controller/Dockerfile --build-arg VERSION=e2e -t attesta-controller:e2e .
 	kind load docker-image attesta-controller:e2e --name $(KIND_CLUSTER)
 	kubectl config use-context kind-$(KIND_CLUSTER)
 	bash scripts/e2e-rollback.sh

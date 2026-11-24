@@ -23,9 +23,9 @@ jobs:
       matrix:
         include:
           - name: attesta-controller
-            dockerfile: controller/Dockerfile
+            dockerfile: cmd/attesta-controller/Dockerfile
           - name: attesta-api
-            dockerfile: api/Dockerfile
+            dockerfile: cmd/attesta-api/Dockerfile
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0

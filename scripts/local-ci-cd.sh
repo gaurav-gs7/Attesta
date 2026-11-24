@@ -161,7 +161,7 @@ ensure_attesta_api() {
     GOMODCACHE="$GOMODCACHE" \
     ATTESTA_API_TOKEN="$ATTESTA_API_TOKEN" \
     ATTESTA_ADDR="$ATTESTA_ADDR" \
-    go run ./api/cmd/attesta-api >>"$log_file" 2>&1 &
+    go run ./cmd/attesta-api >>"$log_file" 2>&1 &
   api_pid="$!"
   wait_for_url "$ATTESTA_API_URL/readyz" 60
 }
@@ -169,7 +169,7 @@ ensure_attesta_api() {
 onboard_service() {
   log "onboarding $SERVICE_NAME through Attesta"
   run env GOCACHE="$GOCACHE" GOMODCACHE="$GOMODCACHE" ATTESTA_API_TOKEN="$ATTESTA_API_TOKEN" ATTESTA_API_URL="$ATTESTA_API_URL" \
-    go run ./cli/cmd/attesta service init "$SERVICE_NAME" \
+    go run ./cmd/attesta service init "$SERVICE_NAME" \
       --language "$SERVICE_LANGUAGE" \
       --team "$SERVICE_TEAM" \
       --owner "$SERVICE_OWNER" \
@@ -283,7 +283,7 @@ verify_runtime() {
 attesta_reliability_demo() {
   log "SIMULATED: posting fixed bad metrics (p95 450ms) to the Attesta health gate; nothing is measured from the cluster"
   run env GOCACHE="$GOCACHE" GOMODCACHE="$GOMODCACHE" ATTESTA_API_TOKEN="$ATTESTA_API_TOKEN" ATTESTA_API_URL="$ATTESTA_API_URL" \
-    go run ./cli/cmd/attesta health-gate \
+    go run ./cmd/attesta health-gate \
       --name "$SERVICE_NAME" \
       --p95-latency-ms 450 \
       --error-rate 0.2 \
@@ -294,21 +294,21 @@ attesta_reliability_demo() {
   fi
 
   run env GOCACHE="$GOCACHE" GOMODCACHE="$GOMODCACHE" ATTESTA_API_TOKEN="$ATTESTA_API_TOKEN" ATTESTA_API_URL="$ATTESTA_API_URL" \
-    go run ./cli/cmd/attesta check "$SERVICE_NAME"
+    go run ./cmd/attesta check "$SERVICE_NAME"
   run env GOCACHE="$GOCACHE" GOMODCACHE="$GOMODCACHE" ATTESTA_API_TOKEN="$ATTESTA_API_TOKEN" ATTESTA_API_URL="$ATTESTA_API_URL" \
-    go run ./cli/cmd/attesta slo status "$SERVICE_NAME"
+    go run ./cmd/attesta slo status "$SERVICE_NAME"
   run env GOCACHE="$GOCACHE" GOMODCACHE="$GOMODCACHE" ATTESTA_API_TOKEN="$ATTESTA_API_TOKEN" ATTESTA_API_URL="$ATTESTA_API_URL" \
-    go run ./cli/cmd/attesta deployments --name "$SERVICE_NAME"
+    go run ./cmd/attesta deployments --name "$SERVICE_NAME"
   simulate_incident
   run env GOCACHE="$GOCACHE" GOMODCACHE="$GOMODCACHE" ATTESTA_API_TOKEN="$ATTESTA_API_TOKEN" ATTESTA_API_URL="$ATTESTA_API_URL" \
-    go run ./cli/cmd/attesta workflows list
+    go run ./cmd/attesta workflows list
   run curl -fsS "$ATTESTA_API_URL/metrics"
 }
 
 simulate_incident() {
   log "SIMULATED: opening an incident with a hand-written alert payload"
   env GOCACHE="$GOCACHE" GOMODCACHE="$GOMODCACHE" ATTESTA_API_TOKEN="$ATTESTA_API_TOKEN" ATTESTA_API_URL="$ATTESTA_API_URL" \
-    go run ./cli/cmd/attesta incident create \
+    go run ./cmd/attesta incident create \
       --service "$SERVICE_NAME" \
       --alert HighErrorRate \
       --error-rate 8.2 \
@@ -317,9 +317,9 @@ simulate_incident() {
   incident_id="$(perl -ne 'print "$1\n" if /\"id\": \"([^\"]+)\"/' "$incident_file" | head -n1)"
   if [[ -n "$incident_id" ]]; then
     run env GOCACHE="$GOCACHE" GOMODCACHE="$GOMODCACHE" ATTESTA_API_TOKEN="$ATTESTA_API_TOKEN" ATTESTA_API_URL="$ATTESTA_API_URL" \
-      go run ./cli/cmd/attesta incident timeline "$incident_id"
+      go run ./cmd/attesta incident timeline "$incident_id"
     run env GOCACHE="$GOCACHE" GOMODCACHE="$GOMODCACHE" ATTESTA_API_TOKEN="$ATTESTA_API_TOKEN" ATTESTA_API_URL="$ATTESTA_API_URL" \
-      go run ./cli/cmd/attesta incident postmortem "$incident_id"
+      go run ./cmd/attesta incident postmortem "$incident_id"
   fi
 }
 

@@ -1,6 +1,6 @@
 # Deploys the controller from a locally built image for the kind end-to-end
 # test (scripts/e2e-rollback.sh). Build and load it first:
-#   docker build -f controller/Dockerfile -t attesta-controller:e2e .
+#   docker build -f cmd/attesta-controller/Dockerfile -t attesta-controller:e2e .
 #   kind load docker-image attesta-controller:e2e --name <cluster>
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization

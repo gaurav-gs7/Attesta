@@ -21,9 +21,9 @@ Every value Attesta reports is either measured, recorded, or explicitly marked a
 
 ## Components
 
-- `controller/`: the `RolloutGuard` controller. See [docs/controller-operator.md](docs/controller-operator.md).
-- `api/`: the HTTP API: service catalog, SLO gate, incidents, readiness, scaffold generator, workflow runner.
-- `cli/`: a thin client for the API.
+- `cmd/attesta-controller`: the `RolloutGuard` controller. See [docs/controller-operator.md](docs/controller-operator.md).
+- `cmd/attesta-api`: the HTTP API: service catalog, SLO gate, incidents, readiness, scaffold generator, workflow runner.
+- `cmd/attesta`: a thin client for the API, sending the API's own request types.
 - `templates/`: the generated service scaffold.
 - `deploy/`: CRDs and the controller's manifests.
 
@@ -40,7 +40,7 @@ In another terminal:
 ```bash
 export ATTESTA_API_TOKEN=local-dev-token
 
-go run ./cli/cmd/attesta service init payments-api \
+go run ./cmd/attesta service init payments-api \
   --owner payments-platform \
   --team platform \
   --tier critical \
@@ -84,7 +84,7 @@ kubectl apply -k deploy/controller
 Run it against your current kube context:
 
 ```bash
-go run ./controller/cmd/attesta-controller --kubeconfig "$HOME/.kube/config" --leader-elect=false
+go run ./cmd/attesta-controller --kubeconfig "$HOME/.kube/config" --leader-elect=false
 ```
 
 The controller classifies each guarded rollout as `Progressing`, `Verifying`, `Healthy`, `Paused` or `Blocked`. Blocked means Kubernetes reported `ProgressDeadlineExceeded` for the current generation or, with `--prometheus-url` and `spec.checks`, that the new revision failed `consecutiveFailures` metric checks in a row. With `spec.rollback.enabled: true` it restores the last template that passed, never acts on a paused Deployment, and never rolls back twice onto the same template. See [docs/controller-operator.md](docs/controller-operator.md) for the rules, metrics and limits.
@@ -240,16 +240,17 @@ Every response carries an `X-Request-ID` header: the caller's own, if it sends a
 ## Repository Layout
 
 ```text
-api/          HTTP API: catalog, SLO gate, incidents, readiness, scaffold generator, workflow runner
-cli/          CLI client for the API
-controller/   RolloutGuard controller binary and image
-internal/     Controller reconcile logic
-templates/    Generated service scaffold
-deploy/crds/  AttestaService, SLOPolicy and RolloutGuard CRDs
-deploy/       Controller manifests
-infra/        Terraform, Argo CD and monitoring values for local clusters
-scripts/      Local demo and failure-scenario runners
-docs/         Operator and design documentation
+cmd/attesta/             CLI
+cmd/attesta-api/         HTTP API binary and image
+cmd/attesta-controller/  RolloutGuard controller binary and image
+internal/                Everything the binaries share: catalog, SLO gate, workflows, controller, scaffold, ...
+templates/               Generated service scaffold
+deploy/crds/             AttestaService, SLOPolicy and RolloutGuard CRDs
+deploy/controller/       Controller manifests
+infra/                   Terraform, Argo CD and monitoring values for local clusters
+scripts/                 Local demo and failure-scenario runners
+test/e2e/                End-to-end manifests for kind
+docs/                    Operator and design documentation
 ```
 
 ## License

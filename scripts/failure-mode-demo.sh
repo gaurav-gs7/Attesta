@@ -125,7 +125,7 @@ start_api() {
     ATTESTA_API_TOKEN="$ATTESTA_API_TOKEN" \
     ATTESTA_ADDR="$ATTESTA_ADDR" \
     ATTESTA_PROMETHEUS_URL="$PROMETHEUS_UNAVAILABLE_URL" \
-    go run ./api/cmd/attesta-api >>"$log_file" 2>&1 &
+    go run ./cmd/attesta-api >>"$log_file" 2>&1 &
   api_pid="$!"
   for _ in $(seq 1 60); do
     if curl -fsS "$ATTESTA_API_URL/readyz" >/dev/null 2>&1; then
@@ -150,7 +150,7 @@ postgres_unavailable_fails_predictably() {
     ATTESTA_API_TOKEN="$ATTESTA_API_TOKEN" \
     ATTESTA_ADDR="127.0.0.1:$((ATTESTA_PORT + 1))" \
     DATABASE_URL="postgres://attesta:attesta@127.0.0.1:1/attesta?sslmode=disable" \
-    go run ./api/cmd/attesta-api >"$pg_log" 2>&1 &
+    go run ./cmd/attesta-api >"$pg_log" 2>&1 &
   local pg_pid="$!"
   local exited="false"
   local exit_code="0"
