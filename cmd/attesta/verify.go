@@ -27,8 +27,19 @@ var errChainBroken = errors.New("decision chain verification failed")
 func verify(args []string) error {
 	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
 	file := fs.String("f", "-", "kubectl JSON (a List, or one object) to read; - is stdin")
+	keyFile := fs.String("public-key", "", "PEM Ed25519 public key(s); every record must be signed by one of them")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	var keys attestav1.Keys
+	if *keyFile != "" {
+		raw, err := os.ReadFile(*keyFile)
+		if err != nil {
+			return err
+		}
+		if keys, err = attestav1.ParsePublicKeys(raw); err != nil {
+			return fmt.Errorf("--public-key: %w", err)
+		}
 	}
 	if fs.NArg() > 0 {
 		return errUsage
@@ -46,12 +57,12 @@ func verify(args []string) error {
 	if err != nil {
 		return err
 	}
-	return verifyChains(raw, stdout)
+	return verifyChains(raw, stdout, keys)
 }
 
 type chainKey struct{ namespace, guard, uid string }
 
-func verifyChains(raw []byte, out io.Writer) error {
+func verifyChains(raw []byte, out io.Writer, trusted attestav1.Keys) error {
 	var doc struct {
 		Kind  string            `json:"kind"`
 		Items []json.RawMessage `json:"items"`
@@ -120,7 +131,11 @@ func verifyChains(raw []byte, out io.Writer) error {
 			head = nil
 		}
 		verdict := fmt.Sprintf("OK      %s/%s: %d decisions", k.namespace, k.guard, len(records))
-		if err := attestav1.VerifyChain(k.guard, k.uid, records, head); err != nil {
+		err := attestav1.VerifyChain(k.guard, k.uid, records, head)
+		if err == nil && trusted != nil {
+			err = attestav1.VerifySignatures(k.guard, records, trusted)
+		}
+		if err != nil {
 			broken++
 			verdict = fmt.Sprintf("BROKEN  %s/%s: %v", k.namespace, k.guard, err)
 		} else if !guardSeen {

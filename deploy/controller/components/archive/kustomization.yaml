@@ -1,0 +1,36 @@
+# Sends every RolloutDecision, in order, to an archive outside the cluster:
+# attesta-api's /api/v1/decision-archive, or any endpoint that accepts the
+# record and answers 2xx. Create a Secret with a token the archive accepts
+# (for attesta-api, an operator token), then add to your kustomization:
+#
+#   components:
+#     - <path>/deploy/controller/components/archive
+#
+# and set the URL with a patch replacing ARCHIVE_URL below, for example
+# https://attesta-api.example.com/api/v1/decision-archive.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - target:
+      kind: Deployment
+      name: attesta-controller
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --archive-url=ARCHIVE_URL
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --archive-token-file=/etc/attesta/archive/token
+      - op: add
+        path: /spec/template/spec/volumes/-
+        value:
+          name: archive-token
+          secret:
+            secretName: attesta-archive-token
+            defaultMode: 0400
+      - op: add
+        path: /spec/template/spec/containers/0/volumeMounts/-
+        value:
+          name: archive-token
+          mountPath: /etc/attesta/archive
+          readOnly: true

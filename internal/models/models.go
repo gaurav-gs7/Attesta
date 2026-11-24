@@ -1,6 +1,9 @@
 package models
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type Service struct {
 	ID                 string    `json:"id"`
@@ -205,4 +208,30 @@ type WorkflowEvent struct {
 	Timestamp time.Time `json:"timestamp"`
 	Type      string    `json:"type"`
 	Message   string    `json:"message"`
+}
+
+// ArchivedDecision is a RolloutDecision held by the API's archive, outside
+// the cluster it was made in.
+type ArchivedDecision struct {
+	GuardUID     string          `json:"guardUID"`
+	Namespace    string          `json:"namespace"`
+	Guard        string          `json:"guard"`
+	Name         string          `json:"name"`
+	Sequence     int64           `json:"sequence"`
+	Hash         string          `json:"hash"`
+	PreviousHash string          `json:"previousHash,omitempty"`
+	KeyID        string          `json:"keyID,omitempty"`
+	Record       json.RawMessage `json:"record"`
+	ArchivedAt   time.Time       `json:"archivedAt"`
+}
+
+// ArchivedGuard summarises one guard's chain in the archive.
+type ArchivedGuard struct {
+	GuardUID       string    `json:"guardUID"`
+	Namespace      string    `json:"namespace"`
+	Guard          string    `json:"guard"`
+	Decisions      int64     `json:"decisions"`
+	HeadSequence   int64     `json:"headSequence"`
+	HeadHash       string    `json:"headHash"`
+	LastArchivedAt time.Time `json:"lastArchivedAt"`
 }

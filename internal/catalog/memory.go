@@ -16,6 +16,7 @@ type MemoryStore struct {
 	mu        sync.RWMutex
 	services  map[string]models.Service
 	incidents map[string]models.IncidentRecord
+	archive   map[string][]models.ArchivedDecision
 	// Workflow runs, with the engine's idempotency contract.
 	*workflows.MemoryStore
 }

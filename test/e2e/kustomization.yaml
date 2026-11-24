@@ -1,17 +1,27 @@
-# Deploys the controller from a locally built image for the kind end-to-end
-# test (scripts/e2e-rollback.sh). Build and load it first:
+# Deploys the controller and the API from locally built images for the kind
+# end-to-end test (scripts/e2e-rollback.sh), with decision signing and the
+# API as the decision archive. Build and load the images first:
 #   docker build -f cmd/attesta-controller/Dockerfile -t attesta-controller:e2e .
-#   kind load docker-image attesta-controller:e2e --name <cluster>
+#   docker build -f cmd/attesta-api/Dockerfile -t attesta-api:e2e .
+#   kind load docker-image attesta-controller:e2e attesta-api:e2e --name <cluster>
+# The script creates the Secrets the components and the API read.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - ../../deploy/controller
+  - ../../deploy/api
+  - api.yaml
+components:
+  - ../../deploy/controller/components/signing
+  - ../../deploy/controller/components/archive
 images:
   - name: ghcr.io/gaurav-gs7/attesta-controller
     newName: attesta-controller
     newTag: e2e
+  - name: attesta-api
+    newName: attesta-api
+    newTag: e2e
 patches:
-  # Point metric analysis at the in-cluster Prometheus stub the test deploys.
   - target:
       kind: Deployment
       name: attesta-controller
@@ -19,3 +29,8 @@ patches:
       - op: add
         path: /spec/template/spec/containers/0/args/-
         value: --prometheus-url=http://prom-stub.attesta-e2e.svc:9090
+      - op: replace
+        # args/5 is the --archive-url=ARCHIVE_URL placeholder the archive
+        # component adds after the signing flag.
+        path: /spec/template/spec/containers/0/args/5
+        value: --archive-url=http://attesta-api.attesta-system.svc:8080/api/v1/decision-archive

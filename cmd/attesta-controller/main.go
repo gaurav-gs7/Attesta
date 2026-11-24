@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	attestav1 "github.com/gaurav-gs7/attesta/api/v1"
+	"github.com/gaurav-gs7/attesta/internal/archive"
 	"github.com/gaurav-gs7/attesta/internal/controller"
 	"github.com/gaurav-gs7/attesta/internal/prometheus"
 	"github.com/gaurav-gs7/attesta/internal/promql"
@@ -49,6 +51,9 @@ type options struct {
 	promCAFile       string
 	promTimeout      time.Duration
 	metrics          prometheus.Metrics
+	signingKeyFile   string
+	archiveURL       string
+	archiveTokenFile string
 }
 
 func main() {
@@ -91,6 +96,9 @@ func registerFlags(fs *flag.FlagSet) *options {
 	fs.StringVar(&o.promTokenFile, "prometheus-bearer-token-file", "", "file holding a bearer token for Prometheus (for example a mounted Secret)")
 	fs.StringVar(&o.promCAFile, "prometheus-ca-file", "", "PEM bundle to trust for Prometheus's TLS certificate")
 	fs.DurationVar(&o.promTimeout, "prometheus-query-timeout", promql.DefaultQueryTimeout, "timeout for each Prometheus query")
+	fs.StringVar(&o.signingKeyFile, "signing-key-file", "", "PEM PKCS#8 Ed25519 private key that signs every decision record (openssl genpkey -algorithm ed25519); empty leaves records unsigned")
+	fs.StringVar(&o.archiveURL, "archive-url", "", "URL every decision record is POSTed to, in order, such as attesta-api's /api/v1/decision-archive; empty keeps records in the cluster only")
+	fs.StringVar(&o.archiveTokenFile, "archive-token-file", "", "file holding a bearer token for --archive-url")
 	d := prometheus.DefaultMetrics
 	fs.StringVar(&o.metrics.Requests, "prometheus-requests-metric", d.Requests, "counter of HTTP requests (as ATTESTA_PROMETHEUS_REQUESTS_METRIC for the API)")
 	fs.StringVar(&o.metrics.Duration, "prometheus-duration-metric", d.Duration, "histogram of request durations in seconds")
@@ -187,6 +195,29 @@ func run(ctx context.Context, o options) error {
 			return fmt.Errorf("configure Prometheus: %w", err)
 		}
 		reconciler.Prometheus, reconciler.SLO, reconciler.Metrics = prom, slos, o.metrics
+	}
+	if o.signingKeyFile != "" {
+		raw, err := os.ReadFile(o.signingKeyFile)
+		if err != nil {
+			return fmt.Errorf("read --signing-key-file: %w", err)
+		}
+		if reconciler.SigningKey, err = attestav1.ParsePrivateKey(raw); err != nil {
+			return fmt.Errorf("--signing-key-file: %w", err)
+		}
+		ctrl.Log.Info("signing decision records", "keyID", attestav1.KeyID(reconciler.SigningKey.Public().(ed25519.PublicKey)))
+	} else {
+		ctrl.Log.Info("decision records are not signed; set --signing-key-file")
+	}
+	if o.archiveURL != "" {
+		token := ""
+		if o.archiveTokenFile != "" {
+			raw, err := os.ReadFile(o.archiveTokenFile)
+			if err != nil {
+				return fmt.Errorf("read --archive-token-file: %w", err)
+			}
+			token = string(raw)
+		}
+		reconciler.Archive = archive.New(o.archiveURL, token)
 	}
 	if err := reconciler.SetupWithManager(ctx, mgr, o.workers); err != nil {
 		return fmt.Errorf("set up the RolloutGuard controller: %w", err)

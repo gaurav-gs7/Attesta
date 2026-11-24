@@ -184,8 +184,8 @@ func (r *RolloutGuardReconciler) createRecord(ctx context.Context, guard *attest
 
 	for range 3 {
 		if !sealedAfter(spec, status.LastDecision) {
-			if err := spec.Seal(status.LastDecision); err != nil {
-				return fmt.Errorf("seal decision: %w", err)
+			if err := r.seal(&spec, status.LastDecision); err != nil {
+				return err
 			}
 		}
 		record := &attestav1.RolloutDecision{
@@ -251,8 +251,8 @@ func (r *RolloutGuardReconciler) writeAhead(guard *attestav1.RolloutGuard, deplo
 	status *RolloutGuardStatus, d *decisionDraft) error {
 
 	spec := r.decisionSpec(guard, deployment, d)
-	if err := spec.Seal(status.LastDecision); err != nil {
-		return fmt.Errorf("seal decision: %w", err)
+	if err := r.seal(&spec, status.LastDecision); err != nil {
+		return err
 	}
 	raw, err := json.Marshal(spec)
 	if err != nil {

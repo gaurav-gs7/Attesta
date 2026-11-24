@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"strconv"
@@ -97,6 +98,10 @@ type RolloutGuardReconciler struct {
 	SLO SLOSource
 	// Actor identifies this controller in the decision records it writes.
 	Actor attestav1.DecisionActor
+	// SigningKey, if set, signs every decision record.
+	SigningKey ed25519.PrivateKey
+	// Archive, if set, receives every decision record, in order.
+	Archive Archiver
 	// APIReader reads around the cache. It is used only to adopt a decision
 	// record the cache has not seen yet; nil means the client.
 	APIReader client.Reader
@@ -353,6 +358,9 @@ func (r *RolloutGuardReconciler) reconcile(ctx context.Context, req ctrl.Request
 			// lost: it travels on the Deployment and is recorded next pass.
 			return ctrl.Result{}, r.finish(ctx, &guard, prev, status, errors.Join(actionErr, err))
 		}
+	}
+	if retry := r.archiveDecisions(ctx, &guard, &status); retry > 0 && (requeueAfter == 0 || retry < requeueAfter) {
+		requeueAfter = retry
 	}
 	if err := r.finish(ctx, &guard, prev, status, actionErr); err != nil {
 		return ctrl.Result{}, err

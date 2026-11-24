@@ -41,6 +41,7 @@ dump() {
   set +e
   kubectl -n attesta-system get pods -o wide
   kubectl -n attesta-system logs -l app.kubernetes.io/name=attesta-controller --tail=200 --prefix
+  kubectl -n attesta-system logs deployment/attesta-api --tail=100
   kubectl -n "$NS" get rolloutguard app-rollout -o yaml
   kubectl -n "$NS" describe deployment app
   kubectl -n "$NS" get replicasets -o wide --show-labels
@@ -98,11 +99,24 @@ all_replicas_metric() {
 
 holder_changed_from() { local now; now="$(leader)"; [[ -n "$now" && "$now" != "$1" ]]; }
 
-log "installing CRDs and the controller"
+log "creating the decision signing key and the API token"
+KEY_DIR="$(mktemp -d)"
+openssl genpkey -algorithm ed25519 -out "$KEY_DIR/key.pem"
+openssl pkey -in "$KEY_DIR/key.pem" -pubout -out "$KEY_DIR/public.pem"
+API_TOKEN="$(openssl rand -hex 24)"
+printf %s "$API_TOKEN" >"$KEY_DIR/token"
+export DECISION_PUBLIC_KEY="$KEY_DIR/public.pem"
+kubectl create namespace attesta-system --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n attesta-system create secret generic attesta-decision-signing-key --from-file=key.pem="$KEY_DIR/key.pem"
+kubectl -n attesta-system create secret generic attesta-archive-token --from-file=token="$KEY_DIR/token"
+kubectl -n attesta-system create secret generic attesta-api --from-file=token="$KEY_DIR/token" --from-file=public.pem="$KEY_DIR/public.pem"
+
+log "installing CRDs, the controller and the API"
 kubectl apply -k deploy/crds
 kubectl wait --for=condition=Established crd/rolloutguards.attesta.io --timeout=60s
 kubectl apply -k test/e2e
 kubectl -n attesta-system rollout status deployment/attesta-controller --timeout=180s
+kubectl -n attesta-system rollout status deployment/attesta-api --timeout=180s
 wait_until "a controller replica holds the leader lease" 60 \
   bash -c "[[ -n \"\$(kubectl -n attesta-system get lease attesta-controller -o 'jsonpath={.spec.holderIdentity}')\" ]]"
 
@@ -353,7 +367,7 @@ measured="$(jq -r '.items[] | select(.spec.guard=="app2-rollout" and .spec.actio
 count="$(jq '.items | length' /tmp/decisions.json)"
 for ((i = 0; i < count; i++)); do
   want="$(jq -r ".items[$i].spec.hash" /tmp/decisions.json)"
-  got="$(jq -cjS ".items[$i].spec | del(.hash)" /tmp/decisions.json | sha256sum | cut -d' ' -f1)"
+  got="$(jq -cjS ".items[$i].spec | del(.hash, .signature)" /tmp/decisions.json | sha256sum | cut -d' ' -f1)"
   [[ "$got" == "$want" ]] || fail "decision $(jq -r ".items[$i].metadata.name" /tmp/decisions.json) hashes to $got, claims $want"
 done
 if kubectl -n "$NS" patch rolloutdecision "$(jq -r '.items[0].metadata.name' /tmp/decisions.json)" --type=merge \
@@ -362,5 +376,27 @@ if kubectl -n "$NS" patch rolloutdecision "$(jq -r '.items[0].metadata.name' /tm
 fi
 grep -q immutable /tmp/patch.err || fail "editing a decision failed for the wrong reason: $(cat /tmp/patch.err)"
 log "ok: $count decision records verified by sha256 over jq's canonical form; edits are refused"
+
+log "records are signed, cannot be deleted even by cluster-admin, and reach the archive outside the cluster"
+jq -e '[.items[] | select(.spec.signature == null)] | length == 0' /tmp/decisions.json >/dev/null ||
+  fail "unsigned decision records"
+victim="$(jq -r '.items[0].metadata.name' /tmp/decisions.json)"
+if kubectl -n "$NS" delete rolloutdecision "$victim" 2>/tmp/delete.err; then
+  fail "cluster-admin deleted decision record $victim"
+fi
+grep -q "not deleted" /tmp/delete.err || fail "deleting a decision failed for the wrong reason: $(cat /tmp/delete.err)"
+archived() {
+  [[ "$(kubectl -n "$NS" get rolloutguard app2-rollout -o 'jsonpath={.status.archivedSequence}')" == \
+    "$(kubectl -n "$NS" get rolloutguard app2-rollout -o 'jsonpath={.status.lastDecision.sequence}')" ]]
+}
+wait_until "every app2 decision is in the archive" 60 archived
+kubectl -n attesta-system port-forward svc/attesta-api 18080:8080 >/tmp/api-port-forward.log 2>&1 &
+pf=$!
+wait_until "the API answers through the port-forward" 30 curl -fsS http://127.0.0.1:18080/livez
+api_guard="$(curl -fsS -H "Authorization: Bearer $API_TOKEN" "http://127.0.0.1:18080/api/v1/guards/$NS/app2-rollout")"
+kill "$pf" 2>/dev/null || true
+jq -e '.chain.verified and .chain.signaturesChecked and .archive.matches' <<<"$api_guard" >/dev/null ||
+  fail "the API does not verify app2's chain against signatures and the archive: $(jq -c '{chain, archive}' <<<"$api_guard")"
+log "ok: signed, undeletable, archived, and the API verifies all three: $(jq -c '{chain, archive}' <<<"$api_guard")"
 
 log "PASS: deadline and metric-analysis rollbacks both restored the healthy template once and are on record; paused rollouts were left alone"

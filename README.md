@@ -12,7 +12,7 @@ Every value Attesta reports is either measured, recorded, or explicitly marked a
 | --- | --- | --- |
 | Rollout guard controller | Watches Deployments, writes status and Events, and restores the last healthy template when Kubernetes reports `ProgressDeadlineExceeded` or when the new revision fails `consecutiveFailures` metric checks in a row (error rate, p95 latency, availability from Prometheus, scoped to that revision). Inconclusive data never decides. Rolls back only Deployments that name the guard in `attesta.io/rollback-guards`, and never fights a GitOps tool that re-applies the bad version. Leader election, metrics, probes. | Not a canary: no traffic shifting. `spec.strategy` is a label; every revision rolls out as a standard rolling update and is judged on its pods' share of traffic. Use Argo Rollouts or Flagger for weighted steps. |
 | SLO gate | Error rate, p95, multi-window burn rates (1h+5m, 6h+30m) and the 30-day error budget from Prometheus, judged by one evaluator (`internal/slo`) that the API's SLO status and the controller share. A guard with `spec.sloGate` pauses each new revision while the service is out of budget or burning it fast, and records why. Unknown data blocks `POST /rollouts`. | The 10% budget floor and the burn-rate thresholds are global constants; the objectives themselves are per guard. A paused rollout is resumed by a person, not automatically. |
-| Decision records | Every promotion, rollback and skipped or failed rollback is written by the controller as an immutable `RolloutDecision`: what it measured (each PromQL query and value, the Deployment's conditions), the revision and images, what it restored, and when. Records form a SHA-256 hash chain per guard; `attesta verify` or `jq` plus `sha256sum` detect an edited, inserted or deleted record. | Tamper-evident, not tamper-proof: anyone who can delete both a guard and its records can erase history; export the records if you need retention. Not signed. |
+| Decision records | Every promotion, rollback, pause, and skipped or failed action is written by the controller as an immutable `RolloutDecision`: what it measured (each PromQL query and value, the Deployment's conditions), the revision and images, what it restored, and when. Records form a SHA-256 hash chain per guard, are signed with Ed25519 (`--signing-key-file`), cannot be deleted or relabelled even by cluster-admins (a ValidatingAdmissionPolicy), and are copied in order to an append-only archive outside the cluster (`--archive-url`, attesta-api), which refuses forks and flags records missing or changed in the cluster. A rollback and its sealed record travel on the same Deployment update, so a crash cannot separate them. | Whoever controls both the cluster and the archive's database can rewrite both; keep them in different hands. |
 | API cluster view | Reads RolloutGuards and the controller's RolloutDecisions (`ATTESTA_CLUSTER_READ`), verifies each chain on read, and cites the decisions in incident timelines. Read-only RBAC; the API never writes to the cluster. | No cache: each request reads the API server. |
 | Incidents | Alertmanager webhook (v4) with fingerprint dedupe and resolve; timeline from recorded events only. | Root cause is never inferred; the postmortem draft leaves it as TODO. |
 | Readiness score | Checks which metadata fields were registered. | It does not inspect the cluster or the repository. |
@@ -100,7 +100,7 @@ kubectl get rolloutdecisions -n platform
 kubectl get rolloutguards,rolloutdecisions -n platform -o json | attesta verify
 ```
 
-Without Attesta's code, a record checks out when `jq -cjS '.spec | del(.hash)' | sha256sum` equals its `spec.hash`, and its `spec.previousHash` equals the hash of the record before it.
+Without Attesta's code, a record checks out when `jq -cjS '.spec | del(.hash, .signature)' | sha256sum` equals its `spec.hash`, and its `spec.previousHash` equals the hash of the record before it.
 
 ## SLO Evaluation
 
@@ -221,7 +221,9 @@ Without `DATABASE_URL`, Attesta keeps everything in memory. With it, the service
 | `GET /api/v1/services/{name}/slos`, `GET .../error-budget` | SLO evaluation |
 | `GET /api/v1/services/{name}/guards` | The service's RolloutGuards, each chain verified |
 | `GET /api/v1/guards[?namespace=]` | RolloutGuards |
-| `GET /api/v1/guards/{namespace}/{name}` | A guard, every decision it recorded, and the chain's verification |
+| `GET /api/v1/guards/{namespace}/{name}` | A guard, every decision it recorded, the chain's verification, and how it compares with the archive |
+| `POST /api/v1/decision-archive` | Archive one decision (the controller's `--archive-url`); append-only, refuses forks and gaps |
+| `GET /api/v1/decision-archive`, `GET .../{guardUID}` | Archived chains, including deleted guards', verified |
 | `GET /api/v1/services/{name}/runbook` | Runbook rendered from the service record |
 | `GET /api/v1/services/{name}/scaffold` | The service's scaffold as a `.tar.gz`, rendered on demand |
 | `POST /api/v1/incidents`, `GET /api/v1/incidents` | Open and list incidents |

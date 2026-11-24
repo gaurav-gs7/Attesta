@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -55,7 +56,7 @@ func kubectlList(t *testing.T, n int, mutate func(records []attestav1.RolloutDec
 
 func TestVerifyAcceptsAnIntactChain(t *testing.T) {
 	var out bytes.Buffer
-	if err := verifyChains(kubectlList(t, 3, nil), &out); err != nil {
+	if err := verifyChains(kubectlList(t, 3, nil), &out, nil); err != nil {
 		t.Fatalf("verify: %v\n%s", err, out.String())
 	}
 	if !strings.Contains(out.String(), "OK      payments/payments-api-rollout: 3 decisions") {
@@ -76,7 +77,7 @@ func TestVerifyReportsATruncatedChain(t *testing.T) {
 	raw, _ = json.Marshal(list)
 
 	var out bytes.Buffer
-	err := verifyChains(raw, &out)
+	err := verifyChains(raw, &out, nil)
 	if !errors.Is(err, errChainBroken) || !strings.Contains(out.String(), "BROKEN") {
 		t.Fatalf("verify = %v, output:\n%s", err, out.String())
 	}
@@ -85,7 +86,27 @@ func TestVerifyReportsATruncatedChain(t *testing.T) {
 func TestVerifyReportsAnEditedRecord(t *testing.T) {
 	raw := kubectlList(t, 2, func(r []attestav1.RolloutDecision) { r[0].Spec.Action = attestav1.ActionRolledBack })
 	var out bytes.Buffer
-	if err := verifyChains(raw, &out); !errors.Is(err, errChainBroken) || !strings.Contains(out.String(), "altered") {
+	if err := verifyChains(raw, &out, nil); !errors.Is(err, errChainBroken) || !strings.Contains(out.String(), "altered") {
 		t.Fatalf("verify = %v, output:\n%s", err, out.String())
+	}
+}
+
+func TestVerifyChecksSignaturesWithAPublicKey(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	keys := attestav1.Keys{}
+	keys.Add(pub)
+	unsigned := kubectlList(t, 2, nil)
+	var out bytes.Buffer
+	if err := verifyChains(unsigned, &out, keys); !errors.Is(err, errChainBroken) || !strings.Contains(out.String(), "unsigned") {
+		t.Fatalf("unsigned records with a key: %v\n%s", err, out.String())
+	}
+	signed := kubectlList(t, 2, func(r []attestav1.RolloutDecision) {
+		for i := range r {
+			_ = r[i].Spec.Sign(priv)
+		}
+	})
+	out.Reset()
+	if err := verifyChains(signed, &out, keys); err != nil {
+		t.Fatalf("signed records: %v\n%s", err, out.String())
 	}
 }

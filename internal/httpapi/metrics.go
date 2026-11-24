@@ -22,6 +22,9 @@ type serverMetrics struct {
 	registry *prometheus.Registry
 	requests *prometheus.CounterVec
 	duration *prometheus.HistogramVec
+	// archiveRefused counts records the decision archive refused: a fork,
+	// a gap or a bad link. Alert on any increase.
+	archiveRefused prometheus.Counter
 }
 
 func newServerMetrics(startedAt time.Time) *serverMetrics {
@@ -36,8 +39,12 @@ func newServerMetrics(startedAt time.Time) *serverMetrics {
 			Help:    "Attesta API request duration by route pattern and method.",
 			Buckets: prometheus.DefBuckets,
 		}, []string{"route", "method"}),
+		archiveRefused: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "attesta_decision_archive_refused_total",
+			Help: "Decision records the archive refused because they fork or break a guard's archived chain.",
+		}),
 	}
-	m.registry.MustRegister(m.requests, m.duration,
+	m.registry.MustRegister(m.requests, m.duration, m.archiveRefused,
 		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 			Name: "attesta_uptime_seconds",
 			Help: "Attesta API uptime in seconds.",

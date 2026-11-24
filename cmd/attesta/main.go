@@ -70,6 +70,8 @@ func run(args []string) error {
 		return guards(rest)
 	case "guard":
 		return guard(rest)
+	case "archive":
+		return archived(rest)
 	case "incident":
 		return incident(rest)
 	case "workflow", "workflows":
@@ -376,6 +378,20 @@ func guard(args []string) error {
 	return get("/api/v1/guards/" + namespace + "/" + url.PathEscape(name))
 }
 
+// archived shows the API's decision archive: every archived chain, or one
+// guard's by UID.
+func archived(args []string) error {
+	switch {
+	case len(args) == 0:
+		return get("/api/v1/decision-archive")
+	case len(args) == 1 && guardUID.MatchString(args[0]):
+		return get("/api/v1/decision-archive/" + args[0])
+	}
+	return errUsage
+}
+
+var guardUID = regexp.MustCompile(`^[0-9a-zA-Z-]{1,64}$`)
+
 func firstArg(args []string, label string) (string, error) {
 	if len(args) == 0 || strings.TrimSpace(args[0]) == "" {
 		return "", fmt.Errorf("%s is required", label)
@@ -466,6 +482,8 @@ Usage:
   attesta guards payments-api         (the service's guards, with their decision chains verified)
   attesta guards --namespace payments
   attesta guard payments/payments-api-rollout   (one guard and every decision it recorded)
+  attesta archive                     (every chain in the API's decision archive, deleted guards included)
+  attesta archive <guard UID>         (one archived chain, verified)
   attesta incident create --service payments-api --alert HighErrorRate --error-rate 8.2 --latency-p95-ms 850
   attesta incident list
   attesta incident show inc-20260516103000

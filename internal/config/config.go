@@ -44,6 +44,9 @@ type Config struct {
 	// ClusterRead lets the API read RolloutGuards and RolloutDecisions, with
 	// the in-cluster service account or $KUBECONFIG.
 	ClusterRead bool
+	// DecisionKeysFile holds the PEM public keys decision records must be
+	// signed with (ATTESTA_DECISION_PUBLIC_KEYS_FILE).
+	DecisionKeysFile string
 }
 
 func Load() Config {
@@ -63,6 +66,7 @@ func Load() Config {
 		PrometheusURL:    os.Getenv("ATTESTA_PROMETHEUS_URL"),
 		ImageRegistry:    env("ATTESTA_IMAGE_REGISTRY", templates.DefaultImageRegistry),
 		ClusterRead:      boolEnv("ATTESTA_CLUSTER_READ"),
+		DecisionKeysFile: os.Getenv("ATTESTA_DECISION_PUBLIC_KEYS_FILE"),
 	}
 }
 

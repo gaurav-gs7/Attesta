@@ -290,6 +290,12 @@ spec:
                   requests:
                     type: number
                 type: object
+              archivedSequence:
+                description: |-
+                  ArchivedSequence is the last decision the archive outside the cluster
+                  has accepted; decisions after it are still to be sent.
+                format: int64
+                type: integer
               availableReplicas:
                 format: int32
                 type: integer

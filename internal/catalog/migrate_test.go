@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"testing/fstest"
+
+	"github.com/gaurav-gs7/attesta/internal/models"
 )
 
 func openDB(t *testing.T, dsn string) *sql.DB {
@@ -146,9 +148,13 @@ func TestSchemaHasNoUnusedTables(t *testing.T) {
 		}
 		tables = append(tables, name)
 	}
-	src, err := os.ReadFile("postgres.go")
-	if err != nil {
-		t.Fatal(err)
+	var src []byte
+	for _, file := range []string{"postgres.go", "archive.go"} {
+		b, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		src = append(src, b...)
 	}
 	for _, table := range tables {
 		if table == "schema_migrations" {
@@ -176,4 +182,23 @@ func onlyMigrations(ms []migration) fstest.MapFS {
 		fsys["migrations/"+m.name] = &fstest.MapFile{Data: []byte(m.sql)}
 	}
 	return fsys
+}
+
+// The archive refuses UPDATE and DELETE in the database itself, so the
+// API's own code cannot rewrite history either.
+func TestDecisionArchiveIsAppendOnlyInTheDatabase(t *testing.T) {
+	store, _ := postgresForTest(t)
+	ctx := context.Background()
+	if _, err := store.ArchiveDecision(ctx, models.ArchivedDecision{GuardUID: "g", Namespace: "n", Guard: "x", Name: "x-g-000001",
+		Sequence: 1, Hash: strings.Repeat("a", 64), Record: []byte(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`UPDATE decision_archive SET hash = repeat('b', 64)`,
+		`DELETE FROM decision_archive`,
+	} {
+		if _, err := store.db.ExecContext(ctx, stmt); err == nil || !strings.Contains(err.Error(), "append-only") {
+			t.Errorf("%s: %v, want refused", stmt, err)
+		}
+	}
 }

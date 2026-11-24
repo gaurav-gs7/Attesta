@@ -1,0 +1,34 @@
+# Signs every RolloutDecision with an Ed25519 key. Create the key and its
+# Secret first, and give the public key to whoever verifies:
+#
+#   openssl genpkey -algorithm ed25519 -out decision-signing.pem
+#   openssl pkey -in decision-signing.pem -pubout -out decision-signing.pub.pem
+#   kubectl -n attesta-system create secret generic attesta-decision-signing-key \
+#     --from-file=key.pem=decision-signing.pem
+#
+# Then add to your kustomization:
+#   components:
+#     - <path>/deploy/controller/components/signing
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - target:
+      kind: Deployment
+      name: attesta-controller
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --signing-key-file=/etc/attesta/signing/key.pem
+      - op: add
+        path: /spec/template/spec/volumes/-
+        value:
+          name: decision-signing-key
+          secret:
+            secretName: attesta-decision-signing-key
+            defaultMode: 0400
+      - op: add
+        path: /spec/template/spec/containers/0/volumeMounts/-
+        value:
+          name: decision-signing-key
+          mountPath: /etc/attesta/signing
+          readOnly: true

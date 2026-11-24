@@ -1,0 +1,92 @@
+# attesta-api for the kind end-to-end test: in-memory store, reading guards
+# and decisions from the cluster, and archiving the controller's decisions.
+# Secrets are created by scripts/e2e-rollback.sh.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: attesta-api
+  namespace: attesta-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: attesta-api
+  namespace: attesta-system
+  labels:
+    app.kubernetes.io/name: attesta-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: attesta-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: attesta-api
+    spec:
+      serviceAccountName: attesta-api
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: attesta-api
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ATTESTA_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: attesta-api
+                  key: token
+            - name: ATTESTA_CLUSTER_READ
+              value: "true"
+            - name: ATTESTA_DECISION_PUBLIC_KEYS_FILE
+              value: /etc/attesta/keys/public.pem
+            - name: ATTESTA_TEMPLATE_DIR
+              value: /app/templates
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+          volumeMounts:
+            - name: keys
+              mountPath: /etc/attesta/keys
+              readOnly: true
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: keys
+          secret:
+            secretName: attesta-api
+            items:
+              - key: public.pem
+                path: public.pem
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: attesta-api
+  namespace: attesta-system
+spec:
+  selector:
+    app.kubernetes.io/name: attesta-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

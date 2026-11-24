@@ -1,0 +1,45 @@
+# Decision records are evidence. The CRD already refuses any change to a
+# record's spec; this policy refuses deleting a record, or relabelling it
+# (labels are how a guard's chain is listed), to everyone outside
+# attesta:decision-admins, cluster-admins included: a
+# ValidatingAdmissionPolicy is not bypassed by system:masters.
+#
+# Deleting a namespace still deletes its records (the namespace controller
+# is let through, or the namespace would never finish terminating). The
+# archive outside the cluster (--archive-url) keeps them regardless.
+#
+# Needs Kubernetes 1.30 or later.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: attesta-decision-records
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["attesta.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["rolloutdecisions"]
+  variables:
+    - name: admin
+      expression: >-
+        request.userInfo.groups.exists(g, g == 'attesta:decision-admins') ||
+        request.userInfo.username == 'system:serviceaccount:kube-system:namespace-controller'
+  validations:
+    - expression: "request.operation != 'DELETE' || variables.admin"
+      message: "RolloutDecisions are records and are not deleted; only attesta:decision-admins may, and the archive keeps a copy"
+      reason: Forbidden
+    - expression: >-
+        request.operation != 'UPDATE' || variables.admin ||
+        object.metadata.?labels.orValue({}) == oldObject.metadata.?labels.orValue({})
+      message: "a RolloutDecision's labels list it in its guard's chain and are not changed"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: attesta-decision-records
+spec:
+  policyName: attesta-decision-records
+  validationActions: [Deny]

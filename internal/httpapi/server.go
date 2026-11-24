@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	attestav1 "github.com/gaurav-gs7/attesta/api/v1"
 	"github.com/gaurav-gs7/attesta/internal/auth"
 	"github.com/gaurav-gs7/attesta/internal/catalog"
 	"github.com/gaurav-gs7/attesta/internal/cluster"
@@ -44,6 +45,7 @@ type Server struct {
 	metrics       *serverMetrics
 	workflows     *workflows.Engine
 	cluster       cluster.Reader
+	decisionKeys  attestav1.Keys
 	workflowOpts  []workflows.Option
 	logger        *slog.Logger
 
@@ -179,6 +181,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/services/{name}/guards", s.serviceGuards)
 	mux.HandleFunc("GET /api/v1/guards", s.listGuards)
 	mux.HandleFunc("GET /api/v1/guards/{namespace}/{name}", s.getGuard)
+	mux.HandleFunc("POST /api/v1/decision-archive", s.archiveDecision)
+	mux.HandleFunc("GET /api/v1/decision-archive", s.listArchive)
+	mux.HandleFunc("GET /api/v1/decision-archive/{guardUID}", s.getArchive)
 	mux.HandleFunc("GET /api/v1/services/{name}/runbook", s.runbook)
 	mux.HandleFunc("GET /api/v1/services/{name}/scaffold", s.scaffold)
 	mux.HandleFunc("POST /api/v1/incidents", s.createIncident)

@@ -222,6 +222,11 @@ type RolloutGuardStatus struct {
 	// +optional
 	SLOGate *SLOGateStatus `json:"sloGate,omitempty"`
 
+	// ArchivedSequence is the last decision the archive outside the cluster
+	// has accepted; decisions after it are still to be sent.
+	// +optional
+	ArchivedSequence int64 `json:"archivedSequence,omitempty"`
+
 	// LastDecision is the head of the guard's chain of RolloutDecisions:
 	// the next decision links to it.
 	// +optional

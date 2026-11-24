@@ -62,7 +62,7 @@ func (s *Server) guardsForService(ctx context.Context, service string) ([]guardW
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, guardWithChain{guardView: viewOf(g), Chain: cluster.Verify(g, records)})
+		out = append(out, guardWithChain{guardView: viewOf(g), Chain: cluster.Verify(g, records, s.decisionKeys)})
 	}
 	return out, nil
 }
@@ -143,11 +143,22 @@ func (s *Server) getGuard(w http.ResponseWriter, r *http.Request) {
 	for _, d := range records {
 		decisions = append(decisions, decisionView{Name: d.Name, RolloutDecisionSpec: d.Spec})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"guard":     viewOf(g),
 		"decisions": decisions,
-		"chain":     cluster.Verify(g, records),
-	})
+		"chain":     cluster.Verify(g, records, s.decisionKeys),
+	}
+	// Against the copy outside the cluster: catches what the cluster's own
+	// chain cannot, such as every record deleted.
+	comparison, err := s.compareWithArchive(r, g, records)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	if comparison != nil {
+		body["archive"] = comparison
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // decisionsSince collects the decisions of every guard of the service made

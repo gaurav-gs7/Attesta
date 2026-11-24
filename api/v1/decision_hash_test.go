@@ -2,6 +2,7 @@ package v1
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"os/exec"
@@ -98,11 +99,15 @@ func TestHashMatchesJq(t *testing.T) {
 		t.Skip("jq not installed")
 	}
 	records := chain(t, 1)
+	_, priv, _ := ed25519.GenerateKey(nil)
+	if err := records[0].Spec.Sign(priv); err != nil {
+		t.Fatal(err)
+	}
 	raw, err := json.Marshal(records[0])
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(jq, "-cjS", ".spec | del(.hash)")
+	cmd := exec.Command(jq, "-cjS", ".spec | del(.hash, .signature)")
 	cmd.Stdin = bytes.NewReader(raw)
 	out, err := cmd.Output()
 	if err != nil {

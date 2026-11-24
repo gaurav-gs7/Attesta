@@ -76,9 +76,15 @@ type RolloutDecisionSpec struct {
 	PreviousHash string `json:"previousHash,omitempty"`
 	// Hash is the hex SHA-256 of this spec without the hash field,
 	// serialized as compact JSON with object keys sorted and no HTML
-	// escaping: jq -cjS '.spec | del(.hash)' reproduces the input.
+	// escaping, without hash and signature:
+	// jq -cjS '.spec | del(.hash, .signature)' reproduces the input.
 	// +kubebuilder:validation:Pattern=`^[0-9a-f]{64}$`
 	Hash string `json:"hash"`
+	// Signature is the controller's Ed25519 signature of Hash, when it runs
+	// with a signing key. Without the key, nobody else can produce a record
+	// that verifies, even with write access to the cluster.
+	// +optional
+	Signature *DecisionSignature `json:"signature,omitempty"`
 	// DecidedAt is when the controller decided, RFC 3339 with nanoseconds.
 	// +kubebuilder:validation:MinLength=1
 	DecidedAt string `json:"decidedAt"`
@@ -133,6 +139,17 @@ type DecisionTarget struct {
 	// Images are the pod template's container images, in order.
 	// +optional
 	Images []string `json:"images,omitempty"`
+}
+
+// DecisionSignature is an Ed25519 signature over SignedMessage(hash).
+type DecisionSignature struct {
+	// KeyID is the first 16 hex characters of the SHA-256 of the raw public
+	// key.
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{16}$`
+	KeyID string `json:"keyID"`
+	// Value is the signature, base64 (standard encoding).
+	// +kubebuilder:validation:MaxLength=128
+	Value string `json:"value"`
 }
 
 // DecisionRevision is a Deployment revision and its pod template hash.

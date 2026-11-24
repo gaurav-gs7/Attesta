@@ -2,7 +2,9 @@ package controller
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -12,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	attestav1 "github.com/gaurav-gs7/attesta/api/v1"
+	"github.com/gaurav-gs7/attesta/internal/archive"
 )
 
 func (h *harness) decisions() []attestav1.RolloutDecision {
@@ -307,5 +310,65 @@ func TestAnEditedCarriedDecisionIsNotRecorded(t *testing.T) {
 		if r.Spec.Sequence == 2 && r.Spec.Action == attestav1.ActionPromoted {
 			t.Fatal("an edited annotation was recorded as a decision")
 		}
+	}
+}
+
+type fakeArchive struct {
+	got  []attestav1.RolloutDecision
+	fail error
+}
+
+func (f *fakeArchive) Archive(_ context.Context, d attestav1.RolloutDecision) error {
+	if f.fail != nil {
+		return f.fail
+	}
+	f.got = append(f.got, d)
+	return nil
+}
+
+func TestDecisionsAreSignedAndArchivedInOrder(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	keys := attestav1.Keys{}
+	keys.Add(pub)
+	sink := &fakeArchive{fail: errors.New("connection refused")}
+	h := newHarness(t, map[string]any{"enabled": true}, nil)
+	h.r.SigningKey, h.r.Archive = priv, sink
+
+	h.mustReconcile() // promotion; the archive is down
+	if c := h.condition(ConditionArchived); c == nil || c["status"] != "False" || c["reason"] != "ArchiveUnavailable" {
+		t.Fatalf("Archived condition = %v", c)
+	}
+	if h.guard().Status.ArchivedSequence != 0 {
+		t.Fatal("a decision the archive did not take counts as archived")
+	}
+
+	sink.fail = nil
+	h.startBadRollout()
+	h.mustReconcile() // rollback, and the backlog goes out
+	records := h.verifyChain()
+	if err := attestav1.VerifySignatures(testGuardName, records, keys); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.got) != 2 || sink.got[0].Spec.Sequence != 1 || sink.got[1].Spec.Sequence != 2 || sink.got[1].Spec.Signature == nil {
+		t.Fatalf("archived %d records", len(sink.got))
+	}
+	if g := h.guard(); g.Status.ArchivedSequence != 2 {
+		t.Fatalf("archivedSequence = %d", g.Status.ArchivedSequence)
+	}
+	if c := h.condition(ConditionArchived); c == nil || c["status"] != "True" {
+		t.Fatalf("Archived condition = %v", c)
+	}
+
+	// The next decision meets an archive that holds something else at its
+	// position: reported as refused, which is what tampering looks like.
+	sink.fail = fmt.Errorf("%w: 409 a different record is archived at 3", archive.ErrRefused)
+	h.setDeployment(func(d *appsv1.Deployment) { delete(d.Annotations, rollbackGuardsAnnotation) })
+	h.startBadRolloutAgain()
+	h.mustReconcile()
+	if c := h.condition(ConditionArchived); c == nil || c["reason"] != "ArchiveRefused" {
+		t.Fatalf("Archived condition = %v", c)
+	}
+	if h.guard().Status.ArchivedSequence != 2 {
+		t.Fatal("a refused decision counts as archived")
 	}
 }

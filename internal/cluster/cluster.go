@@ -128,17 +128,30 @@ func GuardsForService(ctx context.Context, r Reader, service string) ([]attestav
 
 // Verification is the result of checking a guard's decision chain.
 type Verification struct {
-	Verified  bool   `json:"verified"`
+	Verified bool `json:"verified"`
+	// Signed reports whether signatures were checked too.
+	Signed    bool   `json:"signaturesChecked"`
 	Decisions int    `json:"decisions"`
 	Problem   string `json:"problem,omitempty"`
 	// BrokenAt is the first sequence that fails, when Verified is false.
 	BrokenAt int64 `json:"brokenAt,omitempty"`
 }
 
-// Verify checks a guard's records against its status.lastDecision.
-func Verify(g attestav1.RolloutGuard, records []attestav1.RolloutDecision) Verification {
-	v := Verification{Decisions: len(records), Verified: true}
-	if err := attestav1.VerifyChain(g.Name, string(g.UID), records, g.Status.LastDecision); err != nil {
+// Verify checks a guard's records against its status.lastDecision and,
+// when keys are given, their signatures.
+func Verify(g attestav1.RolloutGuard, records []attestav1.RolloutDecision, keys attestav1.Keys) Verification {
+	return VerifyRecords(g.Name, string(g.UID), records, g.Status.LastDecision, keys)
+}
+
+// VerifyRecords checks a chain: links and hashes, the head if known, and
+// signatures if keys are given.
+func VerifyRecords(guard, guardUID string, records []attestav1.RolloutDecision, head *attestav1.DecisionRef, keys attestav1.Keys) Verification {
+	v := Verification{Decisions: len(records), Verified: true, Signed: keys != nil}
+	err := attestav1.VerifyChain(guard, guardUID, records, head)
+	if err == nil && keys != nil {
+		err = attestav1.VerifySignatures(guard, records, keys)
+	}
+	if err != nil {
 		v.Verified, v.Problem = false, err.Error()
 		var chainErr *attestav1.ChainError
 		if errors.As(err, &chainErr) {

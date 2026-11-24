@@ -23,6 +23,15 @@ type Store interface {
 	CreateService(context.Context, models.Service) (models.Service, error)
 	ListServices(context.Context) ([]models.Service, error)
 	GetServiceByName(context.Context, string) (models.Service, error)
+	// ArchiveDecision appends a decision to its guard's archived chain. It
+	// returns duplicate=true for the record already held at that position,
+	// and ErrConflict when a different record is held there (a fork) or the
+	// record does not link to the one before it (a gap or a mismatch).
+	ArchiveDecision(context.Context, models.ArchivedDecision) (duplicate bool, err error)
+	// ArchivedDecisions returns a guard's archived chain, oldest first.
+	ArchivedDecisions(ctx context.Context, guardUID string) ([]models.ArchivedDecision, error)
+	// ArchivedGuards summarises every archived chain.
+	ArchivedGuards(context.Context) ([]models.ArchivedGuard, error)
 	workflows.Store
 	Pruner
 	// CreateIncident stores a new incident at version 1. A second active

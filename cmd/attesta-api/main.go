@@ -17,6 +17,7 @@ import (
 
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
 
+	attestav1 "github.com/gaurav-gs7/attesta/api/v1"
 	"github.com/gaurav-gs7/attesta/internal/catalog"
 	"github.com/gaurav-gs7/attesta/internal/cluster"
 	"github.com/gaurav-gs7/attesta/internal/config"
@@ -111,6 +112,20 @@ func main() {
 		opts = append(opts, httpapi.WithCluster(reader))
 	} else {
 		log.Printf("ATTESTA_CLUSTER_READ is not set; the API cannot show RolloutGuards or the controller's decisions")
+	}
+	if cfg.DecisionKeysFile != "" {
+		raw, err := os.ReadFile(cfg.DecisionKeysFile)
+		if err != nil {
+			log.Fatalf("ATTESTA_DECISION_PUBLIC_KEYS_FILE: %v", err)
+		}
+		keys, err := attestav1.ParsePublicKeys(raw)
+		if err != nil {
+			log.Fatalf("ATTESTA_DECISION_PUBLIC_KEYS_FILE: %v", err)
+		}
+		log.Printf("decision records must be signed by one of %v", keys.IDs())
+		opts = append(opts, httpapi.WithDecisionKeys(keys))
+	} else {
+		log.Printf("ATTESTA_DECISION_PUBLIC_KEYS_FILE is not set; decision signatures are not checked")
 	}
 	handler := httpapi.NewServer(store, generator, opts...)
 

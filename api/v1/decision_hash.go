@@ -10,9 +10,10 @@ import (
 )
 
 // CanonicalJSON is the byte string a decision's hash is computed over: the
-// spec without its hash field, as compact JSON with object keys sorted and
-// no HTML escaping. It is what `jq -cjS '.spec | del(.hash)'` prints for the
-// stored object, so a record can be checked without this code.
+// spec without its hash and signature, as compact JSON with object keys
+// sorted and no HTML escaping. It is what
+// `jq -cjS '.spec | del(.hash, .signature)'` prints for the stored object,
+// so a record can be checked without this code.
 func (s RolloutDecisionSpec) CanonicalJSON() ([]byte, error) {
 	raw, err := json.Marshal(s)
 	if err != nil {
@@ -27,6 +28,7 @@ func (s RolloutDecisionSpec) CanonicalJSON() ([]byte, error) {
 	}
 	if m, ok := generic.(map[string]any); ok {
 		delete(m, "hash")
+		delete(m, "signature")
 	}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -50,7 +52,7 @@ func (s RolloutDecisionSpec) ComputeHash() (string, error) {
 // Seal links the spec to the chain head prev (nil for the first decision)
 // and sets its hash.
 func (s *RolloutDecisionSpec) Seal(prev *DecisionRef) error {
-	s.Sequence, s.PreviousHash = 1, ""
+	s.Sequence, s.PreviousHash, s.Signature = 1, "", nil
 	if prev != nil {
 		s.Sequence, s.PreviousHash = prev.Sequence+1, prev.Hash
 	}

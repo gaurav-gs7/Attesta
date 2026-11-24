@@ -193,17 +193,22 @@ jobs:
       - uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
         with:
           cluster_name: attesta-e2e
-      - name: Build and load the controller image
+      - name: Build and load the controller and API images
         run: |
           docker build -f cmd/attesta-controller/Dockerfile --build-arg VERSION=e2e -t attesta-controller:e2e .
-          kind load docker-image attesta-controller:e2e --name attesta-e2e
+          docker build -f cmd/attesta-api/Dockerfile --build-arg VERSION=e2e -t attesta-api:e2e .
+          kind load docker-image attesta-controller:e2e attesta-api:e2e --name attesta-e2e
       - name: Run end-to-end test
-        run: bash scripts/e2e-rollback.sh
+        run: |
+          bash scripts/e2e-rollback.sh
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: The decision chains verify, guard heads included
-        run: kubectl get rolloutguards,rolloutdecisions -n attesta-e2e -o json | go run ./cmd/attesta verify
+        run: |
+          kubectl get rolloutguards,rolloutdecisions -n attesta-e2e -o json >/tmp/records.json
+          kubectl -n attesta-system get secret attesta-api -o jsonpath='{.data.public\.pem}' | base64 -d >/tmp/public.pem
+          go run ./cmd/attesta verify -f /tmp/records.json --public-key /tmp/public.pem
       - name: The scaffold's custom resources pass the CRD schemas
         # The CRDs are installed by the test above. A server-side dry run
         # checks enums, patterns and ranges, not only field names.
