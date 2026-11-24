@@ -76,12 +76,14 @@ image_is() { [[ "$(image)" == "$1" ]]; }
 phase_is() { [[ "$(guard phase)" == "$1" ]]; }
 
 leader() { kubectl -n attesta-system get lease attesta-controller -o 'jsonpath={.spec.holderIdentity}'; }
+# controller-runtime's leader identity is "<pod name>_<uuid>".
+leader_pod() { local id; id="$(leader)"; echo "${id%%_*}"; }
 
 pod_metric() {
   kubectl get --raw "/api/v1/namespaces/attesta-system/pods/$1:8080/proxy/metrics" | grep -F "$2" | awk '{print $2}'
 }
 
-leader_metric() { pod_metric "$(leader)" "$1"; }
+leader_metric() { pod_metric "$(leader_pod)" "$1"; }
 
 # all_replicas_metric <metric> sums a counter over every controller pod; a
 # replica that never acted does not export the series and counts as zero.
@@ -196,12 +198,12 @@ events="$(kubectl -n "$NS" get events --field-selector involvedObject.name=app-r
 ((events >= 1)) || fail "no RollbackTriggered event on the guard"
 
 old_leader="$(leader)"
-log "failover: deleting the leader pod $old_leader"
-kubectl -n attesta-system delete pod "$old_leader" --wait=false
+log "failover: deleting the leader pod $(leader_pod)"
+kubectl -n attesta-system delete pod "$(leader_pod)" --wait=false
 wait_until "the standby to take the leader lease" 60 holder_changed_from "$old_leader"
-log "ok: $(leader) now holds the lease"
+log "ok: $(leader_pod) now holds the lease"
 wait_until "the new leader to sync and report ready" 60 \
-  kubectl -n attesta-system wait --for=condition=Ready "pod/$(leader)" --timeout=5s
+  kubectl -n attesta-system wait --for=condition=Ready "pod/$(leader_pod)" --timeout=5s
 sleep 10
 [[ "$(annotation rollback-at)" == "$rolled_back_at" ]] || fail "the new leader repeated the inherited rollback"
 log "ok: the new leader left the already rolled-back Deployment alone"

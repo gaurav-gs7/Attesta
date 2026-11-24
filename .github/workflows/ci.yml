@@ -122,7 +122,7 @@ jobs:
           kustomize build deploy/controller > controller.yaml
           kustomize build test/e2e > e2e.yaml
           kubeconform -strict -summary -kubernetes-version 1.32.0 controller.yaml e2e.yaml
-          test "$(grep -c '^kind: CustomResourceDefinition' crds.yaml)" -eq 3
+          test "$(grep -c '^kind: CustomResourceDefinition' crds.yaml)" -eq 4
       - name: CRDs and deepcopy match the API types
         run: |
           go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.23.0
