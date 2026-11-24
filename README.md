@@ -255,6 +255,10 @@ test/e2e/                End-to-end manifests for kind
 docs/                    Operator and design documentation
 ```
 
+## Contributing and releases
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and what a change needs, [CHANGELOG.md](CHANGELOG.md) for releases and upgrade notes, and [SECURITY.md](SECURITY.md) to report a vulnerability.
+
 ## License
 
 Attesta is licensed under the Apache License 2.0. You may use, modify, distribute, and sublicense the project under the license terms, with attribution and preservation of copyright/license notices.

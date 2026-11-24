@@ -53,3 +53,49 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+  github-release:
+    # A tag also gets a GitHub release: the CHANGELOG section for the
+    # version as notes, and checksummed binaries. Nothing else may write
+    # to the repository.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: Build binaries
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os="${target%/*}" arch="${target#*/}"
+            for bin in attesta attesta-api attesta-controller; do
+              CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath \
+                -ldflags "-s -w -X main.version=${VERSION}" \
+                -o "dist/${bin}_${VERSION}_${os}_${arch}" "./cmd/${bin}"
+            done
+          done
+          (cd dist && sha256sum -- * > SHA256SUMS)
+      - name: Release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          # The section from "## [x.y.z]" up to the next "## [".
+          awk -v v="${VERSION#v}" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^(## )?\[/ { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then echo "CHANGELOG.md has no section for ${VERSION}"; exit 1; fi
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.ref_name }}
+        run: gh release create "$VERSION" --title "Attesta $VERSION" --notes-file notes.md --verify-tag dist/*
