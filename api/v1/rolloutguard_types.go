@@ -99,6 +99,35 @@ type SLOGate struct {
 	// +optional
 	// +kubebuilder:validation:Enum=Proceed;Pause
 	OnUnknown string `json:"onUnknown,omitempty"`
+	// MinErrorBudgetPct blocks a revision while less of the 30-day error
+	// budget remains (default 10).
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	MinErrorBudgetPct *float64 `json:"minErrorBudgetPct,omitempty"`
+	// FastBurnRate blocks a revision while the 1h and 5m burn rates are
+	// both at or above it (default 14.4: 2% of a 30-day budget an hour).
+	// +optional
+	// +kubebuilder:validation:ExclusiveMinimum=true
+	// +kubebuilder:validation:Minimum=0
+	FastBurnRate *float64 `json:"fastBurnRate,omitempty"`
+	// SlowBurnRate blocks a revision while the 6h and 30m burn rates are
+	// both at or above it (default 6: 5% of the budget in six hours).
+	// +optional
+	// +kubebuilder:validation:ExclusiveMinimum=true
+	// +kubebuilder:validation:Minimum=0
+	SlowBurnRate *float64 `json:"slowBurnRate,omitempty"`
+	// Resume is what ends a pause: Automatic (default) resumes the rollout
+	// once the gate allows it again, checked every RecheckInterval; Manual
+	// leaves it to a person (kubectl rollout resume).
+	// +optional
+	// +kubebuilder:validation:Enum=Automatic;Manual
+	Resume string `json:"resume,omitempty"`
+	// RecheckInterval is how often a paused revision is measured again
+	// (default 1m, at least 10s).
+	// +optional
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$`
+	RecheckInterval string `json:"recheckInterval,omitempty"`
 }
 
 type RolloutStep struct {
@@ -250,9 +279,13 @@ type SLOGateStatus struct {
 	// +optional
 	Reason      string `json:"reason,omitempty"`
 	EvaluatedAt string `json:"evaluatedAt"`
-	// Paused reports whether the controller paused the rollout.
+	// Paused reports whether the controller has the rollout paused now.
 	// +optional
 	Paused bool `json:"paused,omitempty"`
+	// Resumed reports whether the controller resumed the rollout after the
+	// gate allowed it again.
+	// +optional
+	Resumed bool `json:"resumed,omitempty"`
 }
 
 // AnalysisStatus is the state of metric analysis for one candidate revision.

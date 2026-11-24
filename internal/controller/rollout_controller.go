@@ -328,13 +328,12 @@ func (r *RolloutGuardReconciler) reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	decision, err := r.applySLOGate(ctx, &guard, spec, &deployment, promote || blocked, &status)
+	decision, gateRequeue, err := r.applySLOGate(ctx, &guard, spec, &deployment, promote || blocked, &status)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if deployment.Spec.Paused && deployment.Annotations[pausedByAnnotation] == guard.Name && status.SLOGate != nil && status.SLOGate.Paused {
-		status.Reason = reasonSLOGatePaused
-		status.Message = pausedMessage(deployment.Name, status.SLOGate.Revision, status.SLOGate.Reason)
+	if gateRequeue > 0 && (requeueAfter == 0 || gateRequeue < requeueAfter) {
+		requeueAfter = gateRequeue
 	}
 
 	var actionErr error

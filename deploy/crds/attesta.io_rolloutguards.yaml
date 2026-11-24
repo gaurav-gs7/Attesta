@@ -158,12 +158,26 @@ spec:
                     maximum: 100
                     minimum: 0
                     type: number
+                  fastBurnRate:
+                    description: |-
+                      FastBurnRate blocks a revision while the 1h and 5m burn rates are
+                      both at or above it (default 14.4: 2% of a 30-day budget an hour).
+                    exclusiveMinimum: true
+                    minimum: 0
+                    type: number
                   latencyP95TargetMs:
                     description: LatencyP95TargetMs is the p95 latency objective (default
                       300).
                     format: int32
                     minimum: 1
                     type: integer
+                  minErrorBudgetPct:
+                    description: |-
+                      MinErrorBudgetPct blocks a revision while less of the 30-day error
+                      budget remains (default 10).
+                    maximum: 100
+                    minimum: 0
+                    type: number
                   onUnknown:
                     description: |-
                       OnUnknown is what happens when the SLOs cannot be measured (too
@@ -173,6 +187,28 @@ spec:
                     - Proceed
                     - Pause
                     type: string
+                  recheckInterval:
+                    description: |-
+                      RecheckInterval is how often a paused revision is measured again
+                      (default 1m, at least 10s).
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                    type: string
+                  resume:
+                    description: |-
+                      Resume is what ends a pause: Automatic (default) resumes the rollout
+                      once the gate allows it again, checked every RecheckInterval; Manual
+                      leaves it to a person (kubectl rollout resume).
+                    enum:
+                    - Automatic
+                    - Manual
+                    type: string
+                  slowBurnRate:
+                    description: |-
+                      SlowBurnRate blocks a revision while the 6h and 30m burn rates are
+                      both at or above it (default 6: 5% of the budget in six hours).
+                    exclusiveMinimum: true
+                    minimum: 0
+                    type: number
                 required:
                 - availabilityTarget
                 type: object
@@ -432,11 +468,16 @@ spec:
                     description: Gate is allowed, blocked or unknown.
                     type: string
                   paused:
-                    description: Paused reports whether the controller paused the
-                      rollout.
+                    description: Paused reports whether the controller has the rollout
+                      paused now.
                     type: boolean
                   reason:
                     type: string
+                  resumed:
+                    description: |-
+                      Resumed reports whether the controller resumed the rollout after the
+                      gate allowed it again.
+                    type: boolean
                   revision:
                     type: string
                   templateHash:

@@ -82,8 +82,40 @@ func Unknown(service models.Service, source, reason string) models.SLOStatus {
 	return status
 }
 
-// Evaluate applies the gate to measured signals.
+// Thresholds are the gate's limits. The defaults are the SRE workbook's;
+// a RolloutGuard's spec.sloGate, or the API's ATTESTA_SLO_* settings,
+// override them.
+type Thresholds struct {
+	// MinBudgetRemainingPct blocks when less of the budget remains.
+	MinBudgetRemainingPct float64
+	// FastBurnRate blocks when the 1h and 5m burn rates both reach it.
+	FastBurnRate float64
+	// SlowBurnRate blocks when the 6h and 30m burn rates both reach it.
+	SlowBurnRate float64
+}
+
+// DefaultThresholds are used where nothing overrides them.
+var DefaultThresholds = Thresholds{MinBudgetRemainingPct: MinBudgetRemainingPct, FastBurnRate: FastBurnRate, SlowBurnRate: SlowBurnRate}
+
+// Validate rejects thresholds that cannot mean anything.
+func (t Thresholds) Validate() error {
+	if t.MinBudgetRemainingPct < 0 || t.MinBudgetRemainingPct > 100 {
+		return fmt.Errorf("minimum error budget %g%% is not between 0 and 100", t.MinBudgetRemainingPct)
+	}
+	if t.FastBurnRate <= 0 || t.SlowBurnRate <= 0 {
+		return fmt.Errorf("burn-rate thresholds must be positive, got %g and %g", t.FastBurnRate, t.SlowBurnRate)
+	}
+	return nil
+}
+
+// Evaluate applies the gate, with the default thresholds, to measured
+// signals.
 func Evaluate(service models.Service, signals Signals) models.SLOStatus {
+	return EvaluateWith(service, signals, DefaultThresholds)
+}
+
+// EvaluateWith applies the gate with the given thresholds.
+func EvaluateWith(service models.Service, signals Signals, t Thresholds) models.SLOStatus {
 	status := base(service, models.SLOSourcePrometheus)
 	status.SignalWindow = SignalWindow
 	status.BurnRateWindow = BurnRateWindow
@@ -115,23 +147,23 @@ func Evaluate(service models.Service, signals Signals) models.SLOStatus {
 	}
 
 	switch {
-	case *signals.ErrorBudgetRemainingPct < MinBudgetRemainingPct:
+	case *signals.ErrorBudgetRemainingPct < t.MinBudgetRemainingPct:
 		status.DeploymentGate = models.GateBlocked
-		status.Reason = fmt.Sprintf("error budget remaining %.1f%% over %s is below %.0f%%", *signals.ErrorBudgetRemainingPct, BudgetWindow, MinBudgetRemainingPct)
+		status.Reason = fmt.Sprintf("error budget remaining %.1f%% over %s is below %g%%", *signals.ErrorBudgetRemainingPct, BudgetWindow, t.MinBudgetRemainingPct)
 	case *signals.LatencyP95Ms > float64(status.LatencyP95TargetMs):
 		status.DeploymentGate = models.GateBlocked
 		status.Reason = fmt.Sprintf("p95 latency %.0fms over %s exceeds the %dms target", *signals.LatencyP95Ms, SignalWindow, status.LatencyP95TargetMs)
 	case *signals.ErrorRatePct > status.ErrorRateThresholdPct:
 		status.DeploymentGate = models.GateBlocked
 		status.Reason = fmt.Sprintf("error rate %.2f%% over %s exceeds the %.2f%% threshold", *signals.ErrorRatePct, SignalWindow, status.ErrorRateThresholdPct)
-	case burning(signals, "1h", "5m", FastBurnRate):
+	case burning(signals, "1h", "5m", t.FastBurnRate):
 		status.DeploymentGate = models.GateBlocked
 		status.Reason = fmt.Sprintf("fast burn: burn rate %.1fx over 1h and %.1fx over 5m are both at or above %.1fx",
-			*signals.BurnRates["1h"], *signals.BurnRates["5m"], FastBurnRate)
-	case burning(signals, "6h", "30m", SlowBurnRate):
+			*signals.BurnRates["1h"], *signals.BurnRates["5m"], t.FastBurnRate)
+	case burning(signals, "6h", "30m", t.SlowBurnRate):
 		status.DeploymentGate = models.GateBlocked
 		status.Reason = fmt.Sprintf("slow burn: burn rate %.1fx over 6h and %.1fx over 30m are both at or above %.1fx",
-			*signals.BurnRates["6h"], *signals.BurnRates["30m"], SlowBurnRate)
+			*signals.BurnRates["6h"], *signals.BurnRates["30m"], t.SlowBurnRate)
 	default:
 		status.DeploymentGate = models.GateAllowed
 		status.Reason = fmt.Sprintf("measured SLOs are within targets and %.1f%% of the %s error budget remains", *signals.ErrorBudgetRemainingPct, BudgetWindow)

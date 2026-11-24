@@ -99,6 +99,15 @@ func TestEnvtest(t *testing.T) {
 			"unknown onUnknown": func(g *attestav1.RolloutGuard) {
 				g.Spec.SLOGate = &attestav1.SLOGate{AvailabilityTarget: 99.9, OnUnknown: "Maybe"}
 			},
+			"budget floor above 100%": func(g *attestav1.RolloutGuard) {
+				g.Spec.SLOGate = &attestav1.SLOGate{AvailabilityTarget: 99.9, MinErrorBudgetPct: kptr.To(150.0)}
+			},
+			"zero burn rate": func(g *attestav1.RolloutGuard) {
+				g.Spec.SLOGate = &attestav1.SLOGate{AvailabilityTarget: 99.9, FastBurnRate: kptr.To(0.0)}
+			},
+			"unknown resume": func(g *attestav1.RolloutGuard) {
+				g.Spec.SLOGate = &attestav1.SLOGate{AvailabilityTarget: 99.9, Resume: "Sometimes"}
+			},
 		} {
 			g := &attestav1.RolloutGuard{ObjectMeta: metav1.ObjectMeta{Name: "bad", Namespace: testNamespace}}
 			mutate(g)

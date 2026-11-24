@@ -73,6 +73,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("rate limits: %v", err)
 	}
+	sloThresholds, err := config.SLOThresholds()
+	if err != nil {
+		log.Fatalf("SLO thresholds: %v", err)
+	}
 	requestTimeout, err := config.RequestTimeout()
 	if err != nil {
 		log.Fatalf("request timeout: %v", err)
@@ -91,6 +95,7 @@ func main() {
 		httpapi.WithPrometheus(promCfg),
 		httpapi.WithRateLimits(limits),
 		httpapi.WithRequestTimeout(requestTimeout),
+		httpapi.WithSLOThresholds(sloThresholds),
 	}
 	if authenticator != nil {
 		opts = append(opts, httpapi.WithAuthenticator(authenticator))

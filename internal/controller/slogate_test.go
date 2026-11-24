@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 
@@ -104,6 +105,15 @@ func TestSLOGatePausesARevisionWhileTheBudgetIsSpent(t *testing.T) {
 	if h.deployment().Spec.Paused || h.deploymentUpdates() != updates || len(source.asked) != 1 {
 		t.Fatal("the gate paused revision 2 again after it was resumed")
 	}
+
+	// A later pause is the person's: the gate never resumes it.
+	h.setDeployment(func(d *appsv1.Deployment) { d.Spec.Paused = true })
+	h.r.Now = func() time.Time { return time.Now().Add(time.Hour) }
+	source.signals = measured(80)
+	h.mustReconcile()
+	if !h.deployment().Spec.Paused {
+		t.Fatal("the gate resumed a pause it did not make")
+	}
 }
 
 func TestSLOGateLetsARevisionThroughWithinBudget(t *testing.T) {
@@ -198,5 +208,102 @@ func TestAnalysisUsesTheConfiguredMetricNames(t *testing.T) {
 		if got != want {
 			t.Errorf("query\n got %s\nwant %s", got, want)
 		}
+	}
+}
+
+func TestSLOGateThresholdsArePerGuard(t *testing.T) {
+	// 4% of the budget left: blocked by the default 10% floor, allowed
+	// by a guard that sets 2%.
+	source := &fakeSLO{signals: measured(4)}
+	h := gateHarness(t, source, map[string]any{"availabilityTarget": 99.9, "minErrorBudgetPct": 2.0})
+	h.mustReconcile()
+	if h.deployment().Spec.Paused {
+		t.Fatal("paused at 4% remaining with a 2% floor")
+	}
+
+	// A slow burn of 3x over 6h and 30m: allowed by the default 6x, blocked
+	// by a guard that sets 2x.
+	burning := measured(80)
+	burning.BurnRates["6h"], burning.BurnRates["30m"] = f64(3), f64(3)
+	h = gateHarness(t, &fakeSLO{signals: burning}, map[string]any{"availabilityTarget": 99.9, "slowBurnRate": 2.0})
+	h.mustReconcile()
+	if !h.deployment().Spec.Paused || !strings.Contains(h.deployment().Annotations[pausedReasonAnnotation], "at or above 2.0x") {
+		t.Fatalf("not paused on a 3x slow burn with a 2x threshold: %v", h.deployment().Annotations)
+	}
+	ev := evidenceNamed(lastDecision(h), "burn-rate-6h")
+	if ev == nil || !strings.HasPrefix(ev.Threshold, "< 2x") || ev.Passed == nil || *ev.Passed {
+		t.Fatalf("burn-rate evidence does not carry the guard's threshold: %+v", ev)
+	}
+}
+
+func TestSLOGateResumesWhenTheSLOsRecover(t *testing.T) {
+	source := &fakeSLO{signals: measured(4)}
+	h := gateHarness(t, source, map[string]any{"availabilityTarget": 99.9, "recheckInterval": "30s"})
+	clk := &clock{t: time.Now().UTC()}
+	h.r.Now = clk.now
+	h.mustReconcile()
+	if !h.deployment().Spec.Paused {
+		t.Fatal("not paused")
+	}
+
+	// Before the interval: not measured again.
+	clk.advance(10 * time.Second)
+	h.mustReconcile()
+	if len(source.asked) != 1 {
+		t.Fatalf("measured %d times before the recheck interval", len(source.asked))
+	}
+
+	// After it, still out of budget: stays paused, nothing new recorded.
+	records := len(h.decisions())
+	clk.advance(30 * time.Second)
+	h.mustReconcile()
+	if !h.deployment().Spec.Paused || len(source.asked) != 2 || len(h.decisions()) != records {
+		t.Fatalf("paused=%v measured=%d records=%d", h.deployment().Spec.Paused, len(source.asked), len(h.decisions()))
+	}
+	if c := h.condition(ConditionSLOGate); c == nil || c["reason"] != "StillBlocked" {
+		t.Fatalf("SLOGate condition = %v", c)
+	}
+
+	// The budget recovers: resumed, and on record.
+	source.signals = measured(60)
+	clk.advance(31 * time.Second)
+	h.mustReconcile()
+	d := h.deployment()
+	if d.Spec.Paused || d.Annotations[resumedAtAnnotation] == "" {
+		t.Fatal("not resumed after the SLOs recovered")
+	}
+	resumed := lastDecision(h)
+	if resumed.Action != attestav1.ActionResumed || resumed.Trigger != "SLOGateAllowed" || resumed.Deployment.TemplateHash != "h2" {
+		t.Fatalf("decision %s/%s on %s", resumed.Action, resumed.Trigger, resumed.Deployment.TemplateHash)
+	}
+	if ev := evidenceNamed(resumed, "error-budget-remaining"); ev == nil || ev.Value != "60%" || !*ev.Passed {
+		t.Fatalf("resume evidence %+v", ev)
+	}
+	if g := h.guard().Status.SLOGate; g == nil || g.Paused || !g.Resumed {
+		t.Fatalf("status.sloGate = %+v", g)
+	}
+
+	// And it stays resumed.
+	clk.advance(time.Minute)
+	h.mustReconcile()
+	if h.deployment().Spec.Paused {
+		t.Fatal("paused the resumed revision again")
+	}
+}
+
+func TestSLOGateLeavesResumingToAPersonWhenAskedTo(t *testing.T) {
+	source := &fakeSLO{signals: measured(4)}
+	h := gateHarness(t, source, map[string]any{"availabilityTarget": 99.9, "resume": "Manual"})
+	clk := &clock{t: time.Now().UTC()}
+	h.r.Now = clk.now
+	h.mustReconcile()
+	source.signals = measured(60)
+	clk.advance(10 * time.Minute)
+	h.mustReconcile()
+	if !h.deployment().Spec.Paused || len(source.asked) != 1 {
+		t.Fatal("resumed a manual-resume gate")
+	}
+	if !strings.Contains(h.field("message"), "kubectl rollout resume") {
+		t.Fatalf("message does not say how to resume: %s", h.field("message"))
 	}
 }

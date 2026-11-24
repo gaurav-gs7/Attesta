@@ -9,6 +9,7 @@ import (
 
 	"github.com/gaurav-gs7/attesta/internal/catalog"
 	"github.com/gaurav-gs7/attesta/internal/httpapi"
+	"github.com/gaurav-gs7/attesta/internal/slo"
 )
 
 // RateLimits reads ATTESTA_RATE_LIMIT_{IP,PRINCIPAL}_{RPS,BURST} over
@@ -103,4 +104,31 @@ func retentionEnv(key string, fallback time.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("%s=%q: want a duration of at least 1h, a number of days such as 30d, or 0 to keep forever", key, raw)
 	}
 	return d, nil
+}
+
+// SLOThresholds reads ATTESTA_SLO_MIN_ERROR_BUDGET_PCT,
+// ATTESTA_SLO_FAST_BURN_RATE and ATTESTA_SLO_SLOW_BURN_RATE over the
+// defaults (10, 14.4, 6). They set the gate the API reports; a guard's
+// spec.sloGate sets its own.
+func SLOThresholds() (slo.Thresholds, error) {
+	t := slo.DefaultThresholds
+	for key, v := range map[string]*float64{
+		"ATTESTA_SLO_MIN_ERROR_BUDGET_PCT": &t.MinBudgetRemainingPct,
+		"ATTESTA_SLO_FAST_BURN_RATE":       &t.FastBurnRate,
+		"ATTESTA_SLO_SLOW_BURN_RATE":       &t.SlowBurnRate,
+	} {
+		raw := os.Getenv(key)
+		if raw == "" {
+			continue
+		}
+		f, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return t, fmt.Errorf("%s=%q: want a number", key, raw)
+		}
+		*v = f
+	}
+	if err := t.Validate(); err != nil {
+		return t, fmt.Errorf("ATTESTA_SLO_*: %w", err)
+	}
+	return t, nil
 }

@@ -46,6 +46,7 @@ type Server struct {
 	workflows     *workflows.Engine
 	cluster       cluster.Reader
 	decisionKeys  attestav1.Keys
+	sloThresholds *sloengine.Thresholds
 	workflowOpts  []workflows.Option
 	logger        *slog.Logger
 
@@ -111,6 +112,13 @@ func WithPrometheus(cfg promclient.Config) Option {
 	return func(s *Server) {
 		cfg.URL = strings.TrimRight(strings.TrimSpace(cfg.URL), "/")
 		s.promConfig = cfg
+	}
+}
+
+// WithSLOThresholds replaces the gate's default thresholds.
+func WithSLOThresholds(t sloengine.Thresholds) Option {
+	return func(s *Server) {
+		s.sloThresholds = &t
 	}
 }
 
@@ -427,6 +435,9 @@ func (s *Server) evaluateSLO(ctx context.Context, service models.Service) models
 		s.logger.ErrorContext(ctx, "Prometheus query failed", "service", service.Name, "error", err)
 		return sloengine.Unknown(service, models.SLOSourcePrometheus,
 			"Prometheus query failed; SLO state unknown, deployment gate fails closed")
+	}
+	if s.sloThresholds != nil {
+		return sloengine.EvaluateWith(service, signals, *s.sloThresholds)
 	}
 	return sloengine.Evaluate(service, signals)
 }

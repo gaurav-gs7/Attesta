@@ -56,6 +56,9 @@ const (
 	// ActionPauseSkipped: the SLO gate would have paused the rollout and did
 	// not, because the Deployment does not name the guard.
 	ActionPauseSkipped = "PauseSkipped"
+	// ActionResumed: the SLO gate resumed a rollout it had paused, because
+	// the service is within its SLOs again.
+	ActionResumed = "Resumed"
 )
 
 // RolloutDecisionSpec is the decision. Every field is covered by Hash.
@@ -97,7 +100,7 @@ type RolloutDecisionSpec struct {
 	// ErrorBudgetExhausted.
 	// +kubebuilder:validation:MinLength=1
 	Trigger string `json:"trigger"`
-	// +kubebuilder:validation:Enum=Promoted;RolledBack;RollbackFailed;RollbackSkipped;Paused;PauseSkipped
+	// +kubebuilder:validation:Enum=Promoted;RolledBack;RollbackFailed;RollbackSkipped;Paused;PauseSkipped;Resumed
 	Action string `json:"action"`
 	// Reason is the machine-readable outcome, as on the guard's status.
 	// +kubebuilder:validation:MinLength=1
