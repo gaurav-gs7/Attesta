@@ -188,9 +188,10 @@ started | paused | completed --rollback--> rollback-requested
 make test   # go test -race ./...
 make lint   # golangci-lint and shellcheck
 make e2e    # controller end-to-end test on a local kind cluster
+make generate  # deepcopy and CRDs from api/v1 (controller-gen v0.23.0)
 ```
 
-CI runs on every push: formatting, `go mod tidy` drift, vet, race-enabled tests, golangci-lint, ShellCheck, govulncheck, manifest validation with kubeconform, actionlint, both container images (checked to run as non-root), and `scripts/e2e-rollback.sh` on kind. The end-to-end test deploys the controller and runs two scenarios. First, an image that cannot be pulled is rolled back once on its progress deadline. Second, against an in-cluster Prometheus stub, an image that Kubernetes considers healthy but whose metrics fail is rolled back by metric analysis alone. It also checks that a paused Deployment is left alone, that only the leader acted, and that after the leader pod is deleted the standby takes over without repeating the rollback.
+CI runs on every push: formatting, `go mod tidy` drift, vet, race-enabled tests against PostgreSQL with a statement-coverage floor (68%; raise it, never lower it), golangci-lint, ShellCheck, govulncheck, generated-code drift, manifest validation with kubeconform (the controller's and the generated scaffold's overlays), actionlint, both container images (checked to run as non-root and scanned with Trivy, failing on fixable HIGH or CRITICAL findings), and `scripts/e2e-rollback.sh` on kind, followed by a server-side dry run of the scaffold's custom resources against the generated CRDs. Every action is pinned to a commit SHA. Dependabot opens weekly, grouped updates for Go modules, the pinned actions, the base images and the generated Python service's hashed requirements. The end-to-end test deploys the controller and runs two scenarios. First, an image that cannot be pulled is rolled back once on its progress deadline. Second, against an in-cluster Prometheus stub, an image that Kubernetes considers healthy but whose metrics fail is rolled back by metric analysis alone. It also checks that a paused Deployment is left alone, that only the leader acted, and that after the leader pod is deleted the standby takes over without repeating the rollback.
 
 ## PostgreSQL Mode
 

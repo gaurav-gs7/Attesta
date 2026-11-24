@@ -1,0 +1,35 @@
+# Weekly update PRs for every dependency the repository pins: Go modules,
+# the SHA-pinned GitHub Actions (Dependabot updates the SHA and the version
+# comment together), the images the Dockerfiles build on, and the generated
+# Python service's hashed requirements. Related modules are grouped so a
+# Kubernetes or x/ bump is one PR.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      kubernetes:
+        patterns: ["k8s.io/*", "sigs.k8s.io/*"]
+      golang-x:
+        patterns: ["golang.org/x/*"]
+      prometheus:
+        patterns: ["github.com/prometheus/*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: docker
+    directories:
+      - /cmd/attesta-api
+      - /cmd/attesta-controller
+    schedule:
+      interval: weekly
+  - package-ecosystem: pip
+    directory: /templates/service-python
+    schedule:
+      interval: weekly

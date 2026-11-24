@@ -57,8 +57,14 @@ jobs:
         run: go vet ./...
       - name: Test with race detector
         run: go test -race -count=1 -coverprofile=coverage.out -covermode=atomic ./...
-      - name: Coverage summary
-        run: go tool cover -func=coverage.out | tail -1
+      - name: Coverage at least COVERAGE_MIN
+        env:
+          # Raise it as coverage grows; never lower it to make a change pass.
+          COVERAGE_MIN: "68"
+        run: |
+          total="$(go tool cover -func=coverage.out | awk '/^total:/ { sub(/%/, "", $3); print $3 }')"
+          echo "statement coverage: ${total}% (minimum ${COVERAGE_MIN}%)"
+          awk -v t="$total" -v m="$COVERAGE_MIN" 'BEGIN { exit !(t >= m) }'
       - name: Build binaries
         run: make build
 
@@ -158,6 +164,16 @@ jobs:
       - name: Controller reports its version
         if: matrix.name == 'attesta-controller'
         run: test "$(docker run --rm attesta-controller:ci --version)" = "${{ github.sha }}"
+      - name: Scan the image
+        # Pinned to a commit, as is the scanner it downloads: both tags were
+        # hijacked in March 2026. Fails on fixable HIGH and CRITICAL findings.
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          image-ref: ${{ matrix.name }}:ci
+          version: v0.69.3
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
 
   e2e:
     name: End-to-end rollback on kind
