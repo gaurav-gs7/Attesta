@@ -1,0 +1,126 @@
+{
+ "commit": "adac487",
+ "kubernetes": "v1.37.0",
+ "steps": {
+  "install": {
+   "id": "install",
+   "command": "kubectl get pods -n attesta-system",
+   "output": "NAME                                  READY   STATUS    RESTARTS   AGE\nattesta-api-56d667cbfd-j9s4v          1/1     Running   0          3s\nattesta-controller-57dd46df67-cvngt   1/1     Running   0          3s\nattesta-controller-57dd46df67-q5khp   1/1     Running   0          3s",
+   "rc": 0
+  },
+  "canary-apply": {
+   "id": "canary-apply",
+   "command": "kubectl apply -f checkout.yaml",
+   "output": "deployment.apps/checkout created\nservice/checkout created\nrolloutguard.attesta.io/checkout-rollout created",
+   "rc": 0
+  },
+  "canary-rest": {
+   "id": "canary-rest",
+   "command": "kubectl get deploy -n payments checkout checkout-primary",
+   "output": "NAME               READY   UP-TO-DATE   AVAILABLE   AGE\ncheckout           0/0     0            0           5s\ncheckout-primary   2/2     2            2           5s",
+   "rc": 0
+  },
+  "canary-new": {
+   "id": "canary-new",
+   "command": "kubectl set env -n payments deployment/checkout VERSION=v1.8.0",
+   "output": "deployment.apps/checkout env updated",
+   "rc": 0
+  },
+  "canary-status": {
+   "id": "canary-status",
+   "command": "kubectl get rolloutguard -n payments checkout-rollout -o custom-columns=PHASE:.status.canary.phase,WEIGHT:.status.canary.weight,REVISION:.status.canary.canaryRevision",
+   "output": "PHASE         WEIGHT   REVISION\nProgressing   33       2",
+   "rc": 0
+  },
+  "canary-share": {
+   "id": "canary-share",
+   "command": "kubectl exec -n payments deploy/loadgen -- python /share/share.py",
+   "output": "canary pods served 91 of 300 requests (30%)",
+   "rc": 0
+  },
+  "canary-promoted": {
+   "id": "canary-promoted",
+   "command": "kubectl get rolloutdecisions -n payments -l attesta.io/guard=checkout-rollout --sort-by=.spec.sequence -o custom-columns=SEQ:.spec.sequence,ACTION:.spec.action,TRIGGER:.spec.trigger,REVISION:.spec.deployment.revision",
+   "output": "SEQ   ACTION          TRIGGER             REVISION\n1     Promoted        CanaryInitialized   1\n2     CanaryStarted   NewRevision         2\n3     Promoted        CanaryPassed        2",
+   "rc": 0
+  },
+  "gw-rest": {
+   "id": "gw-rest",
+   "command": "kubectl get httproute -n payments payments-api -o jsonpath='{.spec.rules[0].backendRefs[*].weight}'",
+   "output": "100 0",
+   "rc": 0
+  },
+  "gw-new": {
+   "id": "gw-new",
+   "command": "kubectl set env -n payments deployment/payments-api VERSION=v2.4.1",
+   "output": "deployment.apps/payments-api env updated",
+   "rc": 0
+  },
+  "gw-ten": {
+   "id": "gw-ten",
+   "command": "kubectl get httproute -n payments payments-api -o jsonpath='{.spec.rules[0].backendRefs[*].weight}'",
+   "output": "90 10",
+   "rc": 0
+  },
+  "gw-after": {
+   "id": "gw-after",
+   "command": "kubectl get httproute -n payments payments-api -o jsonpath='{.spec.rules[0].backendRefs[*].weight}'",
+   "output": "100 0",
+   "rc": 0
+  },
+  "gw-record": {
+   "id": "gw-record",
+   "command": "kubectl get rolloutdecisions -n payments -l attesta.io/guard=payments-api-rollout -o json | jq -r '.items[] | select(.spec.action==\"CanaryAborted\") | .spec | \"\\(.action) \\(.trigger)\", (.evidence[] | select(.name==\"error-rate\") | \"\\(.name) \\(.value) (threshold \\(.threshold))\")'",
+   "output": "CanaryAborted AnalysisFailed\nerror-rate 20% (threshold <= 1%)",
+   "rc": 0
+  },
+  "gate-new": {
+   "id": "gate-new",
+   "command": "kubectl set env -n payments deployment/ledger VERSION=v3.1.0",
+   "output": "deployment.apps/ledger env updated",
+   "rc": 0
+  },
+  "gate-paused": {
+   "id": "gate-paused",
+   "command": "kubectl get deploy -n payments ledger -o jsonpath='{.spec.paused}{\"  \"}{.metadata.annotations.attesta\\.io/paused-reason}'",
+   "output": "true  error budget remaining -400.0% over 30d is below 10%",
+   "rc": 0
+  },
+  "gate-record": {
+   "id": "gate-record",
+   "command": "kubectl get rolloutdecisions -n payments -l attesta.io/guard=ledger-rollout --sort-by=.spec.sequence -o custom-columns=SEQ:.spec.sequence,ACTION:.spec.action,TRIGGER:.spec.trigger",
+   "output": "SEQ   ACTION     TRIGGER\n1     Promoted   RolloutComplete\n2     Paused     SLOGateBlocked\n3     Resumed    SLOGateAllowed",
+   "rc": 0
+  },
+  "records-verify": {
+   "id": "records-verify",
+   "command": "kubectl get rolloutguards,rolloutdecisions -n payments -o json > records.json && attesta verify -f records.json --public-key public.pem | grep -E '^(OK|BROKEN)'",
+   "output": "OK      payments/checkout-rollout: 3 decisions\nOK      payments/ledger-rollout: 3 decisions\nOK      payments/payments-api-rollout: 3 decisions",
+   "rc": 0
+  },
+  "delete-refused": {
+   "id": "delete-refused",
+   "command": "kubectl delete rolloutdecision -n payments payments-api-rollout-2fe37ad7-000003",
+   "output": "Error from server (Forbidden): rolloutdecisions.attesta.io \"payments-api-rollout-2fe37ad7-000003\" is forbidden: ValidatingAdmissionPolicy 'attesta-decision-records' with binding 'attesta-decision-records' denied request: RolloutDecisions are records and are not deleted; only attesta:decision-admins may, and the archive keeps a copy",
+   "rc": 1
+  },
+  "edit-refused": {
+   "id": "edit-refused",
+   "command": "kubectl patch rolloutdecision -n payments payments-api-rollout-2fe37ad7-000003 --type=merge -p '{\"spec\":{\"trigger\":\"Manual\"}}'",
+   "output": "The RolloutDecision \"payments-api-rollout-2fe37ad7-000003\" is invalid: spec: Invalid value: decision records are immutable",
+   "rc": 1
+  },
+  "tamper-export": {
+   "id": "tamper-export",
+   "command": "jq '(.items[] | select(.spec.action? == \"CanaryAborted\") | .spec.evidence[] | select(.name == \"error-rate\") | .value) = \"0.4%\"' records.json > edited.json && attesta verify -f edited.json --public-key public.pem | grep -E '^(OK|BROKEN)'",
+   "output": "attesta: decision chain verification failed: 1 of 3 chains\nOK      payments/checkout-rollout: 3 decisions\nOK      payments/ledger-rollout: 3 decisions\nBROKEN  payments/payments-api-rollout: decision chain of payments-api-rollout breaks at sequence 3: record payments-api-rollout-2fe37ad7-000003 was altered: its contents hash to e0696d61b251, it claims bd89652e6c0d",
+   "rc": 0
+  },
+  "api-verify": {
+   "id": "api-verify",
+   "command": "curl -s -H \"Authorization: Bearer $(cat token)\" localhost:18080/api/v1/guards/payments/payments-api-rollout | jq -c '{chain, archive}'",
+   "output": "{\"chain\":{\"verified\":true,\"signaturesChecked\":true,\"decisions\":3},\"archive\":{\"archived\":3,\"matches\":true}}",
+   "rc": 0
+  }
+ }
+}

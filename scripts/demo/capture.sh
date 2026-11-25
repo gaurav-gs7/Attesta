@@ -2,7 +2,7 @@
 # Captures the real terminal output shown in the README demo
 # (docs/assets/attesta-demo.gif). Runs on a disposable kind cluster with the
 # controller and API images loaded (see .github/workflows/demo.yml), and
-# writes every command and its output to $CAPTURE (default capture.json).
+# writes every command and its output to $CAPTURE (default scripts/demo/capture.json).
 # scripts/demo/render.py draws the video from that file; nothing on screen
 # is typed by hand.
 set -Eeuo pipefail
@@ -10,7 +10,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 NS=payments
-CAPTURE="${CAPTURE:-$ROOT_DIR/capture.json}"
+CAPTURE="${CAPTURE:-$ROOT_DIR/scripts/demo/capture.json}"
 AGNHOST="${AGNHOST_IMAGE:-registry.k8s.io/e2e-test-images/agnhost:2.52}"
 STEPS="$(mktemp)"
 WORK="$(mktemp -d)"
