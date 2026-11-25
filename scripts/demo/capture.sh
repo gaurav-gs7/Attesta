@@ -22,11 +22,10 @@ trap 'log "error near line $LINENO"; kubectl -n attesta-system logs -l app.kuber
 # step <id> <command>: runs the command as shown and records it with its
 # output and exit code.
 step() {
-  local id="$1" cmd="$2" out rc
-  set +e
-  out="$(cd "$WORK" && PATH="$ROOT_DIR/bin:$PATH" bash -c "$cmd" 2>&1)"
-  rc=$?
-  set -e
+  local id="$1" cmd="$2" out rc=0
+  # Some steps are meant to fail (a refused delete); || keeps them from
+  # tripping errexit and the ERR trap.
+  out="$(cd "$WORK" && PATH="$ROOT_DIR/bin:$PATH" bash -c "$cmd" 2>&1)" || rc=$?
   python3 - "$STEPS" "$id" "$cmd" "$out" "$rc" <<'PY'
 import json, sys
 path, sid, cmd, out, rc = sys.argv[1:]
@@ -308,3 +307,7 @@ for line in open(steps_path):
 json.dump({"commit": commit, "kubernetes": k8s, "steps": steps}, open(out_path, "w"), indent=1)
 print(f"wrote {len(steps)} steps to {out_path}")
 PY
+# The log keeps a copy in case the artifact cannot be downloaded.
+echo "capture.json (base64):"
+base64 -w0 "$CAPTURE"
+echo
