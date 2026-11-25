@@ -15,3 +15,4 @@ artifacts/*
 /attesta
 /attesta-api
 /attesta-controller
+__pycache__/
