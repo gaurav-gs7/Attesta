@@ -43,10 +43,10 @@ type RolloutGuardSpec struct {
 	// +optional
 	// +kubebuilder:validation:MaxLength=253
 	DeploymentRef string `json:"deploymentRef,omitempty"`
-	// Strategy is a label, recorded and reported, nothing more. Attesta
-	// does not shift traffic: whatever the strategy, the Deployment does a
-	// standard rolling update, and the controller judges the new revision's
-	// pods as they take their share of traffic.
+	// Strategy is a label, recorded and reported, nothing more. Traffic
+	// shifting is set by canary; without it the Deployment does a standard
+	// rolling update, and the controller judges the new revision's pods as
+	// they take their share of traffic.
 	// +optional
 	// +kubebuilder:validation:Enum=rolling;canary;blue-green
 	Strategy string `json:"strategy,omitempty"`

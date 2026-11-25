@@ -1,0 +1,40 @@
+name: Demo capture
+
+# Records the terminal output shown in the README demo from a real run on
+# kind. scripts/demo/render.py draws docs/assets/attesta-demo.gif from the
+# uploaded capture.json.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["scripts/demo/capture.sh", ".github/workflows/demo.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    name: Capture the demo on kind
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.27.x"
+      - uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
+        with:
+          cluster_name: attesta-demo
+      - name: Build and load the controller and API images
+        run: |
+          docker build -f cmd/attesta-controller/Dockerfile --build-arg VERSION=demo -t attesta-controller:e2e .
+          docker build -f cmd/attesta-api/Dockerfile --build-arg VERSION=demo -t attesta-api:e2e .
+          kind load docker-image attesta-controller:e2e attesta-api:e2e --name attesta-demo
+      - name: Capture
+        run: CAPTURE="$PWD/capture.json" bash scripts/demo/capture.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: demo-capture
+          path: capture.json
+          if-no-files-found: ignore
